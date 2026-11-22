@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS providers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL UNIQUE,
+    proxy          TEXT NOT NULL DEFAULT '',
+    timeout_ms     INTEGER NOT NULL DEFAULT 120000,
+    keys_enc       TEXT NOT NULL DEFAULT '[]',
+    endpoints_json TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,

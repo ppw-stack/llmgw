@@ -10,6 +10,9 @@ server:
   secure_cookie: false
   # 可选：为 /metrics 设置访问令牌；留空则公开
   metrics_token: ""
+  # 上游 Key 的加密主密钥（base64 或 hex 的 32 字节）；留空则自动生成
+  # 到数据库目录的 master.key，务必与数据库一起备份
+  master_key: ""
   read_header_timeout: 10s
   shutdown_timeout: 30s
   max_body_bytes: 33554432

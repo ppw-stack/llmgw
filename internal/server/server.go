@@ -19,6 +19,7 @@ import (
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/ingress"
 	"github.com/pw/llmgw/internal/router"
+	"github.com/pw/llmgw/internal/secret"
 	"github.com/pw/llmgw/internal/store"
 	"github.com/pw/llmgw/internal/transport"
 )
@@ -27,6 +28,7 @@ type Options struct {
 	Router         *router.Router
 	Forwarder      *transport.Forwarder
 	Store          *store.Store
+	Box            *secret.Box
 	AdminToken     string
 	MetricsToken   string
 	SessionTTL     time.Duration
@@ -41,6 +43,7 @@ type Server struct {
 	router         *router.Router
 	forwarder      *transport.Forwarder
 	store          *store.Store
+	box            *secret.Box
 	adminToken     string
 	metricsToken   string
 	maxBody        int64
@@ -65,10 +68,22 @@ func New(o Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	box := o.Box
+	if box == nil {
+		// Tests may omit the box; generate an ephemeral one so provider APIs
+		// still work, while production always passes a persisted key.
+		key := make([]byte, 32)
+		_, _ = rand.Read(key)
+		box, err = secret.New(key)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Server{
 		router:         o.Router,
 		forwarder:      o.Forwarder,
 		store:          o.Store,
+		box:            box,
 		adminToken:     o.AdminToken,
 		metricsToken:   o.MetricsToken,
 		maxBody:        o.MaxBody,

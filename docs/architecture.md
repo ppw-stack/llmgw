@@ -138,14 +138,16 @@ Key 池状态（失效标记、轮询索引）按 `provider name` 迁移到新�
 
 ## 7. 数据库
 
-六张表：`providers` 不落库（来自配置），实际落库的是：
-
+- `providers`：供应商及其端点（上游 Key 为 AES-256-GCM 密文）
 - `api_keys`
+- `users`、`sessions`、`audit_logs`
 - `request_logs`
 - `usage_daily`
 - `settings`
 
-`providers` / `provider_endpoints` 仅存在于配置快照中，管理 API 只读展示。
+供应商在首次启动时从 `config.yaml` 导入，之后由控制台/管理 API 维护。`config.yaml` 的 `providers` 仅在数据库为空时生效。
+
+上游 Key 的加密主密钥来自 `server.master_key`，未配置时自动生成在数据库目录的 `master.key`（0600）。丢失该文件将无法解密已保存的上游 Key。
 
 ## 8. 目录与构建
 

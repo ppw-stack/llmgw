@@ -44,16 +44,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/keys/"):
 		s.adminKeyItem(w, r, id, strings.TrimPrefix(path, "/keys/"))
 	case path == "/providers":
-		if r.Method != http.MethodGet {
-			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		snap := s.router.Snapshot()
-		if snap == nil {
-			writeJSON(w, http.StatusOK, []any{})
-			return
-		}
-		writeJSON(w, http.StatusOK, snap.Providers)
+		s.adminProviders(w, r, id, "")
+	case strings.HasPrefix(path, "/providers/"):
+		s.adminProviders(w, r, id, strings.TrimPrefix(path, "/providers/"))
 	case path == "/logs":
 		s.adminLogs(w, r)
 	case path == "/usage":

@@ -18,6 +18,7 @@ import (
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/keypool"
 	"github.com/pw/llmgw/internal/router"
+	"github.com/pw/llmgw/internal/secret"
 	"github.com/pw/llmgw/internal/server"
 	"github.com/pw/llmgw/internal/store"
 	"github.com/pw/llmgw/internal/transport"
@@ -60,8 +61,41 @@ func main() {
 	}
 
 	rt := router.New()
-	if err := rt.Reload(cfg); err != nil {
+
+	box, err := masterKey(cfg, logger)
+	if err != nil {
+		logger.Error("master key", "err", err)
+		_ = st.Close()
+		os.Exit(1)
+	}
+	boxCipher, err := secret.New(box)
+	if err != nil {
+		logger.Error("init secret box", "err", err)
+		_ = st.Close()
+		os.Exit(1)
+	}
+
+	providers, err := st.Providers(boxCipher)
+	if err != nil {
+		logger.Error("load providers", "err", err)
+		_ = st.Close()
+		os.Exit(1)
+	}
+	if len(providers) == 0 && len(cfg.Providers) > 0 {
+		if err := st.ImportProviders(cfg.Providers, boxCipher); err != nil {
+			logger.Error("import providers from config", "err", err)
+			_ = st.Close()
+			os.Exit(1)
+		}
+		providers = cfg.Providers
+		logger.Info("imported providers from config.yaml", "count", len(providers))
+	}
+	effective := *cfg
+	effective.Providers = providers
+
+	if err := rt.Reload(&effective); err != nil {
 		logger.Error("invalid config", "err", err)
+		_ = st.Close()
 		os.Exit(1)
 	}
 
@@ -76,6 +110,7 @@ func main() {
 		Router:         rt,
 		Forwarder:      forwarder,
 		Store:          st,
+		Box:            boxCipher,
 		AdminToken:     adminToken,
 		MetricsToken:   cfg.Server.MetricsToken,
 		SessionTTL:     cfg.Server.SessionTTL.Value(),
@@ -106,7 +141,16 @@ func main() {
 		logger.Warn("clean expired sessions", "err", err)
 	}
 	go cleanupSessions(ctx, st, logger)
-	go watchConfig(ctx, *configPath, logger, rt)
+	go watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
+		dbProviders, err := st.Providers(boxCipher)
+		if err != nil {
+			return err
+		}
+		if len(dbProviders) > 0 {
+			c.Providers = dbProviders
+		}
+		return rt.Reload(c)
+	})
 
 	go func() {
 		logger.Info("gateway listening",
@@ -248,6 +292,24 @@ func bootstrapKey(st *store.Store, log *slog.Logger) {
 	fmt.Printf("[BOOTSTRAP] save it now; it is not shown again\n")
 }
 
+// masterKey returns the AES key used to encrypt upstream provider keys.
+func masterKey(cfg *config.Config, log *slog.Logger) ([]byte, error) {
+	if cfg.Server.MasterKey != "" {
+		return secret.ParseKey(cfg.Server.MasterKey)
+	}
+	path := filepath.Join(filepath.Dir(cfg.Database.Path), "master.key")
+	_, statErr := os.Stat(path)
+	key, err := secret.LoadOrCreateKey(path)
+	if err != nil {
+		return nil, err
+	}
+	if os.IsNotExist(statErr) {
+		log.Warn("generated a new master key; back it up or stored upstream keys cannot be decrypted",
+			"path", path)
+	}
+	return key, nil
+}
+
 // cleanupSessions periodically removes expired admin sessions.
 func cleanupSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 	ticker := time.NewTicker(time.Hour)
@@ -264,7 +326,7 @@ func cleanupSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 	}
 }
 
-func watchConfig(ctx context.Context, path string, log *slog.Logger, rt *router.Router) {
+func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(*config.Config) error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return
@@ -287,7 +349,7 @@ func watchConfig(ctx context.Context, path string, log *slog.Logger, rt *router.
 				log.Error("config reload failed; keeping previous config", "err", err)
 				continue
 			}
-			if err := rt.Reload(cfg); err != nil {
+			if err := apply(cfg); err != nil {
 				log.Error("config reload rejected; keeping previous config", "err", err)
 				continue
 			}

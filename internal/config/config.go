@@ -55,6 +55,7 @@ type Server struct {
 	AdminPassword     string   `yaml:"admin_password"`
 	AdminToken        string   `yaml:"admin_token"`
 	MetricsToken      string   `yaml:"metrics_token"`
+	MasterKey         string   `yaml:"master_key"`
 	SessionTTL        Duration `yaml:"session_ttl"`
 	SecureCookie      bool     `yaml:"secure_cookie"`
 	TrustedProxies    []string `yaml:"trusted_proxies"`
@@ -141,9 +142,11 @@ func (c *Config) normalize() error {
 	rawPassword := c.Server.AdminPassword
 	rawAdminToken := c.Server.AdminToken
 	rawMetricsToken := c.Server.MetricsToken
+	rawMasterKey := c.Server.MasterKey
 	c.Server.AdminPassword = expandEnv(rawPassword)
 	c.Server.AdminToken = expandEnv(rawAdminToken)
 	c.Server.MetricsToken = expandEnv(rawMetricsToken)
+	c.Server.MasterKey = expandEnv(rawMasterKey)
 	if strings.Contains(rawPassword, "${") && c.Server.AdminPassword == "" {
 		return fmt.Errorf("server.admin_password references an environment variable that is empty or unset")
 	}
@@ -152,6 +155,9 @@ func (c *Config) normalize() error {
 	}
 	if strings.Contains(rawMetricsToken, "${") && c.Server.MetricsToken == "" {
 		return fmt.Errorf("server.metrics_token references an environment variable that is empty or unset")
+	}
+	if strings.Contains(rawMasterKey, "${") && c.Server.MasterKey == "" {
+		return fmt.Errorf("server.master_key references an environment variable that is empty or unset")
 	}
 	if c.Server.Addr == "" {
 		c.Server.Addr = ":8080"
@@ -199,59 +205,72 @@ func (c *Config) normalize() error {
 	for pi := range c.Providers {
 		p := &c.Providers[pi]
 		p.Name = strings.TrimSpace(expandEnv(p.Name))
-		if p.Name == "" {
-			return fmt.Errorf("providers[%d]: name is required", pi)
-		}
 		if seen[p.Name] {
 			return fmt.Errorf("duplicate provider %q", p.Name)
 		}
 		seen[p.Name] = true
-		if p.Timeout == 0 {
-			p.Timeout = Duration(120 * time.Second)
-		}
 		for ki := range p.Keys {
 			p.Keys[ki] = expandEnv(strings.TrimSpace(p.Keys[ki]))
 		}
-		// Unset ${ENV} variables expand to "", which would otherwise be treated
-		// as a valid (empty) key. Drop them instead.
-		kept := p.Keys[:0]
-		for _, k := range p.Keys {
-			if k != "" {
-				kept = append(kept, k)
-			}
+		if err := NormalizeProvider(p); err != nil {
+			return err
 		}
-		p.Keys = kept
-		if len(p.Endpoints) == 0 {
-			return fmt.Errorf("provider %q: at least one endpoint is required", p.Name)
+	}
+	return nil
+}
+
+// NormalizeProvider applies defaults and validates one provider. It does not
+// expand environment variables; that is only meaningful for config.yaml input.
+func NormalizeProvider(p *Provider) error {
+	p.Name = strings.TrimSpace(p.Name)
+	if p.Name == "" {
+		return fmt.Errorf("provider name is required")
+	}
+	if p.Timeout == 0 {
+		p.Timeout = Duration(120 * time.Second)
+	}
+	kept := p.Keys[:0]
+	for _, k := range p.Keys {
+		if strings.TrimSpace(k) != "" {
+			kept = append(kept, strings.TrimSpace(k))
 		}
-		epSeen := map[string]bool{}
-		for ei := range p.Endpoints {
-			ep := &p.Endpoints[ei]
-			if ep.Name == "" {
-				ep.Name = ep.Protocol
-			}
-			if epSeen[ep.Name] {
-				return fmt.Errorf("provider %q: duplicate endpoint %q", p.Name, ep.Name)
-			}
-			epSeen[ep.Name] = true
-			switch ep.Protocol {
-			case ProtocolOpenAI, ProtocolAnthropic:
-			default:
-				return fmt.Errorf("provider %q endpoint %q: protocol must be %q or %q",
-					p.Name, ep.Name, ProtocolOpenAI, ProtocolAnthropic)
-			}
-			u, err := url.Parse(ep.BaseURL)
-			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-				return fmt.Errorf("provider %q endpoint %q: base_url must be an absolute http(s) URL, got %q",
-					p.Name, ep.Name, ep.BaseURL)
-			}
-			ep.BaseURL = strings.TrimRight(ep.BaseURL, "/")
-			if ep.Protocol == ProtocolAnthropic && ep.Version == "" {
-				ep.Version = "2023-06-01"
-			}
-			if len(ep.Models) == 0 {
-				return fmt.Errorf("provider %q endpoint %q: models must not be empty",
-					p.Name, ep.Name)
+	}
+	p.Keys = kept
+	if len(p.Endpoints) == 0 {
+		return fmt.Errorf("provider %q: at least one endpoint is required", p.Name)
+	}
+	epSeen := map[string]bool{}
+	for ei := range p.Endpoints {
+		ep := &p.Endpoints[ei]
+		ep.Name = strings.TrimSpace(ep.Name)
+		if ep.Name == "" {
+			ep.Name = ep.Protocol
+		}
+		if epSeen[ep.Name] {
+			return fmt.Errorf("provider %q: duplicate endpoint %q", p.Name, ep.Name)
+		}
+		epSeen[ep.Name] = true
+		switch ep.Protocol {
+		case ProtocolOpenAI, ProtocolAnthropic:
+		default:
+			return fmt.Errorf("provider %q endpoint %q: protocol must be %q or %q",
+				p.Name, ep.Name, ProtocolOpenAI, ProtocolAnthropic)
+		}
+		u, err := url.Parse(ep.BaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("provider %q endpoint %q: base_url must be an absolute http(s) URL, got %q",
+				p.Name, ep.Name, ep.BaseURL)
+		}
+		ep.BaseURL = strings.TrimRight(ep.BaseURL, "/")
+		if ep.Protocol == ProtocolAnthropic && ep.Version == "" {
+			ep.Version = "2023-06-01"
+		}
+		if len(ep.Models) == 0 {
+			return fmt.Errorf("provider %q endpoint %q: models must not be empty", p.Name, ep.Name)
+		}
+		for alias, upstream := range ep.Models {
+			if strings.TrimSpace(alias) == "" || strings.TrimSpace(upstream) == "" {
+				return fmt.Errorf("provider %q endpoint %q: model names must not be empty", p.Name, ep.Name)
 			}
 		}
 	}

@@ -144,6 +144,7 @@ GET /metrics    Prometheus
 ## 6. 备份与升级
 
 - 备份：停机或 `sqlite3 data/llmgw.db ".backup backup.db"`。WAL 模式下不要直接 `cp` 正在写入的库。
+- **同时备份 `master.key`**（或配置里的 `server.master_key`）。丢失它，数据库中已加密的上游 Key 将无法恢复。
 - 升级：替换二进制后重启。配置为热加载，但二进制升级需要重启。
 - 回滚：保留上一个二进制与 `config.yaml`。
 
@@ -224,7 +225,8 @@ server:
 
 - 网关 Key 仅存 SHA-256 哈希，明文只在创建时返回一次；泄露后请在控制台删除并重新创建。
 - 网关 Key 在进程内缓存，创建/停用/删除立即生效；启动时从数据库加载。
-- 上游 Key 来自环境变量，不写入数据库、不出现在任何 API 响应中。
+- 上游 Key 来自环境变量或控制台，AES-256-GCM 加密后写入数据库，不出现在任何 API 响应中（仅返回末四位掩码）。
+- 加密主密钥来自 `server.master_key` 或数据库目录的 `master.key`（0600）。请与数据库一起备份，并限制文件权限。
 - `/metrics` 未内置鉴权；公网暴露时请在反代层限制来源 IP 或加 Basic Auth。
 - 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - 建议定期轮换管理员密码（控制台“修改密码”）与上游 Key。

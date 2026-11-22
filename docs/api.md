@@ -106,22 +106,82 @@ PATCH /admin/api/keys/1
 DELETE /admin/api/keys/1    → 204
 ```
 
-## 供应商（只读，来自 config.yaml）
+## 供应商
+
+供应商保存在 SQLite 中，上游 Key 使用 AES-256-GCM 加密。控制台「供应商」页可直接增删改，保存后立即生效。
+
+### 列表
 
 ```
 GET /admin/api/providers
 
 200 [{
+  "id": 1,
   "name": "glm",
-  "endpoints": [
-    {"name":"openai","protocol":"openai","base_url":"https://...","models":{"glm-4.6":"glm-4.6"}},
-    {"name":"anthropic","protocol":"anthropic","base_url":"https://...","models":{"glm-4.6":"glm-4.6"}}
-  ],
-  "keys": 2
+  "proxy": "",
+  "timeout_ms": 120000,
+  "key_count": 2,
+  "key_hints": ["****a1b2", "****c3d4"],
+  "endpoints": [{
+    "name": "openai",
+    "protocol": "openai",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "version": "",
+    "models": {"glm-4.6": "glm-4.6"}
+  }]
 }]
 ```
 
-上游 Key 永不返回明文或哈希，只返回数量。
+上游 Key 只返回末四位掩码，永不返回明文。
+
+### 创建
+
+```
+POST /admin/api/providers
+{
+  "name": "glm",
+  "proxy": "",
+  "timeout_ms": 120000,
+  "keys": ["sk-real-upstream-key"],
+  "endpoints": [{
+    "name": "openai",
+    "protocol": "openai",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "models": {"glm-4.6": "glm-4.6"}
+  }]
+}
+
+201 <provider view>
+```
+
+校验失败返回 `400`；名称重复返回 `409`；与现有供应商在同一协议下模型冲突返回 `400`。
+
+### 更新
+
+```
+PUT /admin/api/providers/1
+{
+  "name": "glm",
+  "timeout_ms": 180000,
+  "endpoints": [...]
+}
+```
+
+- 省略 `keys` 字段：保留现有上游 Key。
+- 传 `"keys": []`：清空。
+- 传 `"keys": ["..."]`：整体替换。
+
+### 删除
+
+```
+DELETE /admin/api/providers/1   → 204
+```
+
+删除后该供应商的模型立即从路由中移除；引用它的请求返回 `404 model_not_found`。
+
+### 与 config.yaml 的关系
+
+首次启动且数据库中没有供应商时，会导入 `config.yaml` 的 `providers`（Key 加密后落库）。之后以数据库为准，`config.yaml` 的 `providers` 不再覆盖页面上的修改。
 
 ## 日志
 

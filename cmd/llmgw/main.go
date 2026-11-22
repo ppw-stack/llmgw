@@ -72,11 +72,12 @@ func main() {
 	keys := keypool.NewManager()
 	forwarder := transport.New(rt, st, keys, logger)
 
-	srv := server.New(server.Options{
+	srv, err := server.New(server.Options{
 		Router:         rt,
 		Forwarder:      forwarder,
 		Store:          st,
 		AdminToken:     adminToken,
+		MetricsToken:   cfg.Server.MetricsToken,
 		SessionTTL:     cfg.Server.SessionTTL.Value(),
 		SecureCookie:   cfg.Server.SecureCookie,
 		TrustedProxies: cfg.Server.TrustedPrefixes,
@@ -84,6 +85,11 @@ func main() {
 		Log:            logger,
 		UI:             webui.Handler(),
 	})
+	if err != nil {
+		logger.Error("initialize server", "err", err)
+		_ = st.Close()
+		os.Exit(1)
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -96,6 +102,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := st.DeleteExpiredSessions(); err != nil {
+		logger.Warn("clean expired sessions", "err", err)
+	}
+	go cleanupSessions(ctx, st, logger)
 	go watchConfig(ctx, *configPath, logger, rt)
 
 	go func() {
@@ -158,7 +168,9 @@ func ensureAdmin(cfg *config.Config, st *store.Store, log *slog.Logger) string {
 			} else if uerr := st.UpdatePassword(username, hash); uerr != nil {
 				log.Error("update admin password", "err", uerr)
 			} else {
-				log.Info("admin password reset from config", "username", username)
+				// A password reset must invalidate every existing session.
+				_ = st.DeleteSessionsForUser(username)
+				log.Info("admin password reset from config; all sessions revoked", "username", username)
 			}
 		}
 		return username
@@ -234,6 +246,22 @@ func bootstrapKey(st *store.Store, log *slog.Logger) {
 	}
 	fmt.Printf("[BOOTSTRAP] first gateway key: %s\n", plain)
 	fmt.Printf("[BOOTSTRAP] save it now; it is not shown again\n")
+}
+
+// cleanupSessions periodically removes expired admin sessions.
+func cleanupSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := st.DeleteExpiredSessions(); err != nil {
+				log.Warn("clean expired sessions", "err", err)
+			}
+		}
+	}
 }
 
 func watchConfig(ctx context.Context, path string, log *slog.Logger, rt *router.Router) {

@@ -31,12 +31,6 @@ type AuditEntry struct {
 	Result    string    `json:"result"`
 }
 
-func (s *Store) CountUsers() (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
-	return n, err
-}
-
 func (s *Store) UserByName(username string) (*User, error) {
 	var u User
 	var created, updated string
@@ -88,13 +82,14 @@ func (s *Store) CreateSession(tokenHash, username, ip, userAgent string, expires
 	return err
 }
 
-// SessionByHash returns a session only if it has not expired.
+// SessionByHash returns a session only if it has not expired. Expiry is
+// compared in Go rather than SQL because RFC3339Nano has variable precision
+// and therefore does not sort lexicographically.
 func (s *Store) SessionByHash(tokenHash string) (*Session, error) {
 	var sess Session
 	var expires string
 	err := s.db.QueryRow(`SELECT id, username, expires_at FROM sessions
-		WHERE token_hash=? AND expires_at > ?`,
-		tokenHash, time.Now().UTC().Format(time.RFC3339Nano)).
+		WHERE token_hash=?`, tokenHash).
 		Scan(&sess.ID, &sess.Username, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -103,6 +98,9 @@ func (s *Store) SessionByHash(tokenHash string) (*Session, error) {
 		return nil, err
 	}
 	sess.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+	if !time.Now().Before(sess.ExpiresAt) {
+		return nil, ErrNotFound
+	}
 	return &sess, nil
 }
 
@@ -131,9 +129,34 @@ func (s *Store) DeleteSessionsForUser(username string) error {
 }
 
 func (s *Store) DeleteExpiredSessions() error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at <= ?`,
-		time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	rows, err := s.db.Query(`SELECT id, expires_at FROM sessions`)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	var expired []int64
+	for rows.Next() {
+		var id int64
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return err
+		}
+		exp, err := time.Parse(time.RFC3339Nano, raw)
+		if err == nil && !now.Before(exp) {
+			expired = append(expired, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range expired {
+		if _, err := s.db.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Audit(e AuditEntry) error {

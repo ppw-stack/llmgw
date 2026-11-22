@@ -19,6 +19,7 @@ func Resolve(r *http.Request, trusted []netip.Prefix) string {
 	if err != nil {
 		return host
 	}
+	addr = addr.Unmap()
 	if !isTrusted(addr, trusted) {
 		return addr.String()
 	}
@@ -29,16 +30,21 @@ func Resolve(r *http.Request, trusted []netip.Prefix) string {
 		if raw == "" {
 			continue
 		}
-		if a, err := netip.ParseAddr(raw); err == nil {
-			if isTrusted(a, trusted) {
-				continue
-			}
-			return a.String()
+		a, err := netip.ParseAddr(raw)
+		if err != nil {
+			// Ignore malformed entries rather than trusting them.
+			continue
 		}
-		return raw
+		a = a.Unmap()
+		if isTrusted(a, trusted) {
+			continue
+		}
+		return a.String()
 	}
 	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
-		return real
+		if a, err := netip.ParseAddr(real); err == nil {
+			return a.Unmap().String()
+		}
 	}
 	return addr.String()
 }

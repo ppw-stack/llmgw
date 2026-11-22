@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -56,7 +57,7 @@ func record(c *capture, r *http.Request) {
 	})
 }
 
-func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string) (*httptest.Server, *store.Store, string) {
+func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string, opts ...func(*Options)) (*httptest.Server, *store.Store, string) {
 	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -99,17 +100,6 @@ func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []
 		t.Fatalf("reload router: %v", err)
 	}
 	fw := transport.New(rt, st, keypool.NewManager(), logger)
-	srv := New(Options{
-		Router:     rt,
-		Forwarder:  fw,
-		Store:      st,
-		AdminToken: "admin-test",
-		MaxBody:    1 << 20,
-		Log:        logger,
-		UI:         webui.Handler(),
-	})
-	gw := httptest.NewServer(srv.Handler())
-	t.Cleanup(gw.Close)
 
 	plain, hash, prefix, err := auth.Generate()
 	if err != nil {
@@ -118,6 +108,26 @@ func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []
 	if _, err := st.CreateKey("test", hash, prefix); err != nil {
 		t.Fatal(err)
 	}
+
+	srvOpts := Options{
+		Router:     rt,
+		Forwarder:  fw,
+		Store:      st,
+		AdminToken: "admin-test",
+		MaxBody:    1 << 20,
+		Log:        logger,
+		UI:         webui.Handler(),
+	}
+	for _, apply := range opts {
+		apply(&srvOpts)
+	}
+	srv, err := New(srvOpts)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	gw := httptest.NewServer(srv.Handler())
+	t.Cleanup(gw.Close)
+
 	return gw, st, plain
 }
 
@@ -343,8 +353,19 @@ func TestAuthFailures(t *testing.T) {
 	if err != nil || len(keys) == 0 {
 		t.Fatalf("list keys: %v", err)
 	}
-	if err := st.SetKeyEnabled(keys[0].ID, false); err != nil {
+	// Disable through the admin API so the in-memory auth cache is updated.
+	req, _ := http.NewRequest(http.MethodPatch,
+		gw.URL+"/admin/api/keys/"+strconv.FormatInt(keys[0].ID, 10),
+		strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer admin-test")
+	req.Header.Set("Content-Type", "application/json")
+	disableResp, err := http.DefaultClient.Do(req)
+	if err != nil {
 		t.Fatal(err)
+	}
+	disableResp.Body.Close()
+	if disableResp.StatusCode != http.StatusOK {
+		t.Fatalf("disable status = %d", disableResp.StatusCode)
 	}
 	resp = post(t, gw.URL+"/openai/v1/chat/completions", key,
 		`{"model":"gpt-test","messages":[]}`)

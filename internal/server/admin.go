@@ -97,6 +97,7 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 			writeAdminError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		s.keys.put(hash, *k)
 		s.audit(r, id.Username, "key.create", k.Prefix, "success")
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"id":         k.ID,
@@ -139,6 +140,7 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, id *adminI
 			writeAdminError(w, status, err.Error())
 			return
 		}
+		s.keys.setEnabled(keyID, *in.Enabled)
 		s.audit(r, id.Username, "key.update", strconv.FormatInt(keyID, 10), "success")
 		writeJSON(w, http.StatusOK, map[string]any{"id": keyID, "enabled": *in.Enabled})
 
@@ -151,6 +153,7 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, id *adminI
 			writeAdminError(w, status, err.Error())
 			return
 		}
+		s.keys.delete(keyID)
 		s.audit(r, id.Username, "key.delete", strconv.FormatInt(keyID, 10), "success")
 		w.WriteHeader(http.StatusNoContent)
 

@@ -58,3 +58,19 @@ func TestSingleIPTrusted(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestIPv4MappedPeerIsUnmapped(t *testing.T) {
+	trusted := prefixes(t, "127.0.0.1/32")
+	got := Resolve(req("[::ffff:127.0.0.1]:1234", "1.2.3.4"), trusted)
+	if got != "1.2.3.4" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMalformedForwardedEntriesAreIgnored(t *testing.T) {
+	trusted := prefixes(t, "10.0.0.0/8")
+	got := Resolve(req("10.0.0.5:1234", "not-an-ip, 1.2.3.4"), trusted)
+	if got != "1.2.3.4" {
+		t.Fatalf("got %q", got)
+	}
+}

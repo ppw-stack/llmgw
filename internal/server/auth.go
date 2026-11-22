@@ -40,6 +40,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	// bcrypt is deliberately expensive; cap concurrent attempts so a burst
+	// cannot pin every CPU core.
+	select {
+	case s.loginSem <- struct{}{}:
+		defer func() { <-s.loginSem }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeAdminError(w, http.StatusTooManyRequests, "too many concurrent login attempts")
+		return
+	}
+
 	ip := s.clientIP(r)
 	if !s.limiter.allow(ip) {
 		retry := int(s.limiter.retryAfter(ip).Seconds()) + 1

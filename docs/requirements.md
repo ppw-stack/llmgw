@@ -133,7 +133,7 @@ REST API：
 | NFR-02 | 吞吐 | 单实例 ≥ 2000 RPS（假上游，4C） |
 | NFR-03 | 内存 | 空载 < 100MB |
 | NFR-04 | 流式 | 逐事件 flush；TTFT 增量 < 5ms |
-| NFR-05 | 数据面 | 请求路径无数据库依赖，日志异步写 |
+| NFR-05 | 数据面 | 请求路径无数据库依赖：网关 Key 走内存缓存，日志异步批量写 |
 | NFR-06 | 安全 | 上游 Key 仅从配置/环境读取，不回显于任何接口；网关 Key 仅存哈希 |
 | NFR-07 | 兼容 | OpenAI/Anthropic 官方 SDK、Claude Code、Codex CLI 可直接指向 |
 | NFR-08 | 部署 | 单二进制（darwin/linux, amd64/arm64），无 cgo |
@@ -153,6 +153,11 @@ REST API：
 9. 客户端中途断开，上游在 1s 内取消（日志 `client_canceled`）。
 10. 改 `config.yaml` 后 1s 内生效，在途流式请求不受影响。
 11. `/metrics` 可读出请求数、延迟、token；日志队列满时丢弃计数递增且请求不受影响。
+12. 新建或停用网关 Key 立即生效，无需重启；停用后下一次请求即 `401`。
+13. 配置 `server.metrics_token` 后，未携带令牌访问 `/metrics` 返回 `401`。
+14. 上游响应超过 64 MiB 时返回 `502`，不会向客户端返回截断的 JSON。
+15. 流式上游在 `provider.timeout` 内无新数据时，连接被主动关闭并记录日志。
+16. 未上报 usage 的上游响应被标记 `usage_estimated=true` 并给出按字节估算的 token。
 
 ## 7. 里程碑
 

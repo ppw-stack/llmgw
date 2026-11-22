@@ -3,12 +3,17 @@
 ## 1. 构建
 
 ```bash
-make build            # 产出 bin/llmgw
+make build            # 只编译 Go，使用已提交的前端产物
+make build-all        # 重建前端并编译
 make test             # 单元测试 + race
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 make build
+make release          # 四个平台的发布包
 ```
 
-无 cgo 依赖（SQLite 使用 `modernc.org/sqlite`）。
+交叉编译（无 cgo）：
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 make build
+```
 
 ## 2. 配置
 
@@ -131,6 +136,9 @@ GET /metrics    Prometheus
 | `gw_upstream_errors_total{provider}` | 上游错误 |
 | `gw_log_dropped_total` | 日志队列溢出丢条数 |
 
+`/metrics` 默认公开。公网部署时设置 `server.metrics_token`，之后需以
+`Authorization: Bearer <token>` 或 `?token=<token>` 访问；也可在反代层限制来源 IP。
+
 日志为 JSON，一行一条，`request_id` 可与响应头 `X-Request-Id` 对应。
 
 ## 6. 备份与升级
@@ -169,8 +177,9 @@ proxy_set_header X-Accel-Buffering no;
 
 - 管理员账号存在 `users` 表，密码使用 bcrypt 哈希。
 - 登录成功后下发 `llmgw_session` Cookie：`HttpOnly`、`SameSite=Strict`，走 HTTPS 时自动带 `Secure`，默认 12 小时过期（`server.session_ttl`）。
-- 登录失败按客户端 IP 限速：5 分钟内最多 10 次，超出返回 `429`。
-- 修改密码后该用户的所有会话立即失效。
+- 登录失败按客户端 IP 限速：5 分钟内最多 10 次，超出返回 `429`；同时最多 4 个登录请求并发执行 bcrypt。
+- 修改密码后该用户的所有会话立即失效；通过 `server.admin_password` 重置密码同样会撤销全部会话。
+- 过期会话在启动时清理，并每小时清理一次。
 - 管理操作（登录、登出、改密、Key 增删改）写入 `audit_logs`，可在控制台或 `GET /admin/api/audit` 查看。
 - `server.admin_token` 仅作为脚本/兼容用途的可选 Bearer token；不配置即禁用。
 
@@ -214,6 +223,7 @@ server:
 ### 9.3 其他
 
 - 网关 Key 仅存 SHA-256 哈希，明文只在创建时返回一次；泄露后请在控制台删除并重新创建。
+- 网关 Key 在进程内缓存，创建/停用/删除立即生效；启动时从数据库加载。
 - 上游 Key 来自环境变量，不写入数据库、不出现在任何 API 响应中。
 - `/metrics` 未内置鉴权；公网暴露时请在反代层限制来源 IP 或加 Basic Auth。
 - 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。

@@ -7,10 +7,11 @@ import (
 
 // loginLimiter throttles failed admin login attempts per client IP.
 type loginLimiter struct {
-	mu       sync.Mutex
-	attempts map[string]*attemptRecord
-	window   time.Duration
-	max      int
+	mu         sync.Mutex
+	attempts   map[string]*attemptRecord
+	window     time.Duration
+	max        int
+	maxEntries int
 }
 
 type attemptRecord struct {
@@ -18,11 +19,15 @@ type attemptRecord struct {
 	reset time.Time
 }
 
-func newLoginLimiter(window time.Duration, max int) *loginLimiter {
+func newLoginLimiter(window time.Duration, max, maxEntries int) *loginLimiter {
+	if maxEntries <= 0 {
+		maxEntries = 10000
+	}
 	return &loginLimiter{
-		attempts: map[string]*attemptRecord{},
-		window:   window,
-		max:      max,
+		attempts:   map[string]*attemptRecord{},
+		window:     window,
+		max:        max,
+		maxEntries: maxEntries,
 	}
 }
 
@@ -43,12 +48,30 @@ func (l *loginLimiter) allow(key string) bool {
 func (l *loginLimiter) fail(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if len(l.attempts) >= l.maxEntries {
+		l.evictLocked()
+		if len(l.attempts) >= l.maxEntries {
+			// Refuse to grow unbounded; the global login semaphore still
+			// protects bcrypt from a flood.
+			return
+		}
+	}
 	rec, ok := l.attempts[key]
 	if !ok || time.Now().After(rec.reset) {
 		l.attempts[key] = &attemptRecord{count: 1, reset: time.Now().Add(l.window)}
 		return
 	}
 	rec.count++
+}
+
+// evictLocked drops records whose window has elapsed.
+func (l *loginLimiter) evictLocked() {
+	now := time.Now()
+	for key, rec := range l.attempts {
+		if now.After(rec.reset) {
+			delete(l.attempts, key)
+		}
+	}
 }
 
 func (l *loginLimiter) reset(key string) {

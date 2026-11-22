@@ -58,7 +58,7 @@ web/                       Vue 3 + Vite 控制台源码
 ## 3. 请求生命周期
 
 1. **归一化路径**，确定 `protocol`（`openai` | `anthropic`）。
-2. **鉴权**：从 `Authorization: Bearer` 或 `x-api-key` 取网关 Key，SHA-256 比对。
+2. **鉴权**：从 `Authorization: Bearer` 或 `x-api-key` 取网关 Key，SHA-256 后在内存缓存中比对（启动时加载，管理面变更时同步更新），请求路径不查库。
 3. **解析元数据**：只取 `model` 与 `stream`，用 `jsonparser` 流式读取，不反序列化整个 body。
 4. **路由**：`router.Resolve(protocol, model)` → `Target{EndpointID, ProviderID, UpstreamModel}`。
 5. **改写 body**：用 `sjson` 仅替换 `model`；OpenAI 流式请求注入 `stream_options.include_usage`。
@@ -72,7 +72,6 @@ web/                       Vue 3 + Vite 控制台源码
 ## 4. 关键实现约束
 
 ### 4.1 body 最小改写
-
 使用 `github.com/tidwall/sjson` 就地修改，保留其余字节。禁止 `map[string]any` 解码后重新编码，理由：丢数字精度、改字段顺序、丢未知字段。
 
 ### 4.2 鉴权头处理
@@ -116,7 +115,9 @@ req.Header.Set("anthropic-version", endpoint.Version) // Anthropic，默认 2023
 ## 5. 并发模型
 
 - 每个请求一个 goroutine，上游请求使用共享 `http.Transport`（连接池）。
+- 非流式请求受 `provider.timeout` 约束（context 总超时）；流式请求首包受 `ResponseHeaderTimeout` 约束，传输中由 idle watchdog 在超时后关闭上游连接。
 - 路由快照用 `atomic.Pointer[Snapshot]`，读路径无锁。
+- 网关 Key 用 `sync.RWMutex` 保护的内存缓存；SQLite 只承担启动加载、管理面写入与异步日志。
 - Key 池用 `atomic.Uint64` 轮询索引；失效状态用 `atomic.Bool`。
 - 日志写入：有界 channel（8192）+ 单写协程 + 批量事务；满则丢弃并 `gw_log_dropped_total++`。
 - 关闭顺序：停止接收新请求 → 等待在途请求（上限 30s）→ 冲刷日志队列 → 关闭 DB。
@@ -148,13 +149,14 @@ Key 池状态（失效标记、轮询索引）按 `provider name` 迁移到新�
 
 ## 8. 目录与构建
 
-```
-make web      # 构建前端到 internal/webui/dist
-make build    # 构建二进制（含内嵌控制台，注入版本信息）
-make test     # 单元测试 + race
-make run      # 本地启动（读取 config.yaml）
-make docker   # 构建容器镜像
-make release  # 跨平台发布包
+```bash
+make web        # 构建前端到 internal/webui/dist
+make build      # 编译二进制（使用已提交的前端产物）
+make build-all  # 重建前端并编译
+make test       # 单元测试 + race
+make run        # 本地启动（读取 config.yaml）
+make docker     # 构建容器镜像
+make release    # 跨平台发布包
 ```
 
 无 cgo：`modernc.org/sqlite`。交叉编译：

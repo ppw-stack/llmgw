@@ -54,6 +54,7 @@ type Server struct {
 	AdminUsername     string   `yaml:"admin_username"`
 	AdminPassword     string   `yaml:"admin_password"`
 	AdminToken        string   `yaml:"admin_token"`
+	MetricsToken      string   `yaml:"metrics_token"`
 	SessionTTL        Duration `yaml:"session_ttl"`
 	SecureCookie      bool     `yaml:"secure_cookie"`
 	TrustedProxies    []string `yaml:"trusted_proxies"`
@@ -137,8 +138,21 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) normalize() error {
-	c.Server.AdminPassword = expandEnv(c.Server.AdminPassword)
-	c.Server.AdminToken = expandEnv(c.Server.AdminToken)
+	rawPassword := c.Server.AdminPassword
+	rawAdminToken := c.Server.AdminToken
+	rawMetricsToken := c.Server.MetricsToken
+	c.Server.AdminPassword = expandEnv(rawPassword)
+	c.Server.AdminToken = expandEnv(rawAdminToken)
+	c.Server.MetricsToken = expandEnv(rawMetricsToken)
+	if strings.Contains(rawPassword, "${") && c.Server.AdminPassword == "" {
+		return fmt.Errorf("server.admin_password references an environment variable that is empty or unset")
+	}
+	if strings.Contains(rawAdminToken, "${") && c.Server.AdminToken == "" {
+		return fmt.Errorf("server.admin_token references an environment variable that is empty or unset")
+	}
+	if strings.Contains(rawMetricsToken, "${") && c.Server.MetricsToken == "" {
+		return fmt.Errorf("server.metrics_token references an environment variable that is empty or unset")
+	}
 	if c.Server.Addr == "" {
 		c.Server.Addr = ":8080"
 	}
@@ -227,8 +241,8 @@ func (c *Config) normalize() error {
 					p.Name, ep.Name, ProtocolOpenAI, ProtocolAnthropic)
 			}
 			u, err := url.Parse(ep.BaseURL)
-			if err != nil || u.Scheme == "" || u.Host == "" {
-				return fmt.Errorf("provider %q endpoint %q: invalid base_url %q",
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return fmt.Errorf("provider %q endpoint %q: base_url must be an absolute http(s) URL, got %q",
 					p.Name, ep.Name, ep.BaseURL)
 			}
 			ep.BaseURL = strings.TrimRight(ep.BaseURL, "/")

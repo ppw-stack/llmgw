@@ -8,6 +8,8 @@ server:
   trusted_proxies: ["127.0.0.1/32", "::1/128"]
   # 反代未传 X-Forwarded-Proto 时，可强制 Cookie 带 Secure
   secure_cookie: false
+  # 可选：为 /metrics 设置访问令牌；留空则公开
+  metrics_token: ""
   read_header_timeout: 10s
   shutdown_timeout: 30s
   max_body_bytes: 33554432

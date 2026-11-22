@@ -33,9 +33,11 @@ func lookup(pricing map[string]config.Price, model string) (config.Price, bool) 
 	if p, ok := pricing[model]; ok {
 		return p, true
 	}
+	// Fall back to the longest prefix that ends on a model-name boundary, so
+	// "gpt-4" does not accidentally price "gpt-4o".
 	best := ""
 	for name := range pricing {
-		if strings.HasPrefix(model, name) && len(name) > len(best) {
+		if hasModelPrefix(model, name) && len(name) > len(best) {
 			best = name
 		}
 	}
@@ -43,4 +45,16 @@ func lookup(pricing map[string]config.Price, model string) (config.Price, bool) 
 		return config.Price{}, false
 	}
 	return pricing[best], true
+}
+
+func hasModelPrefix(model, name string) bool {
+	if len(model) <= len(name) || !strings.HasPrefix(model, name) {
+		return false
+	}
+	switch model[len(name)] {
+	case '-', ':', '/':
+		return true
+	default:
+		return false
+	}
 }

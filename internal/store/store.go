@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/pw/llmgw/internal/observ"
@@ -156,8 +155,8 @@ type Store struct {
 	db      *sql.DB
 	logs    chan LogEntry
 	done    chan struct{}
-	closed  atomic.Bool
-	dropped atomic.Uint64
+	closeMu sync.RWMutex
+	closed  bool
 	log     *slog.Logger
 }
 
@@ -193,15 +192,18 @@ func ensureDir(path string) error {
 	return os.MkdirAll(dir, 0o755)
 }
 
-func (s *Store) DB() *sql.DB { return s.db }
-
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *Store) Close() error {
-	if !s.closed.CompareAndSwap(false, true) {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
 		return nil
 	}
+	s.closed = true
 	close(s.logs)
+	s.closeMu.Unlock()
+
 	<-s.done
 	return s.db.Close()
 }
@@ -212,6 +214,42 @@ func (s *Store) CountKeys() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM api_keys`).Scan(&n)
 	return n, err
+}
+
+// KeyRecord pairs a stored hash with its public key metadata. It is only used
+// to warm the in-process authentication cache.
+type KeyRecord struct {
+	Hash string
+	Key  APIKey
+}
+
+func (s *Store) KeyRecords() ([]KeyRecord, error) {
+	rows, err := s.db.Query(`SELECT key_hash, id, name, prefix, enabled, created_at, last_used_at
+		FROM api_keys`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeyRecord
+	for rows.Next() {
+		var rec KeyRecord
+		var enabled int
+		var created string
+		var last sql.NullString
+		if err := rows.Scan(&rec.Hash, &rec.Key.ID, &rec.Key.Name, &rec.Key.Prefix,
+			&enabled, &created, &last); err != nil {
+			return nil, err
+		}
+		rec.Key.Enabled = enabled == 1
+		rec.Key.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if last.Valid {
+			if t, err := time.Parse(time.RFC3339Nano, last.String); err == nil {
+				rec.Key.LastUsedAt = &t
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) CreateKey(name, hash, prefix string) (*APIKey, error) {
@@ -320,7 +358,9 @@ var lastTouch sync.Map
 
 // Enqueue never blocks. It reports whether the entry was accepted.
 func (s *Store) Enqueue(e LogEntry) bool {
-	if s.closed.Load() {
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
 		return false
 	}
 	select {
@@ -552,12 +592,6 @@ func (s *Store) GetSetting(key string) (string, error) {
 		return "", ErrNotFound
 	}
 	return v, err
-}
-
-func (s *Store) SetSetting(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
-	return err
 }
 
 var ErrNotFound = errors.New("not found")

@@ -28,6 +28,7 @@ type Options struct {
 	Forwarder      *transport.Forwarder
 	Store          *store.Store
 	AdminToken     string
+	MetricsToken   string
 	SessionTTL     time.Duration
 	SecureCookie   bool
 	TrustedProxies []netip.Prefix
@@ -41,6 +42,7 @@ type Server struct {
 	forwarder      *transport.Forwarder
 	store          *store.Store
 	adminToken     string
+	metricsToken   string
 	maxBody        int64
 	log            *slog.Logger
 	ui             http.Handler
@@ -48,28 +50,37 @@ type Server struct {
 	secureCookie   bool
 	trustedProxies []netip.Prefix
 	limiter        *loginLimiter
+	keys           *keyCache
+	loginSem       chan struct{}
 }
 
-func New(o Options) *Server {
+func New(o Options) (*Server, error) {
 	if o.MaxBody <= 0 {
 		o.MaxBody = 32 << 20
 	}
 	if o.SessionTTL <= 0 {
 		o.SessionTTL = 12 * time.Hour
 	}
+	cache, err := newKeyCache(o.Store)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		router:         o.Router,
 		forwarder:      o.Forwarder,
 		store:          o.Store,
 		adminToken:     o.AdminToken,
+		metricsToken:   o.MetricsToken,
 		maxBody:        o.MaxBody,
 		log:            o.Log,
 		ui:             o.UI,
 		sessionTTL:     o.SessionTTL,
 		secureCookie:   o.SecureCookie,
 		trustedProxies: o.TrustedProxies,
-		limiter:        newLoginLimiter(5*time.Minute, 10),
-	}
+		limiter:        newLoginLimiter(5*time.Minute, 10, 10000),
+		keys:           cache,
+		loginSem:       make(chan struct{}, 4),
+	}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -86,7 +97,7 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/readyz", s.handleReady)
-	mux.Handle("/metrics", metricsHandler())
+	mux.Handle("/metrics", s.metricsHandler())
 	mux.HandleFunc("/admin/api/", s.handleAdmin)
 	mux.HandleFunc("/", s.handleRoot)
 	return securityHeaders(s.recoverer(s.withRequestID(normalizePath(mux))))
@@ -125,7 +136,7 @@ type requestIDKey struct{}
 
 func (s *Server) withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-Id")
+		id := validRequestID(r.Header.Get("X-Request-Id"))
 		if id == "" {
 			buf := make([]byte, 8)
 			_, _ = rand.Read(buf)
@@ -135,6 +146,22 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), requestIDKey{}, id)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// validRequestID accepts only short, header-safe client supplied IDs.
+func validRequestID(v string) string {
+	if len(v) < 8 || len(v) > 128 {
+		return ""
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return ""
+		}
+	}
+	return v
 }
 
 func requestID(r *http.Request) string {
@@ -249,7 +276,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 		return
 	}
 
-	go s.store.TouchKey(key.ID)
+	s.store.TouchKey(key.ID)
 
 	s.forwarder.Forward(w, r, transport.Request{
 		Protocol:  protocol,
@@ -293,21 +320,18 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, protocol s
 			"missing gateway key; send Authorization: Bearer sk-gw-... or x-api-key: sk-gw-...")
 		return nil, false
 	}
-	k, err := s.store.KeyByHash(auth.Hash(raw))
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "invalid gateway key")
-			return nil, false
-		}
-		s.log.Error("lookup gateway key", "err", err)
-		ingress.WriteError(w, protocol, http.StatusInternalServerError, "api_error", "internal error")
+	// Authentication is served from memory; the database is only consulted at
+	// startup and by admin mutations.
+	k, ok := s.keys.get(auth.Hash(raw))
+	if !ok {
+		ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "invalid gateway key")
 		return nil, false
 	}
 	if !k.Enabled {
 		ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "gateway key is disabled")
 		return nil, false
 	}
-	return k, true
+	return &k, true
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {

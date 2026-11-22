@@ -165,14 +165,15 @@ make release   # dist/llmgw_<version>_{darwin,linux}_{amd64,arm64}.tar.gz + chec
 ## 开发
 
 ```bash
-make web       # 只重建前端（产物写入 internal/webui/dist）
-make build     # 重建前端 + 编译二进制
-make test      # go test -race ./...
+make build      # 只编译 Go，使用已提交的前端产物
+make build-all  # 重建前端 + 编译（改过 web/ 后用这个）
+make web        # 只重建前端
+make test       # go test -race ./...
 make vet
-make run       # 读取 ./config.yaml
+make run        # 读取 ./config.yaml
 ```
 
-修改 `web/` 下的任何文件后，必须执行 `make web`（或 `make build`）才会嵌入新产物。
+修改 `web/` 下的任何文件后，必须执行 `make build-all`（或先 `make web` 再 `make build`）才会嵌入新产物。
 前端开发时可用 `cd web && npm run dev`，Vite 会把 `/admin/api` 代理到 `localhost:8080`。
 
 依赖：Go 1.26+、Node 20+，无 cgo（SQLite 使用 `modernc.org/sqlite`）。

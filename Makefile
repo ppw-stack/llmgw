@@ -1,4 +1,4 @@
-.PHONY: build web test run fmt vet clean docker release
+.PHONY: build build-all web test run fmt vet clean docker release
 
 BIN := bin/llmgw
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -10,9 +10,12 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.dat
 web:
 	cd web && npm run build
 
-build: web
+build:
 	@mkdir -p bin
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/llmgw
+
+# Rebuild the console and the binary together.
+build-all: web build
 
 test:
 	go test -race ./...

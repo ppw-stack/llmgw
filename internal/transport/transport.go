@@ -55,6 +55,11 @@ type Request struct {
 	RequestID string
 }
 
+const maxUpstreamResponseDefault = 64 << 20
+
+// variable so tests can lower the limit without allocating 64 MiB.
+var maxUpstreamResponse int64 = maxUpstreamResponseDefault
+
 func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) {
 	start := time.Now()
 	observ.Inflight.Inc()
@@ -80,12 +85,21 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 	client := f.clientFor(in.Target)
 	upstreamURL := upstreamURL(in.Target)
 
+	// Non-streaming calls are bounded by the provider timeout. Streaming calls
+	// use ResponseHeaderTimeout plus an idle watchdog in streamSSE.
+	ctx := r.Context()
+	if !in.Meta.Stream {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, in.Target.Timeout)
+		defer cancel()
+	}
+
 	var resp *http.Response
 	var lastErr error
 
 	lastKeyIndex := -1
 	send := func(payload []byte) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +186,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 	streaming := in.Meta.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300
 
 	if !streaming {
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponse+1))
 		if err != nil {
 			status, code := classifyError(err)
 			f.log.Warn("read upstream body", "request_id", in.RequestID, "err", err.Error())
@@ -180,8 +194,16 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 			f.record(in, status, start, 0, acc, code)
 			return
 		}
+		if len(raw) > int(maxUpstreamResponse) {
+			ingress.WriteError(w, in.Protocol, http.StatusBadGateway, "api_error",
+				"upstream response exceeded 64 MiB")
+			f.record(in, http.StatusBadGateway, start, 0, usageAcc{estimated: true}, "upstream_response_too_large")
+			return
+		}
 		acc.observeBody(in.Protocol, raw)
 		if !acc.seen && resp.StatusCode < 300 {
+			acc.prompt = estimateTokens(len(body))
+			acc.completion = estimateTokens(len(raw))
 			acc.estimated = true
 		}
 		writeRaw(w, resp, raw, in.RequestID)
@@ -196,28 +218,45 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 	w.Header().Set("X-Request-Id", in.RequestID)
 	w.WriteHeader(resp.StatusCode)
 
-	ttft, writeErr := streamSSE(w, resp.Body, in.Protocol, &acc, start)
+	ttft, written, writeErr := streamSSE(w, resp.Body, in.Protocol, &acc, start, in.Target.Timeout)
 	if writeErr != nil {
 		f.log.Debug("stream interrupted", "request_id", in.RequestID, "err", writeErr.Error())
 	}
 	if !acc.seen {
+		acc.prompt = estimateTokens(len(body))
+		acc.completion = estimateTokens(int(written))
 		acc.estimated = true
 	}
 	f.record(in, resp.StatusCode, start, ttft, acc, responseCode(resp.StatusCode))
 }
 
 // streamSSE forwards upstream bytes untouched while observing usage events.
-func streamSSE(w http.ResponseWriter, body io.Reader, protocol string, acc *usageAcc, start time.Time) (time.Duration, error) {
+func streamSSE(w http.ResponseWriter, body io.ReadCloser, protocol string, acc *usageAcc, start time.Time, idle time.Duration) (time.Duration, int64, error) {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReaderSize(body, 32<<10)
 	var ttft time.Duration
+	var written int64
 	wrote := false
+
+	// If the upstream stops sending bytes, close the body so the read returns
+	// instead of holding the goroutine forever.
+	var idleTimer *time.Timer
+	if idle > 0 {
+		idleTimer = time.AfterFunc(idle, func() { _ = body.Close() })
+		defer idleTimer.Stop()
+	}
+
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if idleTimer != nil {
+				idleTimer.Reset(idle)
+			}
 			acc.observeLine(protocol, line)
-			if _, werr := w.Write(line); werr != nil {
-				return ttft, werr
+			n, werr := w.Write(line)
+			written += int64(n)
+			if werr != nil {
+				return ttft, written, werr
 			}
 			if !wrote && isDataLine(line) {
 				wrote = true
@@ -232,11 +271,20 @@ func streamSSE(w http.ResponseWriter, body io.Reader, protocol string, acc *usag
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return ttft, nil
+				return ttft, written, nil
 			}
-			return ttft, err
+			return ttft, written, err
 		}
 	}
+}
+
+// estimateTokens is a deliberately rough fallback when the upstream does not
+// report usage. Four bytes per token is the usual English approximation.
+func estimateTokens(bytes int) int64 {
+	if bytes <= 0 {
+		return 0
+	}
+	return int64((bytes + 3) / 4)
 }
 
 func isDataLine(line []byte) bool {
@@ -344,7 +392,9 @@ var hopHeaders = map[string]bool{
 
 func copyRequestHeaders(dst, src http.Header) {
 	for k, vs := range src {
-		if hopHeaders[k] || k == "Content-Length" || k == "Host" {
+		// Accept-Encoding is dropped so the transport negotiates gzip itself
+		// and hands us a decoded body we can inspect for usage.
+		if hopHeaders[k] || k == "Content-Length" || k == "Host" || k == "Accept-Encoding" {
 			continue
 		}
 		for _, v := range vs {

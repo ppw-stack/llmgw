@@ -39,6 +39,17 @@ function supports(inst: Instance, upstream: string): boolean {
   return upstream === '' || inst.models.includes(upstream);
 }
 
+/**
+ * 当前表单是否无解：没有接入点，或没有任何接入点声明支持这个上游名。
+ * 这两种情况下候选下拉框会整体不可选，必须给出明确提示。
+ */
+const missingSupport = computed<boolean>(() => {
+  if (!instances.value.length) return true;
+  const upstream = currentUpstream.value;
+  if (!upstream) return false;
+  return !instances.value.some((inst) => inst.models.includes(upstream));
+});
+
 function instanceByName(name: string): Instance | null {
   return instances.value.find((i) => i.name === name) ?? null;
 }
@@ -304,6 +315,17 @@ onMounted(() => {
             <span class="field-caption">
               候选接入点（优先级数字越小越优先，主接入点失败后自动切换到下一个）
             </span>
+            <p v-if="missingSupport" class="error small">
+              <template v-if="!instances.length">
+                还没有上游接入点，请先到「上游接入点」页创建一个。
+              </template>
+              <template v-else>
+                没有接入点声明支持
+                <code>{{
+                  currentUpstream
+                }}</code>，请先到「上游接入点」页补充它的「支持的模型」，或把上游模型名改成已声明的名字。
+              </template>
+            </p>
             <div v-for="(row, index) in editing.candidates" :key="index">
               <div class="row">
                 <label class="visually-hidden" :for="`model-candidate-instance-${index}`">

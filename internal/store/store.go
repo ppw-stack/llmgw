@@ -3,14 +3,17 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/observ"
 	_ "modernc.org/sqlite"
 )
@@ -69,14 +72,15 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 CREATE TABLE IF NOT EXISTS providers (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    name           TEXT NOT NULL UNIQUE,
-    proxy          TEXT NOT NULL DEFAULT '',
-    timeout_ms     INTEGER NOT NULL DEFAULT 120000,
-    keys_enc       TEXT NOT NULL DEFAULT '[]',
-    endpoints_json TEXT NOT NULL,
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT NOT NULL UNIQUE,
+    preset            TEXT NOT NULL DEFAULT '',
+    key_enc           TEXT NOT NULL DEFAULT '',
+    models_json       TEXT NOT NULL DEFAULT '{}',
+    openai_base_url   TEXT NOT NULL DEFAULT '',
+    anthropic_base_url TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -185,6 +189,10 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrateProviders(db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate providers: %w", err)
+	}
 	s := &Store{
 		db:   db,
 		logs: make(chan LogEntry, 8192),
@@ -201,6 +209,170 @@ func ensureDir(path string) error {
 		return nil
 	}
 	return os.MkdirAll(dir, 0o755)
+}
+
+// migrateProviders converts the pre-preset table (keys_enc + endpoints_json)
+// into the single-key, preset-aware shape. Extra keys, per-provider timeouts
+// and proxies are dropped with a warning instead of failing the upgrade.
+func migrateProviders(db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(db, "providers")
+	if err != nil {
+		return err
+	}
+	if !cols["endpoints_json"] {
+		return nil
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+
+	type legacyRow struct {
+		id            int64
+		name          string
+		proxy         string
+		timeoutMS     int
+		keysJSON      string
+		endpointsJSON string
+		created       string
+		updated       string
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`ALTER TABLE providers RENAME TO providers_legacy`); err != nil {
+		return err
+	}
+	// Re-run the schema: every other table already exists, so this only
+	// recreates providers in its new shape.
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(`SELECT id, name, proxy, timeout_ms, keys_enc, endpoints_json,
+		created_at, updated_at FROM providers_legacy ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	var legacy []legacyRow
+	for rows.Next() {
+		var r legacyRow
+		if err := rows.Scan(&r.id, &r.name, &r.proxy, &r.timeoutMS,
+			&r.keysJSON, &r.endpointsJSON, &r.created, &r.updated); err != nil {
+			rows.Close()
+			return err
+		}
+		legacy = append(legacy, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, r := range legacy {
+		spec := convertLegacyProvider(r.name, r.proxy, r.timeoutMS, r.keysJSON, r.endpointsJSON, log)
+		modelsJSON, err := json.Marshal(spec.Models)
+		if err != nil {
+			return err
+		}
+		if spec.Models == nil {
+			modelsJSON = []byte("{}")
+		}
+		if _, err := tx.Exec(`INSERT INTO providers(id, name, preset, key_enc, models_json,
+			openai_base_url, anthropic_base_url, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)`,
+			r.id, spec.Name, spec.Preset, spec.EncryptedKey, string(modelsJSON),
+			spec.OpenAIBaseURL, spec.AnthropicBaseURL, r.created, r.updated); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DROP TABLE providers_legacy`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Info("migrated providers to the preset-aware schema", "count", len(legacy))
+	return nil
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			dataTyp string
+			notNull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &dataTyp, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
+}
+
+type legacyEndpoint struct {
+	Protocol string            `json:"protocol"`
+	BaseURL  string            `json:"base_url"`
+	Models   map[string]string `json:"models"`
+}
+
+func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpointsJSON string,
+	log *slog.Logger) ProviderSpec {
+	spec := ProviderSpec{Name: name}
+	var keys []string
+	if keysJSON != "" {
+		_ = json.Unmarshal([]byte(keysJSON), &keys)
+	}
+	if len(keys) > 0 {
+		spec.EncryptedKey = keys[0]
+	}
+	if len(keys) > 1 {
+		log.Warn("provider migration: only the first upstream key is kept",
+			"provider", name, "dropped", len(keys)-1)
+	}
+	if proxy != "" || (timeoutMS > 0 && timeoutMS != int(config.DefaultTimeout/time.Millisecond)) {
+		log.Warn("provider migration: per-provider proxy/timeout removed",
+			"provider", name, "proxy", proxy, "timeout_ms", timeoutMS)
+	}
+	var endpoints []legacyEndpoint
+	if endpointsJSON != "" {
+		_ = json.Unmarshal([]byte(endpointsJSON), &endpoints)
+	}
+	models := config.Models{}
+	for _, ep := range endpoints {
+		switch ep.Protocol {
+		case config.ProtocolOpenAI:
+			spec.OpenAIBaseURL = strings.TrimRight(ep.BaseURL, "/")
+		case config.ProtocolAnthropic:
+			spec.AnthropicBaseURL = strings.TrimRight(ep.BaseURL, "/")
+		}
+		for alias, upstream := range ep.Models {
+			if prev, ok := models[alias]; ok && prev != upstream {
+				log.Warn("provider migration: model alias maps to different upstream names; keeping the first",
+					"provider", name, "model", alias, "kept", prev, "dropped", upstream)
+				continue
+			}
+			models[alias] = upstream
+		}
+	}
+	if len(models) > 0 {
+		spec.Models = models
+	}
+	return spec
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

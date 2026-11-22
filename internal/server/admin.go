@@ -47,6 +47,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminProviders(w, r, id, "")
 	case strings.HasPrefix(path, "/providers/"):
 		s.adminProviders(w, r, id, strings.TrimPrefix(path, "/providers/"))
+	case path == "/provider-presets":
+		s.adminProviderPresets(w, r)
 	case path == "/logs":
 		s.adminLogs(w, r)
 	case path == "/usage":

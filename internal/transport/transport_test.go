@@ -13,22 +13,22 @@ import (
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/ingress"
-	"github.com/pw/llmgw/internal/keypool"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
 )
 
 func newForwarder(t *testing.T, upstream string, timeout time.Duration) (*Forwarder, *store.Store, router.Target) {
 	t.Helper()
+	old := upstreamTimeout
+	upstreamTimeout = timeout
+	t.Cleanup(func() { upstreamTimeout = old })
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := &config.Config{Providers: []config.Provider{{
-		Name:    "p",
-		Keys:    []string{"upstream-key"},
-		Timeout: config.Duration(timeout),
-		Endpoints: []config.Endpoint{{
-			Name: "openai", Protocol: config.ProtocolOpenAI, BaseURL: upstream,
-			Models: map[string]string{"m": "upstream-m"},
-		}},
+		Name:          "p",
+		APIKey:        "upstream-key",
+		Models:        config.Models{"m": "upstream-m"},
+		OpenAIBaseURL: upstream,
 	}}}
 	rt := router.New()
 	if err := rt.Reload(cfg); err != nil {
@@ -43,7 +43,7 @@ func newForwarder(t *testing.T, upstream string, timeout time.Duration) (*Forwar
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(rt, st, keypool.NewManager(), logger), st, target
+	return New(rt, st, logger), st, target
 }
 
 func TestCopyRequestHeadersDropsAcceptEncoding(t *testing.T) {
@@ -134,6 +134,38 @@ func TestStreamIdleTimeout(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "content") {
 		t.Fatalf("first event was not forwarded: %s", rec.Body.String())
+	}
+}
+
+func TestUpstreamAuthErrorIsPassedThrough(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad upstream key"}}`)
+	}))
+	defer upstream.Close()
+
+	fw, _, target := newForwarder(t, upstream.URL, 5*time.Second)
+	body := []byte(`{"model":"m","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	fw.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Meta:      ingress.Meta{Model: "m", RawBody: body},
+		Target:    target,
+		APIKeyID:  1,
+		RequestID: "req",
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no key rotation)", calls)
+	}
+	if !strings.Contains(rec.Body.String(), "bad upstream key") {
+		t.Fatalf("body not passed through: %s", rec.Body.String())
 	}
 }
 

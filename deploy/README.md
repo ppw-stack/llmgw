@@ -49,11 +49,11 @@ curl -b /tmp/llmgw-cookies -H 'Content-Type: application/json' \
 
 ## 可用的模型
 
-| 模型 | 协议 | 说明 |
+| 模型 | 入口 | 说明 |
 |---|---|---|
-| `gpt-test` | OpenAI | 正常响应，带 usage |
-| `gpt-alias` | OpenAI | 对外名映射为上游 `gpt-upstream-name` |
-| `claude-test` | Anthropic | 正常响应，带 usage |
+| `gpt-test` | 两个入口 | 正常响应，带 usage |
+| `gpt-alias` | 两个入口 | 对外名映射为上游 `gpt-upstream-name` |
+| `claude-test` | 两个入口 | 正常响应，带 usage |
 
 mock 支持 `stream: true`，两种协议的 SSE 事件都完整。
 

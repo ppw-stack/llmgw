@@ -16,7 +16,6 @@ import (
 
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/config"
-	"github.com/pw/llmgw/internal/keypool"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/secret"
 	"github.com/pw/llmgw/internal/server"
@@ -103,8 +102,7 @@ func main() {
 	adminToken := legacyAdminToken(cfg, st, logger)
 	bootstrapKey(st, logger)
 
-	keys := keypool.NewManager()
-	forwarder := transport.New(rt, st, keys, logger)
+	forwarder := transport.New(rt, st, logger)
 
 	srv, err := server.New(server.Options{
 		Router:         rt,

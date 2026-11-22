@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"sync/atomic"
-	"time"
 
 	"github.com/pw/llmgw/internal/config"
 )
@@ -23,23 +22,7 @@ type Target struct {
 	BaseURL       string
 	Version       string
 	UpstreamModel string
-	Timeout       time.Duration
-	ProviderIndex int
-	Keys          []string
-	Proxy         string
-}
-
-type EndpointView struct {
-	Name     string            `json:"name"`
-	Protocol string            `json:"protocol"`
-	BaseURL  string            `json:"base_url"`
-	Models   map[string]string `json:"models"`
-}
-
-type ProviderView struct {
-	Name      string         `json:"name"`
-	Keys      int            `json:"keys"`
-	Endpoints []EndpointView `json:"endpoints"`
+	Key           string
 }
 
 // Snapshot is an immutable routing table swapped atomically on reload.
@@ -47,7 +30,6 @@ type Snapshot struct {
 	Version          uint64
 	Config           *config.Config
 	Index            map[Key]Target
-	Providers        []ProviderView
 	ModelsByProtocol map[string][]string
 }
 
@@ -74,53 +56,51 @@ func (r *Router) Reload(cfg *config.Config) error {
 // Build compiles a snapshot without installing it.
 func Build(cfg *config.Config) (*Snapshot, error) {
 	idx := make(map[Key]Target)
-	providers := make([]ProviderView, 0, len(cfg.Providers))
 	models := map[string]map[string]struct{}{}
 
 	for pi := range cfg.Providers {
 		p := &cfg.Providers[pi]
-		pv := ProviderView{Name: p.Name, Keys: len(p.Keys)}
-		for ei := range p.Endpoints {
-			ep := &p.Endpoints[ei]
-			switch ep.Protocol {
-			case config.ProtocolOpenAI, config.ProtocolAnthropic:
-			default:
-				return nil, fmt.Errorf("provider %q endpoint %q: unsupported protocol %q",
-					p.Name, ep.Name, ep.Protocol)
+		eff, err := p.Effective()
+		if err != nil {
+			return nil, err
+		}
+		type endpoint struct {
+			protocol string
+			baseURL  string
+			version  string
+		}
+		endpoints := make([]endpoint, 0, 2)
+		if eff.OpenAIBaseURL != "" {
+			endpoints = append(endpoints, endpoint{protocol: config.ProtocolOpenAI, baseURL: eff.OpenAIBaseURL})
+		}
+		if eff.AnthropicBaseURL != "" {
+			endpoints = append(endpoints, endpoint{protocol: config.ProtocolAnthropic,
+				baseURL: eff.AnthropicBaseURL, version: config.DefaultAnthropicVersion})
+		}
+		for _, ep := range endpoints {
+			if models[ep.protocol] == nil {
+				models[ep.protocol] = map[string]struct{}{}
 			}
-			pv.Endpoints = append(pv.Endpoints, EndpointView{
-				Name:     ep.Name,
-				Protocol: ep.Protocol,
-				BaseURL:  ep.BaseURL,
-				Models:   ep.Models,
-			})
-			if models[ep.Protocol] == nil {
-				models[ep.Protocol] = map[string]struct{}{}
-			}
-			for alias, upstream := range ep.Models {
-				k := Key{Protocol: ep.Protocol, Model: alias}
+			for alias, upstream := range eff.Models {
+				k := Key{Protocol: ep.protocol, Model: alias}
 				if prev, dup := idx[k]; dup {
 					return nil, fmt.Errorf(
-						"model %q is declared twice for protocol %q: %s/%s and %s/%s; "+
-							"a model may belong to exactly one endpoint per protocol",
-						alias, ep.Protocol, prev.Provider, prev.Endpoint, p.Name, ep.Name)
+						"model %q is declared twice for protocol %q: provider %q and provider %q; "+
+							"a model may belong to exactly one provider per protocol",
+						alias, ep.protocol, prev.Provider, p.Name)
 				}
 				idx[k] = Target{
 					Provider:      p.Name,
-					Endpoint:      ep.Name,
-					Protocol:      ep.Protocol,
-					BaseURL:       ep.BaseURL,
-					Version:       ep.Version,
+					Endpoint:      ep.protocol,
+					Protocol:      ep.protocol,
+					BaseURL:       ep.baseURL,
+					Version:       ep.version,
 					UpstreamModel: upstream,
-					Timeout:       p.Timeout.Value(),
-					ProviderIndex: pi,
-					Keys:          p.Keys,
-					Proxy:         p.Proxy,
+					Key:           eff.APIKey,
 				}
-				models[ep.Protocol][alias] = struct{}{}
+				models[ep.protocol][alias] = struct{}{}
 			}
 		}
-		providers = append(providers, pv)
 	}
 
 	modelsByProtocol := make(map[string][]string, len(models))
@@ -136,7 +116,6 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 	return &Snapshot{
 		Config:           cfg,
 		Index:            idx,
-		Providers:        providers,
 		ModelsByProtocol: modelsByProtocol,
 	}, nil
 }

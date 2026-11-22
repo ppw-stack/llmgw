@@ -6,9 +6,11 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/pw/llmgw/internal/preset"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,6 +19,13 @@ const (
 	ProtocolOpenAI    = "openai"
 	ProtocolAnthropic = "anthropic"
 )
+
+// DefaultAnthropicVersion is sent to Anthropic-compatible upstreams.
+const DefaultAnthropicVersion = "2023-06-01"
+
+// DefaultTimeout bounds non-streaming upstream calls and the idle gap of a
+// streaming response. It is deliberately not configurable per provider.
+const DefaultTimeout = 120 * time.Second
 
 // Duration lets YAML accept either "120s" or a bare number of seconds.
 type Duration time.Duration
@@ -75,20 +84,85 @@ type Log struct {
 	Format string `yaml:"format"`
 }
 
+// Provider is either a built-in preset (Preset set) or a custom upstream
+// (openai_base_url / anthropic_base_url set). The same model list is exposed on
+// both protocol entries; a code plan offers the same models through both.
 type Provider struct {
-	Name      string     `yaml:"name"`
-	Keys      []string   `yaml:"keys"`
-	Timeout   Duration   `yaml:"timeout"`
-	Proxy     string     `yaml:"proxy"`
-	Endpoints []Endpoint `yaml:"endpoints"`
+	Name             string `yaml:"name"`
+	Preset           string `yaml:"preset"`
+	APIKey           string `yaml:"api_key"`
+	Models           Models `yaml:"models"`
+	OpenAIBaseURL    string `yaml:"openai_base_url"`
+	AnthropicBaseURL string `yaml:"anthropic_base_url"`
 }
 
-type Endpoint struct {
-	Name     string            `yaml:"name"`
-	Protocol string            `yaml:"protocol"`
-	BaseURL  string            `yaml:"base_url"`
-	Version  string            `yaml:"version"`
-	Models   map[string]string `yaml:"models"`
+// Models maps a public model name to the upstream model name. YAML accepts
+// either a single string or a list; each entry is "name" or "name=upstream".
+type Models map[string]string
+
+func (m *Models) UnmarshalYAML(node *yaml.Node) error {
+	var raw []string
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var s string
+		if err := node.Decode(&s); err != nil {
+			return err
+		}
+		raw = []string{s}
+	case yaml.SequenceNode:
+		if err := node.Decode(&raw); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("models must be a string or a list of strings")
+	}
+	parsed, err := ParseModels(raw)
+	if err != nil {
+		return err
+	}
+	*m = parsed
+	return nil
+}
+
+// ParseModels turns "name" / "name=upstream" lines into a Models map.
+func ParseModels(items []string) (Models, error) {
+	out := make(Models, len(items))
+	for _, raw := range items {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		publicName, upstream := line, line
+		if i := strings.Index(line, "="); i >= 0 {
+			publicName = strings.TrimSpace(line[:i])
+			upstream = strings.TrimSpace(line[i+1:])
+		}
+		if publicName == "" || upstream == "" {
+			return nil, fmt.Errorf("model %q: both the public name and upstream name are required", line)
+		}
+		if prev, dup := out[publicName]; dup && prev != upstream {
+			return nil, fmt.Errorf("model %q is declared twice with different upstream names", publicName)
+		}
+		out[publicName] = upstream
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("models must not be empty")
+	}
+	return out, nil
+}
+
+// List renders models as sorted "name" / "name=upstream" lines.
+func (m Models) List() []string {
+	out := make([]string, 0, len(m))
+	for publicName, upstream := range m {
+		if publicName == upstream {
+			out = append(out, publicName)
+		} else {
+			out = append(out, publicName+"="+upstream)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 type Price struct {
@@ -130,7 +204,12 @@ func Load(path string) (*Config, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
 	if err := dec.Decode(c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		msg := fmt.Errorf("parse %s: %w", path, err)
+		if strings.Contains(err.Error(), "config.Provider") {
+			msg = fmt.Errorf("%w; providers now accept api_key, models, openai_base_url and "+
+				"anthropic_base_url (or preset); the old keys/endpoints form was removed", msg)
+		}
+		return nil, msg
 	}
 	if err := c.normalize(); err != nil {
 		return nil, err
@@ -205,16 +284,17 @@ func (c *Config) normalize() error {
 	for pi := range c.Providers {
 		p := &c.Providers[pi]
 		p.Name = strings.TrimSpace(expandEnv(p.Name))
+		p.Preset = strings.TrimSpace(expandEnv(p.Preset))
+		p.APIKey = strings.TrimSpace(expandEnv(p.APIKey))
+		p.OpenAIBaseURL = strings.TrimSpace(expandEnv(p.OpenAIBaseURL))
+		p.AnthropicBaseURL = strings.TrimSpace(expandEnv(p.AnthropicBaseURL))
+		if err := NormalizeProvider(p); err != nil {
+			return err
+		}
 		if seen[p.Name] {
 			return fmt.Errorf("duplicate provider %q", p.Name)
 		}
 		seen[p.Name] = true
-		for ki := range p.Keys {
-			p.Keys[ki] = expandEnv(strings.TrimSpace(p.Keys[ki]))
-		}
-		if err := NormalizeProvider(p); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -226,53 +306,117 @@ func NormalizeProvider(p *Provider) error {
 	if p.Name == "" {
 		return fmt.Errorf("provider name is required")
 	}
-	if p.Timeout == 0 {
-		p.Timeout = Duration(120 * time.Second)
-	}
-	kept := p.Keys[:0]
-	for _, k := range p.Keys {
-		if strings.TrimSpace(k) != "" {
-			kept = append(kept, strings.TrimSpace(k))
+	p.Preset = strings.TrimSpace(p.Preset)
+	p.APIKey = strings.TrimSpace(p.APIKey)
+	p.OpenAIBaseURL = strings.TrimSpace(p.OpenAIBaseURL)
+	p.AnthropicBaseURL = strings.TrimSpace(p.AnthropicBaseURL)
+
+	if p.Preset != "" {
+		pr, ok := preset.Lookup(p.Preset)
+		if !ok {
+			return fmt.Errorf("provider %q: unknown preset %q", p.Name, p.Preset)
 		}
-	}
-	p.Keys = kept
-	if len(p.Endpoints) == 0 {
-		return fmt.Errorf("provider %q: at least one endpoint is required", p.Name)
-	}
-	epSeen := map[string]bool{}
-	for ei := range p.Endpoints {
-		ep := &p.Endpoints[ei]
-		ep.Name = strings.TrimSpace(ep.Name)
-		if ep.Name == "" {
-			ep.Name = ep.Protocol
+		if p.OpenAIBaseURL != "" || p.AnthropicBaseURL != "" {
+			return fmt.Errorf("provider %q: preset %q supplies its own base URLs; "+
+				"remove openai_base_url/anthropic_base_url or use a custom provider", p.Name, p.Preset)
 		}
-		if epSeen[ep.Name] {
-			return fmt.Errorf("provider %q: duplicate endpoint %q", p.Name, ep.Name)
-		}
-		epSeen[ep.Name] = true
-		switch ep.Protocol {
-		case ProtocolOpenAI, ProtocolAnthropic:
-		default:
-			return fmt.Errorf("provider %q endpoint %q: protocol must be %q or %q",
-				p.Name, ep.Name, ProtocolOpenAI, ProtocolAnthropic)
-		}
-		u, err := url.Parse(ep.BaseURL)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("provider %q endpoint %q: base_url must be an absolute http(s) URL, got %q",
-				p.Name, ep.Name, ep.BaseURL)
-		}
-		ep.BaseURL = strings.TrimRight(ep.BaseURL, "/")
-		if ep.Protocol == ProtocolAnthropic && ep.Version == "" {
-			ep.Version = "2023-06-01"
-		}
-		if len(ep.Models) == 0 {
-			return fmt.Errorf("provider %q endpoint %q: models must not be empty", p.Name, ep.Name)
-		}
-		for alias, upstream := range ep.Models {
-			if strings.TrimSpace(alias) == "" || strings.TrimSpace(upstream) == "" {
-				return fmt.Errorf("provider %q endpoint %q: model names must not be empty", p.Name, ep.Name)
+		if len(p.Models) == 0 {
+			models, err := ParseModels(pr.Models)
+			if err != nil {
+				return fmt.Errorf("provider %q: preset %q: %w", p.Name, p.Preset, err)
 			}
+			p.Models = models
 		}
+	} else {
+		if p.OpenAIBaseURL == "" && p.AnthropicBaseURL == "" {
+			return fmt.Errorf("provider %q: at least one of openai_base_url or anthropic_base_url is required", p.Name)
+		}
+	}
+
+	var err error
+	if p.OpenAIBaseURL, err = normalizeBaseURL(p.Name, "openai_base_url", p.OpenAIBaseURL); err != nil {
+		return err
+	}
+	if p.AnthropicBaseURL, err = normalizeBaseURL(p.Name, "anthropic_base_url", p.AnthropicBaseURL); err != nil {
+		return err
+	}
+	if p.Models, err = normalizeModels(p.Models); err != nil {
+		return fmt.Errorf("provider %q: %w", p.Name, err)
 	}
 	return nil
+}
+
+func normalizeBaseURL(provider, field, raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("provider %q: %s must be an absolute http(s) URL, got %q",
+			provider, field, raw)
+	}
+	return strings.TrimRight(raw, "/"), nil
+}
+
+func normalizeModels(m Models) (Models, error) {
+	if len(m) == 0 {
+		return nil, fmt.Errorf("models must not be empty")
+	}
+	out := make(Models, len(m))
+	for publicName, upstream := range m {
+		name := strings.TrimSpace(publicName)
+		up := strings.TrimSpace(upstream)
+		if name == "" || up == "" {
+			return nil, fmt.Errorf("model names must not be empty")
+		}
+		out[name] = up
+	}
+	return out, nil
+}
+
+// Effective is the routing-ready form of a provider.
+type Effective struct {
+	Name             string
+	Preset           string
+	APIKey           string
+	Models           Models
+	OpenAIBaseURL    string
+	AnthropicBaseURL string
+}
+
+// Effective resolves presets and applies the shared defaults. It is used both
+// when building the router and when rendering the admin API.
+func (p Provider) Effective() (Effective, error) {
+	out := Effective{
+		Name:             p.Name,
+		Preset:           p.Preset,
+		APIKey:           p.APIKey,
+		Models:           p.Models,
+		OpenAIBaseURL:    strings.TrimRight(strings.TrimSpace(p.OpenAIBaseURL), "/"),
+		AnthropicBaseURL: strings.TrimRight(strings.TrimSpace(p.AnthropicBaseURL), "/"),
+	}
+	if p.Preset != "" {
+		pr, ok := preset.Lookup(p.Preset)
+		if !ok {
+			return out, fmt.Errorf("provider %q: unknown preset %q", p.Name, p.Preset)
+		}
+		out.OpenAIBaseURL = strings.TrimRight(pr.OpenAIBaseURL, "/")
+		out.AnthropicBaseURL = strings.TrimRight(pr.AnthropicBaseURL, "/")
+		if len(out.Models) == 0 {
+			models, err := ParseModels(pr.Models)
+			if err != nil {
+				return out, fmt.Errorf("provider %q: preset %q: %w", p.Name, p.Preset, err)
+			}
+			out.Models = models
+		}
+	}
+	if out.OpenAIBaseURL == "" && out.AnthropicBaseURL == "" {
+		return out, fmt.Errorf("provider %q: at least one upstream base URL is required", p.Name)
+	}
+	models, err := normalizeModels(out.Models)
+	if err != nil {
+		return out, fmt.Errorf("provider %q: %w", p.Name, err)
+	}
+	out.Models = models
+	return out, nil
 }

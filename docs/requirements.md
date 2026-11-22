@@ -48,19 +48,23 @@
 
 ### FR-02 协议不转换
 
-- 每个上游端点声明自己的协议（`openai` / `anthropic`）。
-- 路由候选按协议隔离：OpenAI 请求只能命中 OpenAI 协议端点，反之亦然。
+- 两个入口固定：OpenAI 入口只命中 OpenAI 上游，Anthropic 入口只命中 Anthropic 上游。
+- 供应商只填了 OpenAI base URL 时，模型不会出现在 Anthropic 入口；反之亦然。
 - 模型存在但协议不匹配 → `400`，错误体遵循入口协议，且不产生上游调用：
   `model "claude-..." is only available via the Anthropic endpoint (/anthropic)`。
 
-### FR-03 供应商与端点
+### FR-03 供应商（内置端点 / 自定义）
 
-- Provider：名称、上游 Key 列表、超时、HTTP 代理（可选）。
-- Endpoint：协议、base_url、对外模型名 → 上游模型名映射。
-- 一个 Provider 可挂两个端点（openai + anthropic），共享同一批上游 Key。
+供应商模型收敛为「一个 Key + 模型列表 + 最多两个 base URL」：
+
+- **内置端点**：引用程序内置的预设（首发 MiniMax 编码套餐），只填 API Key；两个 base URL 与默认模型由代码目录提供，随版本升级自动更新。
+- **自定义端点**：手填 OpenAI / Anthropic base URL（至少一个）、模型列表、API Key。
+- 模型列表同时注册到两个协议入口，支持 `对外名=上游名` 别名。
+- 每个供应商只有一个上游 Key；超时固定 120s，代理走环境变量，`anthropic-version` 固定 `2023-06-01`。
 - 供应商保存在数据库，控制台可直接新增、编辑、删除；上游 Key 加密存储。
-- 同一协议下，一个模型名只能属于一个端点；重复则拒绝保存并报出冲突来源。
-- 首次启动且数据库为空时，从 `config.yaml` 导入供应商。
+- 内置端点创建后 preset 不可更改，需删除重建；模型可覆盖。
+- 同一协议下，一个模型名只能属于一个供应商；重复则拒绝保存并报出冲突来源。
+- 首次启动且数据库为空时，从 `config.yaml` 导入供应商；旧版 `keys + endpoints` 写法不再支持。
 
 ### FR-04 路由（v1 最小实现）
 
@@ -74,10 +78,10 @@
 - 支持命名、停用、删除；停用后下一次请求即 `401`。
 - 无模型白名单、无 RPM/TPM、无预算限制。
 
-### FR-06 上游 Key 池
+### FR-06 上游 Key
 
-- 同一 Provider 的 Key 按原子递增索引轮询。
-- 上游返回 `401/403` 时标记该 Key 失效，换下一个 Key 重试一次；全部失效则透传错误。
+- 每个供应商只配置一个上游 Key，AES-256-GCM 加密存储。
+- 上游返回 `401/403` 时原样透传，不做换 Key 或重试；空 Key 表示上游不需要鉴权。
 
 ### FR-07 请求日志与用量
 
@@ -103,7 +107,7 @@ Web 控制台（`/`，Vue 3 构建产物内嵌进二进制）：
 
 - 登录：用户名 + 密码，成功后由服务端下发 HttpOnly 会话 Cookie。
 - 概览：请求数、输入/输出 tokens、成本，近 1/7/30 天柱状图，按模型/按 Key 聚合。
-- 供应商：新增/编辑/删除 Provider 与 Endpoint、管理上游 Key、模型映射。
+- 供应商：新增/编辑/删除内置端点或自定义供应商、填上游 Key、覆盖模型列表。
 - 网关 Key：创建（明文仅显示一次）、启停、删除。- 请求日志：按模型过滤，展示状态、延迟、TTFT、tokens、成本、错误码。
 - 接入说明：两条 base_url 与各客户端填法，可一键复制。
 - 修改密码：成功后所有会话失效。
@@ -121,7 +125,8 @@ Web 控制台（`/`，Vue 3 构建产物内嵌进二进制）：
 REST API：
 
 - `POST /admin/api/keys` 创建（返回一次明文）、`GET /admin/api/keys` 列表、`PATCH /admin/api/keys/{id}` 启停、`DELETE`。
-- `GET /admin/api/providers` 查看当前配置的供应商与端点（只读，来自 config.yaml）。
+- `GET /admin/api/providers` 列出供应商（内置端点返回解析后的 URL）；`POST/PUT/DELETE` 增删改。
+- `GET /admin/api/provider-presets` 返回编译进程序的内置端点目录。
 - `GET /admin/api/logs` 按 key/模型/时间过滤。
 - `GET /admin/api/usage` 按天/模型/Key 聚合。
 - 管理鉴权：`admin_token`（配置或环境变量），通过 `Authorization: Bearer` 校验。
@@ -135,7 +140,7 @@ REST API：
 | NFR-03 | 内存 | 空载 < 100MB |
 | NFR-04 | 流式 | 逐事件 flush；TTFT 增量 < 5ms |
 | NFR-05 | 数据面 | 请求路径无数据库依赖：网关 Key 走内存缓存，日志异步批量写 |
-| NFR-06 | 安全 | 上游 Key 仅从配置/环境读取，不回显于任何接口；网关 Key 仅存哈希 |
+| NFR-06 | 安全 | 上游 Key 仅在配置/数据库中以密文或环境变量形式存在，不回显于任何接口；网关 Key 仅存哈希 |
 | NFR-07 | 兼容 | OpenAI/Anthropic 官方 SDK、Claude Code、Codex CLI 可直接指向 |
 | NFR-08 | 部署 | 单二进制（darwin/linux, amd64/arm64），无 cgo |
 | NFR-09 | 管理认证 | bcrypt 密码、HttpOnly 会话 Cookie、登录限速、审计日志 |
@@ -150,7 +155,7 @@ REST API：
 5. 把 Anthropic 模型打到 OpenAI 入口 → `400`，上游零调用。
 6. 模型未配置 → `404`，错误信息包含可用入口提示。
 7. 停用网关 Key 后下一次请求 `401`；删除后哈希不再命中。
-8. 同一 Provider 两个端点共享 Key；Key 401 后两个端点同时失效。
+8. 内置端点只填 API Key 即可创建，响应中的两个 base URL 与内置目录一致；自定义端点缺少 URL 或模型时拒绝保存。
 9. 客户端中途断开，上游在 1s 内取消（日志 `client_canceled`）。
 10. 改 `config.yaml` 后 1s 内生效，在途流式请求不受影响。
 11. `/metrics` 可读出请求数、延迟、token；日志队列满时丢弃计数递增且请求不受影响。
@@ -165,7 +170,7 @@ REST API：
 | 阶段 | 内容 |
 |---|---|
 | M0 | 文档（本目录） |
-| M1 | 骨架 + OpenAI 直通 + 查表路由 + Key 池 + 日志 + metrics |
+| M1 | 骨架 + OpenAI 直通 + 查表路由 + 单 Key + 日志 + metrics |
 | M2 | Anthropic 入口 + SSE 透传 + usage 嗅探 |
 | M3 | Web 控制台（Vue 3 + Vite，go:embed） |
 | M4 | Docker 多阶段镜像、`-version`/`-healthcheck`、跨平台发布包 |

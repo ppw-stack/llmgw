@@ -110,6 +110,31 @@ DELETE /admin/api/keys/1    → 204
 
 供应商保存在 SQLite 中，上游 Key 使用 AES-256-GCM 加密。控制台「供应商」页可直接增删改，保存后立即生效。
 
+供应商有两类：
+
+- `source=builtin`：引用内置端点（`preset`），两个 base URL 与默认模型来自程序内置目录，升级自动更新。
+- `source=custom`：手填 `openai_base_url` / `anthropic_base_url` 与模型列表。
+
+每个供应商只有一个上游 Key、固定 120s 超时，没有 Key 池/代理/单供应商超时配置。
+
+### 内置端点目录
+
+```
+GET /admin/api/provider-presets
+
+200 [{
+  "id": "minimax-mplan-global",
+  "family": "minimax-mplan",
+  "family_name": "MiniMax 编码套餐",
+  "variant_name": "国际",
+  "default_name": "minimax",
+  "docs_url": "https://platform.minimax.io/docs/m-plan/other-tools",
+  "openai_base_url": "https://api.minimax.io/v1",
+  "anthropic_base_url": "https://api.minimax.io/anthropic",
+  "models": ["MiniMax-M3.1-Flash"]
+}]
+```
+
 ### 列表
 
 ```
@@ -117,59 +142,66 @@ GET /admin/api/providers
 
 200 [{
   "id": 1,
-  "name": "glm",
-  "proxy": "",
-  "timeout_ms": 120000,
-  "key_count": 2,
-  "key_hints": ["****a1b2", "****c3d4"],
-  "endpoints": [{
-    "name": "openai",
-    "protocol": "openai",
-    "base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "version": "",
-    "models": {"glm-4.6": "glm-4.6"}
-  }]
+  "name": "minimax",
+  "preset": "minimax-mplan-global",
+  "preset_name": "MiniMax 编码套餐（国际）",
+  "source": "builtin",
+  "docs_url": "https://platform.minimax.io/docs/m-plan/other-tools",
+  "key_hint": "****9999",
+  "models": ["MiniMax-M3.1-Flash"],
+  "openai_base_url": "https://api.minimax.io/v1",
+  "anthropic_base_url": "https://api.minimax.io/anthropic"
 }]
 ```
 
-上游 Key 只返回末四位掩码，永不返回明文。
+上游 Key 只返回末四位掩码，永不返回明文。内置端点的 URL 是解析后的只读值。
 
 ### 创建
+
+内置端点只需 `preset + api_key`，`models` 可省略（用内置默认值）：
+
+```
+POST /admin/api/providers
+{
+  "name": "minimax",
+  "preset": "minimax-mplan-global",
+  "api_key": "sk-cp-..."
+}
+```
+
+自定义端点手填 URL 与模型（`models` 每项为 `名称` 或 `名称=上游名`）：
 
 ```
 POST /admin/api/providers
 {
   "name": "glm",
-  "proxy": "",
-  "timeout_ms": 120000,
-  "keys": ["sk-real-upstream-key"],
-  "endpoints": [{
-    "name": "openai",
-    "protocol": "openai",
-    "base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "models": {"glm-4.6": "glm-4.6"}
-  }]
+  "api_key": "sk-real-upstream-key",
+  "models": ["glm-4.6", "claude-sonnet-4-5=glm-4.6"],
+  "openai_base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+  "anthropic_base_url": "https://open.bigmodel.cn/api/anthropic"
 }
 
 201 <provider view>
 ```
 
-校验失败返回 `400`；名称重复返回 `409`；与现有供应商在同一协议下模型冲突返回 `400`。
+校验失败返回 `400`；名称重复返回 `409`；与现有供应商在同一协议下模型冲突返回 `400`。内置端点不允许再传 `openai_base_url` / `anthropic_base_url`。
 
 ### 更新
 
 ```
 PUT /admin/api/providers/1
 {
-  "name": "glm",
-  "timeout_ms": 180000,
-  "endpoints": [...]
+  "name": "minimax",
+  "preset": "minimax-mplan-global",
+  "models": ["MiniMax-M3.1-Flash[1m]"]
 }
 ```
 
-- 省略 `keys` 字段：保留现有上游 Key。
-- 传 `"keys": []`：清空。
-- 传 `"keys": ["..."]`：整体替换。
+- 省略 `preset`：沿用现有值；显式传入不同的 preset 返回 `400`（需删除重建）。
+- 省略 `models`：保留现有模型列表；传 `[]` 时内置端点回落到默认模型、自定义端点返回 `400`。
+- 省略 `api_key` 或传空字符串：保留现有上游 Key。
+- 传非空 `api_key`：整体替换。
+- 内置端点可覆盖模型列表。
 
 ### 删除
 
@@ -181,7 +213,7 @@ DELETE /admin/api/providers/1   → 204
 
 ### 与 config.yaml 的关系
 
-首次启动且数据库中没有供应商时，会导入 `config.yaml` 的 `providers`（Key 加密后落库）。之后以数据库为准，`config.yaml` 的 `providers` 不再覆盖页面上的修改。
+首次启动且数据库中没有供应商时，会导入 `config.yaml` 的 `providers`（Key 加密后落库）。之后以数据库为准，`config.yaml` 的 `providers` 不再覆盖页面上的修改。旧版 `keys + endpoints` 写法已移除；已有数据库中的旧供应商会在启动时自动迁移（保留第一个 Key，丢弃超时/代理）。
 
 ## 日志
 

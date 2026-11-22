@@ -1,4 +1,4 @@
-.PHONY: build build-all web test run fmt vet clean docker release
+.PHONY: build build-all web web-check test run fmt vet clean docker release
 
 BIN := bin/llmgw
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -9,6 +9,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.dat
 # Rebuild the embedded console. Required after changing anything under web/.
 web:
 	cd web && npm run build
+
+# Frontend quality gate: ESLint + Prettier + type check.
+web-check:
+	cd web && npm run check
 
 build:
 	@mkdir -p bin

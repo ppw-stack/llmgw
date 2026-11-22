@@ -42,7 +42,9 @@ func newForwarder(t *testing.T, upstream string, timeout time.Duration) (*Forwar
 	if err := rt.Reload(cfg); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"), logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"), logger)
 	if err != nil {
 		t.Fatal(err)
 	}

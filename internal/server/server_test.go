@@ -97,7 +97,9 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"), logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"), logger)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

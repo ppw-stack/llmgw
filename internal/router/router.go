@@ -62,7 +62,8 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 		p := &cfg.Providers[pi]
 		eff, err := p.Effective()
 		if err != nil {
-			return nil, fmt.Errorf("provider %q: %w", p.Name, err)
+			// Effective already names the provider in the error.
+			return nil, err
 		}
 		type endpoint struct {
 			protocol string

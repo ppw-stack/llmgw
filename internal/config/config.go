@@ -388,7 +388,8 @@ type Effective struct {
 
 // Effective resolves presets and applies the shared defaults. It is used both
 // when building the router and when rendering the admin API. On error the
-// returned Effective is the zero value; the caller adds the provider context.
+// returned Effective is the zero value and the error already carries the
+// provider context, so callers can report it as is.
 func (p Provider) Effective() (Effective, error) {
 	out := Effective{
 		Name:             p.Name,
@@ -401,24 +402,24 @@ func (p Provider) Effective() (Effective, error) {
 	if p.Preset != "" {
 		pr, ok := preset.Lookup(p.Preset)
 		if !ok {
-			return Effective{}, fmt.Errorf("unknown preset %q", p.Preset)
+			return Effective{}, fmt.Errorf("provider %q: unknown preset %q", p.Name, p.Preset)
 		}
 		out.OpenAIBaseURL = strings.TrimRight(pr.OpenAIBaseURL, "/")
 		out.AnthropicBaseURL = strings.TrimRight(pr.AnthropicBaseURL, "/")
 		if len(out.Models) == 0 {
 			models, err := ParseModels(pr.Models)
 			if err != nil {
-				return Effective{}, fmt.Errorf("preset %q: %w", p.Preset, err)
+				return Effective{}, fmt.Errorf("provider %q: preset %q: %w", p.Name, p.Preset, err)
 			}
 			out.Models = models
 		}
 	}
 	if out.OpenAIBaseURL == "" && out.AnthropicBaseURL == "" {
-		return Effective{}, fmt.Errorf("at least one upstream base URL is required")
+		return Effective{}, fmt.Errorf("provider %q: at least one upstream base URL is required", p.Name)
 	}
 	models, err := normalizeModels(out.Models)
 	if err != nil {
-		return Effective{}, err
+		return Effective{}, fmt.Errorf("provider %q: %w", p.Name, err)
 	}
 	out.Models = models
 	return out, nil

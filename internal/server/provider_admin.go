@@ -40,7 +40,7 @@ func (s *Server) adminProviders(w http.ResponseWriter, r *http.Request, id *admi
 	if rawID == "" {
 		switch r.Method {
 		case http.MethodGet:
-			s.listProviders(w)
+			s.listProviders(w, r)
 		case http.MethodPost:
 			s.createProvider(w, r, id)
 		default:
@@ -71,7 +71,7 @@ func (s *Server) adminProviderPresets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, preset.All())
 }
 
-func (s *Server) listProviders(w http.ResponseWriter) {
+func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	records, err := s.store.ListProviderRecords()
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -79,12 +79,12 @@ func (s *Server) listProviders(w http.ResponseWriter) {
 	}
 	views := make([]providerView, 0, len(records))
 	for _, rec := range records {
-		views = append(views, s.providerView(rec))
+		views = append(views, s.providerView(r, rec))
 	}
 	writeJSON(w, http.StatusOK, views)
 }
 
-func (s *Server) providerView(rec store.ProviderRecord) providerView {
+func (s *Server) providerView(r *http.Request, rec store.ProviderRecord) providerView {
 	view := providerView{
 		ID:               rec.ID,
 		Name:             rec.Name,
@@ -107,6 +107,7 @@ func (s *Server) providerView(rec store.ProviderRecord) providerView {
 			// The stored values stay in the view, but the mismatch must be
 			// visible in the logs instead of being swallowed.
 			s.log.Error("resolve preset for provider view",
+				"method", r.Method, "path", r.URL.Path, "request_id", requestID(r),
 				"provider", rec.Name, "preset", rec.Preset, "err", err)
 		} else {
 			view.OpenAIBaseURL = eff.OpenAIBaseURL
@@ -184,7 +185,7 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "provider.create", provider.Name, "success")
-	writeJSON(w, http.StatusCreated, s.providerView(*rec))
+	writeJSON(w, http.StatusCreated, s.providerView(r, *rec))
 }
 
 func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *adminIdentity, providerID int64) {
@@ -291,7 +292,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "provider.update", provider.Name, "success")
-	writeJSON(w, http.StatusOK, s.providerView(store.ProviderRecord{
+	writeJSON(w, http.StatusOK, s.providerView(r, store.ProviderRecord{
 		ID: providerID, ProviderSpec: spec,
 	}))
 }

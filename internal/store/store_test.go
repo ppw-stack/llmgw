@@ -17,7 +17,9 @@ import (
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"),
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -231,7 +233,9 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := Open(context.Background(), path, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := Open(ctx, path, logger)
 	if err != nil {
 		t.Fatalf("open migrated store: %v", err)
 	}
@@ -262,7 +266,9 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	}
 
 	// Reopening must not migrate again.
-	st2, err := Open(context.Background(), path, logger)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+	st2, err := Open(ctx2, path, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

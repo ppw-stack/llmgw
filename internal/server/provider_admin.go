@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -101,7 +102,13 @@ func (s *Server) providerView(rec store.ProviderRecord) providerView {
 			view.DocsURL = pr.DocsURL
 		}
 		p := config.Provider{Name: rec.Name, Preset: rec.Preset, Models: rec.Models}
-		if eff, err := p.Effective(); err == nil {
+		eff, err := p.Effective()
+		if err != nil {
+			// The stored values stay in the view, but the mismatch must be
+			// visible in the logs instead of being swallowed.
+			s.log.Error("resolve preset for provider view",
+				"provider", rec.Name, "preset", rec.Preset, "err", err)
+		} else {
 			view.OpenAIBaseURL = eff.OpenAIBaseURL
 			view.AnthropicBaseURL = eff.AnthropicBaseURL
 			view.Models = eff.Models.List()
@@ -130,14 +137,8 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	apiKey := ""
-	if in.APIKey != nil {
-		apiKey = strings.TrimSpace(*in.APIKey)
-	}
-	presetID := ""
-	if in.Preset != nil {
-		presetID = strings.TrimSpace(*in.Preset)
-	}
+	apiKey := trimOrEmpty(in.APIKey)
+	presetID := trimOrEmpty(in.Preset)
 	provider, err := in.toProvider(presetID, apiKey)
 	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
@@ -215,7 +216,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 	}
 	presetID := existing.Preset
 	if in.Preset != nil {
-		presetID = strings.TrimSpace(*in.Preset)
+		presetID = trimOrEmpty(in.Preset)
 	}
 	if presetID != existing.Preset {
 		writeAdminError(w, http.StatusBadRequest,
@@ -313,12 +314,21 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, id *admi
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// trimOrEmpty reads an optional request field: a missing pointer and a blank
+// value are both treated as "not supplied".
+func trimOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(*s)
+}
+
 func (in providerInput) toProvider(presetID, apiKey string) (config.Provider, error) {
 	var models config.Models
 	if len(in.Models) > 0 {
 		parsed, err := config.ParseModels(in.Models)
 		if err != nil {
-			return config.Provider{}, err
+			return config.Provider{}, fmt.Errorf("invalid models: %w", err)
 		}
 		models = parsed
 	}

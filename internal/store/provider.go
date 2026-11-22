@@ -61,6 +61,7 @@ func (s *Store) ListProviderRecords() ([]ProviderRecord, error) {
 	return out, rows.Err()
 }
 
+// CreateProvider stores a provider and returns the stored record.
 func (s *Store) CreateProvider(spec ProviderSpec) (*ProviderRecord, error) {
 	modelsJSON, err := json.Marshal(spec.Models)
 	if err != nil {
@@ -83,6 +84,7 @@ func (s *Store) CreateProvider(spec ProviderSpec) (*ProviderRecord, error) {
 	return &ProviderRecord{ID: id, ProviderSpec: spec, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+// UpdateProvider replaces the stored form of one provider.
 func (s *Store) UpdateProvider(id int64, spec ProviderSpec) error {
 	modelsJSON, err := json.Marshal(spec.Models)
 	if err != nil {

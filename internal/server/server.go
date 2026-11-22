@@ -64,6 +64,9 @@ func New(o Options) (*Server, error) {
 	if o.SessionTTL <= 0 {
 		o.SessionTTL = 12 * time.Hour
 	}
+	if o.Log == nil {
+		o.Log = slog.Default()
+	}
 	cache, err := newKeyCache(o.Store)
 	if err != nil {
 		return nil, err

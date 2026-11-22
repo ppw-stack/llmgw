@@ -53,7 +53,10 @@ func main() {
 	logger := newLogger(cfg.Log)
 	slog.SetDefault(logger)
 
-	st, err := store.Open(cfg.Database.Path, logger)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	st, err := store.Open(ctx, cfg.Database.Path, logger)
 	if err != nil {
 		logger.Error("open database", "err", err)
 		os.Exit(1)
@@ -131,9 +134,6 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	if err := st.DeleteExpiredSessions(); err != nil {
 		logger.Warn("clean expired sessions", "err", err)

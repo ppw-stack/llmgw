@@ -25,7 +25,7 @@ import (
 // Timeout bounds non-streaming upstream calls and the idle gap of a stream.
 // It is fixed on purpose: a provider is just an API key, two base URLs and a
 // model list.
-var upstreamTimeout = config.DefaultTimeout
+const upstreamTimeout = config.DefaultTimeout
 
 const maxUpstreamResponseDefault = 64 << 20
 
@@ -36,13 +36,24 @@ var maxUpstreamResponse int64 = maxUpstreamResponseDefault
 // response back. It intentionally does not retry on 5xx, fall back to another
 // provider, or translate between protocols.
 type Forwarder struct {
-	router *router.Router
-	store  *store.Store
-	log    *slog.Logger
-	client *http.Client
+	router  *router.Router
+	store   *store.Store
+	log     *slog.Logger
+	client  *http.Client
+	timeout time.Duration
 }
 
+// New builds a Forwarder with the default upstream timeout.
 func New(r *router.Router, st *store.Store, log *slog.Logger) *Forwarder {
+	return NewWithTimeout(r, st, log, upstreamTimeout)
+}
+
+// NewWithTimeout builds a Forwarder with an explicit upstream timeout. Tests
+// use it to shorten the timeout without touching package-level state.
+func NewWithTimeout(r *router.Router, st *store.Store, log *slog.Logger, timeout time.Duration) *Forwarder {
+	if timeout <= 0 {
+		timeout = upstreamTimeout
+	}
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          256,
@@ -50,13 +61,14 @@ func New(r *router.Router, st *store.Store, log *slog.Logger) *Forwarder {
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,
-		ResponseHeaderTimeout: upstreamTimeout,
+		ResponseHeaderTimeout: timeout,
 	}
 	return &Forwarder{
-		router: r,
-		store:  st,
-		log:    log,
-		client: &http.Client{Transport: tr},
+		router:  r,
+		store:   st,
+		log:     log,
+		client:  &http.Client{Transport: tr},
+		timeout: timeout,
 	}
 }
 
@@ -96,7 +108,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 	ctx := r.Context()
 	if !in.Meta.Stream {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, upstreamTimeout)
+		ctx, cancel = context.WithTimeout(ctx, f.timeout)
 		defer cancel()
 	}
 
@@ -193,7 +205,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 	w.Header().Set("X-Request-Id", in.RequestID)
 	w.WriteHeader(resp.StatusCode)
 
-	ttft, written, writeErr := streamSSE(w, resp.Body, in.Protocol, &acc, start, upstreamTimeout)
+	ttft, written, writeErr := streamSSE(w, resp.Body, in.Protocol, &acc, start, f.timeout)
 	if writeErr != nil {
 		f.log.Debug("stream interrupted", "request_id", in.RequestID, "err", writeErr.Error())
 	}

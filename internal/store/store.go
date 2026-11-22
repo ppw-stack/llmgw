@@ -175,7 +175,10 @@ type Store struct {
 	log     *slog.Logger
 }
 
-func Open(path string, log *slog.Logger) (*Store, error) {
+// Open opens the database, applies the schema and runs the pending migrations.
+// The context bounds the startup migration so a locked database can be
+// interrupted instead of blocking the process forever.
+func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := ensureDir(path); err != nil {
 		return nil, err
 	}
@@ -185,11 +188,11 @@ func Open(path string, log *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.ExecContext(ctx, schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	if err := migrateProviders(db, log); err != nil {
+	if err := migrateProviders(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate providers: %w", err)
 	}
@@ -214,8 +217,8 @@ func ensureDir(path string) error {
 // migrateProviders converts the pre-preset table (keys_enc + endpoints_json)
 // into the single-key, preset-aware shape. Extra keys, per-provider timeouts
 // and proxies are dropped with a warning instead of failing the upgrade.
-func migrateProviders(db *sql.DB, log *slog.Logger) error {
-	cols, err := tableColumns(db, "providers")
+func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(ctx, db, "providers")
 	if err != nil {
 		return err
 	}
@@ -237,22 +240,22 @@ func migrateProviders(db *sql.DB, log *slog.Logger) error {
 		updated       string
 	}
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`ALTER TABLE providers RENAME TO providers_legacy`); err != nil {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE providers RENAME TO providers_legacy`); err != nil {
 		return err
 	}
 	// Re-run the schema: every other table already exists, so this only
 	// recreates providers in its new shape.
-	if _, err := tx.Exec(schema); err != nil {
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
 		return err
 	}
 
-	rows, err := tx.Query(`SELECT id, name, proxy, timeout_ms, keys_enc, endpoints_json,
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, proxy, timeout_ms, keys_enc, endpoints_json,
 		created_at, updated_at FROM providers_legacy ORDER BY id`)
 	if err != nil {
 		return err
@@ -274,7 +277,10 @@ func migrateProviders(db *sql.DB, log *slog.Logger) error {
 	rows.Close()
 
 	for _, r := range legacy {
-		spec := convertLegacyProvider(r.name, r.proxy, r.timeoutMS, r.keysJSON, r.endpointsJSON, log)
+		spec, err := convertLegacyProvider(r.name, r.proxy, r.timeoutMS, r.keysJSON, r.endpointsJSON, log)
+		if err != nil {
+			return err
+		}
 		modelsJSON, err := json.Marshal(spec.Models)
 		if err != nil {
 			return err
@@ -282,7 +288,7 @@ func migrateProviders(db *sql.DB, log *slog.Logger) error {
 		if spec.Models == nil {
 			modelsJSON = []byte("{}")
 		}
-		if _, err := tx.Exec(`INSERT INTO providers(id, name, preset, key_enc, models_json,
+		if _, err := tx.ExecContext(ctx, `INSERT INTO providers(id, name, preset, key_enc, models_json,
 			openai_base_url, anthropic_base_url, created_at, updated_at)
 			VALUES(?,?,?,?,?,?,?,?,?)`,
 			r.id, spec.Name, spec.Preset, spec.EncryptedKey, string(modelsJSON),
@@ -290,7 +296,7 @@ func migrateProviders(db *sql.DB, log *slog.Logger) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`DROP TABLE providers_legacy`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DROP TABLE providers_legacy`); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -300,8 +306,8 @@ func migrateProviders(db *sql.DB, log *slog.Logger) error {
 	return nil
 }
 
-func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +327,10 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 		}
 		out[name] = true
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 type legacyEndpoint struct {
@@ -341,11 +350,17 @@ func (e *legacyEndpoint) UnmarshalJSON(data []byte) error {
 	for k, v := range raw {
 		switch normalizeLegacyKey(k) {
 		case "protocol":
-			_ = json.Unmarshal(v, &e.Protocol)
+			if err := json.Unmarshal(v, &e.Protocol); err != nil {
+				return fmt.Errorf("legacy endpoint protocol: %w", err)
+			}
 		case "baseurl":
-			_ = json.Unmarshal(v, &e.BaseURL)
+			if err := json.Unmarshal(v, &e.BaseURL); err != nil {
+				return fmt.Errorf("legacy endpoint base url: %w", err)
+			}
 		case "models":
-			_ = json.Unmarshal(v, &e.Models)
+			if err := json.Unmarshal(v, &e.Models); err != nil {
+				return fmt.Errorf("legacy endpoint models: %w", err)
+			}
 		}
 	}
 	return nil
@@ -357,12 +372,17 @@ func normalizeLegacyKey(k string) string {
 	return strings.ReplaceAll(k, "-", "")
 }
 
+// convertLegacyProvider turns one legacy row into the new provider shape. A
+// broken keys/endpoints payload fails the migration instead of silently
+// producing a provider without an upstream key.
 func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpointsJSON string,
-	log *slog.Logger) ProviderSpec {
+	log *slog.Logger) (ProviderSpec, error) {
 	spec := ProviderSpec{Name: name}
 	var keys []string
 	if keysJSON != "" {
-		_ = json.Unmarshal([]byte(keysJSON), &keys)
+		if err := json.Unmarshal([]byte(keysJSON), &keys); err != nil {
+			return ProviderSpec{}, fmt.Errorf("decode legacy keys for provider %q: %w", name, err)
+		}
 	}
 	if len(keys) > 0 {
 		spec.EncryptedKey = keys[0]
@@ -377,7 +397,9 @@ func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpoint
 	}
 	var endpoints []legacyEndpoint
 	if endpointsJSON != "" {
-		_ = json.Unmarshal([]byte(endpointsJSON), &endpoints)
+		if err := json.Unmarshal([]byte(endpointsJSON), &endpoints); err != nil {
+			return ProviderSpec{}, fmt.Errorf("decode legacy endpoints for provider %q: %w", name, err)
+		}
 	}
 	models := config.Models{}
 	for _, ep := range endpoints {
@@ -399,7 +421,7 @@ func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpoint
 	if len(models) > 0 {
 		spec.Models = models
 	}
-	return spec
+	return spec, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

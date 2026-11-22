@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -16,7 +17,7 @@ import (
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "test.db"),
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -230,7 +231,7 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := Open(path, logger)
+	st, err := Open(context.Background(), path, logger)
 	if err != nil {
 		t.Fatalf("open migrated store: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	}
 
 	// Reopening must not migrate again.
-	st2, err := Open(path, logger)
+	st2, err := Open(context.Background(), path, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

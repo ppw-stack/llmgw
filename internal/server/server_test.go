@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -96,7 +97,7 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), logger)
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"), logger)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

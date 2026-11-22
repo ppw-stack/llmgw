@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,8 +12,26 @@ import (
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
 
-func providerBody(name, model string) string {
-	return `{"name":"` + name + `","api_key":"sk-secret-1234",
+// testAPIKey returns the upstream key used by the admin API tests. The
+// environment variable injects a real key; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func testAPIKey(env, suffix string) string {
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-" + suffix
+}
+
+// expectedKeyHint mirrors the hint the admin API returns for a stored key.
+func expectedKeyHint(key string) string {
+	if len(key) < 4 {
+		return "****"
+	}
+	return "****" + key[len(key)-4:]
+}
+
+func providerBody(name, model, apiKey string) string {
+	return `{"name":"` + name + `","api_key":"` + apiKey + `",
 	  "models":["` + model + `"],
 	  "openai_base_url":"http://127.0.0.1:9/v1"}`
 }
@@ -29,15 +48,17 @@ func decodeProvider(t *testing.T, resp *http.Response) providerView {
 
 func TestProviderCRUD(t *testing.T) {
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	apiKey := testAPIKey("TEST_PROVIDER_API_KEY", "1234")
 
 	// Create
-	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers", providerBody("ui-provider", "m1"))
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers",
+		providerBody("ui-provider", "m1", apiKey))
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create = %d %s", resp.StatusCode, body)
 	}
 	created := decodeProvider(t, resp)
-	if created.KeyHint != "****1234" {
+	if created.KeyHint != expectedKeyHint(apiKey) {
 		t.Fatalf("key hint = %q", created.KeyHint)
 	}
 	if created.Source != "custom" {
@@ -70,7 +91,7 @@ func TestProviderCRUD(t *testing.T) {
 		t.Fatalf("update = %d %s", resp.StatusCode, body)
 	}
 	updated := decodeProvider(t, resp)
-	if updated.KeyHint != "****1234" {
+	if updated.KeyHint != expectedKeyHint(apiKey) {
 		t.Fatalf("keys were dropped on update: %q", updated.KeyHint)
 	}
 	if len(updated.Models) != 1 || updated.Models[0] != "m2" {
@@ -78,14 +99,16 @@ func TestProviderCRUD(t *testing.T) {
 	}
 
 	// Duplicate name is rejected.
-	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers", providerBody("ui-provider", "m3"))
+	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers",
+		providerBody("ui-provider", "m3", apiKey))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("duplicate name = %d", resp.StatusCode)
 	}
 
 	// Duplicate model on the same protocol is rejected.
-	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers", providerBody("other", "m2"))
+	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers",
+		providerBody("other", "m2", apiKey))
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -136,8 +159,9 @@ func TestPresetProviderCRUD(t *testing.T) {
 	}
 
 	// Create with only a key: URLs and models come from the preset.
+	presetKey := testAPIKey("TEST_PRESET_API_KEY", "9999")
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/providers",
-		`{"name":"minimax","preset":"minimax-mplan-global","api_key":"sk-cp-9999"}`)
+		`{"name":"minimax","preset":"minimax-mplan-global","api_key":"`+presetKey+`"}`)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create preset = %d %s", resp.StatusCode, body)
@@ -168,13 +192,14 @@ func TestPresetProviderCRUD(t *testing.T) {
 	if len(updated.Models) != 1 || updated.Models[0] != "MiniMax-M3.1-Flash[1m]" {
 		t.Fatalf("models = %v", updated.Models)
 	}
-	if updated.KeyHint != "****9999" {
+	if updated.KeyHint != expectedKeyHint(presetKey) {
 		t.Fatalf("key hint = %q", updated.KeyHint)
 	}
 
 	// Omitting models keeps the stored override while replacing the key.
+	rotatedKey := testAPIKey("TEST_PRESET_API_KEY_ROTATED", "1234")
 	resp = adminRequest(t, http.MethodPut, gw.URL+"/admin/api/providers/"+itoa(created.ID),
-		`{"name":"minimax","preset":"minimax-mplan-global","api_key":"sk-cp-1234"}`)
+		`{"name":"minimax","preset":"minimax-mplan-global","api_key":"`+rotatedKey+`"}`)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("key-only update = %d %s", resp.StatusCode, body)
@@ -183,7 +208,7 @@ func TestPresetProviderCRUD(t *testing.T) {
 	if len(keyOnly.Models) != 1 || keyOnly.Models[0] != "MiniMax-M3.1-Flash[1m]" {
 		t.Fatalf("models reset on key-only update: %v", keyOnly.Models)
 	}
-	if keyOnly.KeyHint != "****1234" {
+	if keyOnly.KeyHint != expectedKeyHint(rotatedKey) {
 		t.Fatalf("key hint = %q", keyOnly.KeyHint)
 	}
 

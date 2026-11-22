@@ -6,6 +6,7 @@ import (
 )
 
 func TestCatalogIsConsistent(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for _, p := range All() {
 		if p.ID == "" || p.FamilyName == "" || p.DefaultName == "" {
@@ -28,6 +29,7 @@ func TestCatalogIsConsistent(t *testing.T) {
 }
 
 func TestMiniMaxVariants(t *testing.T) {
+	t.Parallel()
 	global, ok := Lookup("minimax-mplan-global")
 	if !ok || global.OpenAIBaseURL != "https://api.minimax.io/v1" {
 		t.Fatalf("global preset = %+v", global)
@@ -49,6 +51,7 @@ func TestMiniMaxVariants(t *testing.T) {
 }
 
 func TestLookupReturnsCopy(t *testing.T) {
+	t.Parallel()
 	p, ok := Lookup("minimax-mplan-global")
 	if !ok {
 		t.Fatal("expected the MiniMax preset to exist")

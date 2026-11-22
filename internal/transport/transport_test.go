@@ -2,10 +2,12 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,16 +19,22 @@ import (
 	"github.com/pw/llmgw/internal/store"
 )
 
+// upstreamTestKey returns the upstream key used by the transport tests. Set
+// TEST_UPSTREAM_API_KEY to inject a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func upstreamTestKey() string {
+	if v := strings.TrimSpace(os.Getenv("TEST_UPSTREAM_API_KEY")); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-upstream"
+}
+
 func newForwarder(t *testing.T, upstream string, timeout time.Duration) (*Forwarder, *store.Store, router.Target) {
 	t.Helper()
-	old := upstreamTimeout
-	upstreamTimeout = timeout
-	t.Cleanup(func() { upstreamTimeout = old })
-
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := &config.Config{Providers: []config.Provider{{
 		Name:          "p",
-		APIKey:        "upstream-key",
+		APIKey:        upstreamTestKey(),
 		Models:        config.Models{"m": "upstream-m"},
 		OpenAIBaseURL: upstream,
 	}}}
@@ -34,7 +42,7 @@ func newForwarder(t *testing.T, upstream string, timeout time.Duration) (*Forwar
 	if err := rt.Reload(cfg); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"), logger)
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +51,7 @@ func newForwarder(t *testing.T, upstream string, timeout time.Duration) (*Forwar
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(rt, st, logger), st, target
+	return NewWithTimeout(rt, st, logger, timeout), st, target
 }
 
 func TestCopyRequestHeadersDropsAcceptEncoding(t *testing.T) {

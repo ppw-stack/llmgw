@@ -100,6 +100,8 @@ type Provider struct {
 // either a single string or a list; each entry is "name" or "name=upstream".
 type Models map[string]string
 
+// UnmarshalYAML accepts either a single model line or a list of them. Each
+// line is "name" or "name=upstream".
 func (m *Models) UnmarshalYAML(node *yaml.Node) error {
 	var raw []string
 	switch node.Kind {
@@ -385,7 +387,8 @@ type Effective struct {
 }
 
 // Effective resolves presets and applies the shared defaults. It is used both
-// when building the router and when rendering the admin API.
+// when building the router and when rendering the admin API. On error the
+// returned Effective is the zero value; the caller adds the provider context.
 func (p Provider) Effective() (Effective, error) {
 	out := Effective{
 		Name:             p.Name,
@@ -398,24 +401,24 @@ func (p Provider) Effective() (Effective, error) {
 	if p.Preset != "" {
 		pr, ok := preset.Lookup(p.Preset)
 		if !ok {
-			return out, fmt.Errorf("provider %q: unknown preset %q", p.Name, p.Preset)
+			return Effective{}, fmt.Errorf("unknown preset %q", p.Preset)
 		}
 		out.OpenAIBaseURL = strings.TrimRight(pr.OpenAIBaseURL, "/")
 		out.AnthropicBaseURL = strings.TrimRight(pr.AnthropicBaseURL, "/")
 		if len(out.Models) == 0 {
 			models, err := ParseModels(pr.Models)
 			if err != nil {
-				return out, fmt.Errorf("provider %q: preset %q: %w", p.Name, p.Preset, err)
+				return Effective{}, fmt.Errorf("preset %q: %w", p.Preset, err)
 			}
 			out.Models = models
 		}
 	}
 	if out.OpenAIBaseURL == "" && out.AnthropicBaseURL == "" {
-		return out, fmt.Errorf("provider %q: at least one upstream base URL is required", p.Name)
+		return Effective{}, fmt.Errorf("at least one upstream base URL is required")
 	}
 	models, err := normalizeModels(out.Models)
 	if err != nil {
-		return out, fmt.Errorf("provider %q: %w", p.Name, err)
+		return Effective{}, err
 	}
 	out.Models = models
 	return out, nil

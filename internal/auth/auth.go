@@ -23,6 +23,7 @@ func Generate() (plain, hash, prefix string, err error) {
 	return plain, hash, prefix, nil
 }
 
+// Hash is the storage form of a gateway key or session token.
 func Hash(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:])

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -50,10 +51,17 @@ type Config struct {
 
 type Server struct {
 	Addr              string   `yaml:"addr"`
+	AdminUsername     string   `yaml:"admin_username"`
+	AdminPassword     string   `yaml:"admin_password"`
 	AdminToken        string   `yaml:"admin_token"`
+	SessionTTL        Duration `yaml:"session_ttl"`
+	SecureCookie      bool     `yaml:"secure_cookie"`
+	TrustedProxies    []string `yaml:"trusted_proxies"`
 	ReadHeaderTimeout Duration `yaml:"read_header_timeout"`
 	ShutdownTimeout   Duration `yaml:"shutdown_timeout"`
 	MaxBodyBytes      int64    `yaml:"max_body_bytes"`
+
+	TrustedPrefixes []netip.Prefix `yaml:"-"`
 }
 
 type Database struct {
@@ -90,6 +98,8 @@ type Price struct {
 func defaults() *Config {
 	c := &Config{}
 	c.Server.Addr = ":8080"
+	c.Server.AdminUsername = "admin"
+	c.Server.SessionTTL = Duration(12 * time.Hour)
 	c.Server.ReadHeaderTimeout = Duration(10 * time.Second)
 	c.Server.ShutdownTimeout = Duration(30 * time.Second)
 	c.Server.MaxBodyBytes = 32 << 20
@@ -127,8 +137,36 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) normalize() error {
+	c.Server.AdminPassword = expandEnv(c.Server.AdminPassword)
+	c.Server.AdminToken = expandEnv(c.Server.AdminToken)
 	if c.Server.Addr == "" {
 		c.Server.Addr = ":8080"
+	}
+	if c.Server.AdminUsername == "" {
+		c.Server.AdminUsername = "admin"
+	}
+	if c.Server.SessionTTL == 0 {
+		c.Server.SessionTTL = Duration(12 * time.Hour)
+	}
+	for _, raw := range c.Server.TrustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			addr, err := netip.ParseAddr(raw)
+			if err != nil {
+				return fmt.Errorf("server.trusted_proxies: invalid address %q", raw)
+			}
+			c.Server.TrustedPrefixes = append(c.Server.TrustedPrefixes,
+				netip.PrefixFrom(addr, addr.BitLen()))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("server.trusted_proxies: invalid CIDR %q", raw)
+		}
+		c.Server.TrustedPrefixes = append(c.Server.TrustedPrefixes, prefix.Masked())
 	}
 	if c.Server.ShutdownTimeout == 0 {
 		c.Server.ShutdownTimeout = Duration(30 * time.Second)

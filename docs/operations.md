@@ -75,20 +75,21 @@ pricing:
 ./bin/llmgw -config config.yaml
 ```
 
+若数据库中没有管理员用户，会创建一个并生成随机密码（仅打印一次，同时写入 `data/admin-password.txt`，权限 0600）：
+
+```
+[BOOTSTRAP] admin username: admin
+[BOOTSTRAP] admin password: <generated>
+[BOOTSTRAP] also written to ./data/admin-password.txt
+```
+
 若数据库中没有网关 Key，会生成一个并以如下形式打印一次：
 
 ```
-[BOOTSTRAP] first gateway key created: sk-gw-xxxxxxxx   (save it now; it is not shown again)
+[BOOTSTRAP] first gateway key: sk-gw-xxxxxxxx   (save it now; it is not shown again)
 ```
 
-若未配置 `server.admin_token`，会生成管理令牌并写入 `data/admin-token.txt`（0600）：
-
-```
-[BOOTSTRAP] admin token: <token>
-[BOOTSTRAP] also written to ./data/admin-token.txt
-```
-
-浏览器打开 `http://<host>:8080/`，输入该令牌即可进入控制台。
+浏览器打开 `http://<host>:8080/`，用用户名与密码登录；登录成功后下发 HttpOnly 会话 Cookie，默认 12 小时过期。
 
 随后即可：
 
@@ -162,9 +163,58 @@ proxy_set_header X-Accel-Buffering no;
 
 否则 SSE 会被缓冲成一次性返回。
 
-## 9. 安全
+## 9. 安全与公网部署
 
-- 网关 Key 仅存 SHA-256 哈希，明文只在创建时返回一次。
+### 9.1 管理台认证
+
+- 管理员账号存在 `users` 表，密码使用 bcrypt 哈希。
+- 登录成功后下发 `llmgw_session` Cookie：`HttpOnly`、`SameSite=Strict`，走 HTTPS 时自动带 `Secure`，默认 12 小时过期（`server.session_ttl`）。
+- 登录失败按客户端 IP 限速：5 分钟内最多 10 次，超出返回 `429`。
+- 修改密码后该用户的所有会话立即失效。
+- 管理操作（登录、登出、改密、Key 增删改）写入 `audit_logs`，可在控制台或 `GET /admin/api/audit` 查看。
+- `server.admin_token` 仅作为脚本/兼容用途的可选 Bearer token；不配置即禁用。
+
+### 9.2 反向代理要求
+
+推荐由 nginx/Caddy/云 LB 终止 TLS。若使用 nginx：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name gw.example.com;
+    ssl_certificate     /etc/ssl/gw.crt;
+    ssl_certificate_key /etc/ssl/gw.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE 必须关闭缓冲，否则流式会被攒成一次性返回
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_set_header X-Accel-Buffering no;
+    }
+}
+```
+
+然后配置：
+
+```yaml
+server:
+  trusted_proxies: ["127.0.0.1/32"]   # 反代地址；只有它传来的 XFF 才会被信任
+```
+
+`X-Forwarded-Proto: https` 会让会话 Cookie 自动带上 `Secure`，并触发 HSTS 响应头。
+
+### 9.3 其他
+
+- 网关 Key 仅存 SHA-256 哈希，明文只在创建时返回一次；泄露后请在控制台删除并重新创建。
 - 上游 Key 来自环境变量，不写入数据库、不出现在任何 API 响应中。
-- 管理接口需要 `admin_token`；建议只在内网或经反代鉴权暴露。
-- 生产环境请置于 TLS 之后（Caddy/nginx/云 LB）。
+- `/metrics` 未内置鉴权；公网暴露时请在反代层限制来源 IP 或加 Basic Auth。
+- 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+- 建议定期轮换管理员密码（控制台“修改密码”）与上游 Key。

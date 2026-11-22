@@ -1,8 +1,13 @@
 server:
   addr: ":8080"
-  # admin_token: set this in production, or leave empty to auto-generate on
-  # first start (written to admin-token.txt next to the database file).
-  admin_token: ""
+  admin_username: "admin"
+  # 留空则首次启动生成随机密码，打印一次并写入 data/admin-password.txt
+  admin_password: ""
+  session_ttl: 12h
+  # 反向代理终止 TLS 时，把反代地址加入可信列表，用于解析真实客户端 IP
+  trusted_proxies: ["127.0.0.1/32", "::1/128"]
+  # 反代未传 X-Forwarded-Proto 时，可强制 Cookie 带 Secure
+  secure_cookie: false
   read_header_timeout: 10s
   shutdown_timeout: 30s
   max_body_bytes: 33554432

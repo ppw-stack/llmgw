@@ -1,7 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getToken, clearToken } from './api'
+import { api } from './api'
 import Login from './views/Login.vue'
+import PasswordDialog from './views/PasswordDialog.vue'
 import Overview from './views/Overview.vue'
 import Providers from './views/Providers.vue'
 import Keys from './views/Keys.vue'
@@ -16,8 +17,11 @@ const tabs = [
   { id: 'access', label: '接入说明', component: Access },
 ]
 
-const authed = ref(!!getToken())
-const tab = ref(location.hash.replace('#', '') || 'overview')
+const checking = ref(true)
+const authed = ref(false)
+const username = ref('')
+const showPassword = ref(false)
+const tab = ref('overview')
 const current = ref(tabs[0].component)
 
 function resolve(id) {
@@ -26,19 +30,42 @@ function resolve(id) {
   current.value = found.component
 }
 
-resolve(tab.value)
+resolve(location.hash.replace('#', '') || 'overview')
 
 function go(id) {
   location.hash = id
   resolve(id)
 }
 
-function logout() {
-  clearToken()
+async function check() {
+  checking.value = true
+  try {
+    const me = await api('/me')
+    username.value = me.username
+    authed.value = true
+  } catch {
+    authed.value = false
+  } finally {
+    checking.value = false
+  }
+}
+
+async function logout() {
+  try {
+    await api('/logout', { method: 'POST' })
+  } catch {
+    /* session may already be gone */
+  }
+  authed.value = false
+}
+
+function onPasswordChanged() {
+  showPassword.value = false
   authed.value = false
 }
 
 onMounted(() => {
+  check()
   window.addEventListener('llmgw-unauthorized', () => {
     authed.value = false
   })
@@ -49,7 +76,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <Login v-if="!authed" @done="authed = true" />
+  <div v-if="checking" class="login-wrap">
+    <p class="muted">加载中…</p>
+  </div>
+
+  <Login v-else-if="!authed" @done="check" />
 
   <div v-else class="layout">
     <header class="topbar">
@@ -68,11 +99,21 @@ onMounted(() => {
           {{ t.label }}
         </button>
       </nav>
-      <button class="ghost" @click="logout">退出</button>
+      <div class="row">
+        <span class="muted small">{{ username }}</span>
+        <button class="ghost" @click="showPassword = true">修改密码</button>
+        <button class="ghost" @click="logout">退出</button>
+      </div>
     </header>
 
     <main class="content">
       <component :is="current" :key="tab" />
     </main>
+
+    <PasswordDialog
+      v-if="showPassword"
+      @close="showPassword = false"
+      @changed="onPasswordChanged"
+    />
   </div>
 </template>

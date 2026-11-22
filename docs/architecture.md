@@ -43,6 +43,8 @@ internal/ingress/          路径归一化、协议判定、请求元数据解�
 internal/ingress/openai/   OpenAI 请求解析与错误编码
 internal/ingress/anthropic/
 internal/transport/        转发、SSE 透传、usage 嗅探、失败分类
+internal/auth/             网关 Key 生成、bcrypt 密码、会话令牌
+internal/clientip/         可信代理下解析真实客户端 IP
 internal/keypool/          上游 Key 轮询与失效标记
 internal/auth/             网关 Key 校验
 internal/store/            SQLite schema、仓储、异步日志写入

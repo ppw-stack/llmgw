@@ -12,16 +12,37 @@ import (
 )
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
-	if !auth.EqualToken(bearerToken(r), s.adminToken) {
-		writeAdminError(w, http.StatusUnauthorized, "invalid admin token")
+	w.Header().Set("Cache-Control", "no-store")
+	path := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/admin/api"), "/")
+
+	if path == "/login" {
+		s.handleLogin(w, r)
 		return
 	}
-	path := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/admin/api"), "/")
+	if path == "/logout" {
+		s.handleLogout(w, r)
+		return
+	}
+
+	id, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
 	switch {
+	case path == "/me":
+		writeJSON(w, http.StatusOK, map[string]any{
+			"username":  id.Username,
+			"api_token": id.API,
+		})
+	case path == "/password":
+		s.handlePassword(w, r, id)
+	case path == "/audit":
+		s.handleAudit(w, r)
 	case path == "/keys":
-		s.adminKeys(w, r)
+		s.adminKeys(w, r, id)
 	case strings.HasPrefix(path, "/keys/"):
-		s.adminKeyItem(w, r, strings.TrimPrefix(path, "/keys/"))
+		s.adminKeyItem(w, r, id, strings.TrimPrefix(path, "/keys/"))
 	case path == "/providers":
 		if r.Method != http.MethodGet {
 			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -42,7 +63,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request) {
+func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIdentity) {
 	switch r.Method {
 	case http.MethodGet:
 		keys, err := s.store.ListKeys()
@@ -76,6 +97,7 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		s.audit(r, id.Username, "key.create", k.Prefix, "success")
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"id":         k.ID,
 			"name":       k.Name,
@@ -90,8 +112,8 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, rawID string) {
-	id, ok := parseID(rawID)
+func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
+	keyID, ok := parseID(rawID)
 	if !ok {
 		writeAdminError(w, http.StatusBadRequest, "invalid key id")
 		return
@@ -109,7 +131,7 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, rawID stri
 			writeAdminError(w, http.StatusBadRequest, "enabled is required")
 			return
 		}
-		if err := s.store.SetKeyEnabled(id, *in.Enabled); err != nil {
+		if err := s.store.SetKeyEnabled(keyID, *in.Enabled); err != nil {
 			status := http.StatusInternalServerError
 			if err == store.ErrNotFound {
 				status = http.StatusNotFound
@@ -117,10 +139,11 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, rawID stri
 			writeAdminError(w, status, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": *in.Enabled})
+		s.audit(r, id.Username, "key.update", strconv.FormatInt(keyID, 10), "success")
+		writeJSON(w, http.StatusOK, map[string]any{"id": keyID, "enabled": *in.Enabled})
 
 	case http.MethodDelete:
-		if err := s.store.DeleteKey(id); err != nil {
+		if err := s.store.DeleteKey(keyID); err != nil {
 			status := http.StatusInternalServerError
 			if err == store.ErrNotFound {
 				status = http.StatusNotFound
@@ -128,6 +151,7 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, rawID stri
 			writeAdminError(w, status, err.Error())
 			return
 		}
+		s.audit(r, id.Username, "key.delete", strconv.FormatInt(keyID, 10), "success")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

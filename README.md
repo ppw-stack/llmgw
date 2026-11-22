@@ -34,7 +34,7 @@ $EDITOR config.yaml # 填上游 keys 与 models
 
 # 4. 打开控制台
 open http://localhost:8080
-#    admin token 在 data/admin-token.txt
+#    用户名 admin，密码在 data/admin-password.txt
 ```
 
 首次启动会打印一个网关 Key（仅一次）：
@@ -90,19 +90,32 @@ providers:
 ## 管理 API
 
 ```bash
+# 登录，拿到会话 Cookie
+curl -c cookies.txt -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}' \
+  localhost:8080/admin/api/login
+
 # 创建网关 Key（明文只返回一次）
-curl -X POST localhost:8080/admin/api/keys \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+curl -b cookies.txt -X POST localhost:8080/admin/api/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"laptop"}'
 
-# 查看供应商、日志、用量
-curl -H "Authorization: Bearer $ADMIN_TOKEN" localhost:8080/admin/api/providers
-curl -H "Authorization: Bearer $ADMIN_TOKEN" "localhost:8080/admin/api/logs?limit=20"
-curl -H "Authorization: Bearer $ADMIN_TOKEN" "localhost:8080/admin/api/usage?days=7"
+# 查看供应商、日志、用量、审计
+curl -b cookies.txt localhost:8080/admin/api/providers
+curl -b cookies.txt "localhost:8080/admin/api/logs?limit=20"
+curl -b cookies.txt "localhost:8080/admin/api/usage?days=7"
+curl -b cookies.txt "localhost:8080/admin/api/audit?limit=20"
 ```
 
-`admin_token` 留空时首次启动自动生成，写入数据库旁的 `admin-token.txt`（0600）。
+若需要在脚本中使用 Bearer token，可显式配置 `server.admin_token`。
+
+## 公网部署
+
+- 管理员密码 bcrypt 存储；会话 Cookie 为 `HttpOnly` + `SameSite=Strict`，HTTPS 下自动 `Secure`。
+- 登录失败按 IP 限速，管理写操作有审计日志。
+- 由 nginx/Caddy/云 LB 终止 TLS，并配置 `trusted_proxies` 以正确解析客户端 IP。
+- 反代必须关闭缓冲（`proxy_buffering off`），否则流式会被攒成一次性返回。
+- nginx 示例、HSTS、`/metrics` 保护等见 [docs/operations.md](docs/operations.md#9-安全与公网部署)。
 
 ## 目录结构
 
@@ -114,7 +127,8 @@ internal/router/      查表路由与快照
 internal/keypool/     上游 Key 轮询与失效标记
 internal/transport/   转发、SSE 透传、usage 嗅探、错误分类
 internal/store/       SQLite、异步日志、用量查询
-internal/auth/        网关 Key 生成与校验
+internal/auth/        网关 Key 生成、密码哈希、会话令牌
+internal/clientip/    可信代理解析客户端 IP
 internal/observ/      Prometheus 指标
 internal/server/      mux、中间件、数据面 handler、管理 API
 internal/webui/       内嵌的 Vite 构建产物（go:embed）

@@ -1,26 +1,27 @@
 <script setup>
 import { ref } from 'vue'
-import { api, setToken } from '../api'
+import { api } from '../api'
 
 const emit = defineEmits(['done'])
-const token = ref('')
+const username = ref('admin')
+const password = ref('')
 const error = ref('')
 const busy = ref(false)
 
 async function submit() {
-  if (!token.value.trim()) {
-    error.value = '请输入 admin token'
+  if (!password.value) {
+    error.value = '请输入密码'
     return
   }
   busy.value = true
   error.value = ''
-  const previous = localStorage.getItem('llmgw_admin_token') || ''
-  setToken(token.value.trim())
   try {
-    await api('/providers')
+    await api('/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: username.value.trim(), password: password.value }),
+    })
     emit('done')
   } catch (e) {
-    setToken(previous)
     error.value = e.message
   } finally {
     busy.value = false
@@ -32,22 +33,24 @@ async function submit() {
   <div class="login-wrap">
     <div class="card login-card">
       <h1>llmgw</h1>
-      <p class="muted">输入管理令牌以进入控制台</p>
+      <p class="muted">登录控制台</p>
       <form @submit.prevent="submit">
+        <input v-model="username" placeholder="用户名" autocomplete="username" />
         <input
-          v-model="token"
+          v-model="password"
           type="password"
-          placeholder="admin token"
+          placeholder="密码"
           autocomplete="current-password"
+          autofocus
         />
         <button class="primary" type="submit" :disabled="busy">
-          {{ busy ? '验证中…' : '进入' }}
+          {{ busy ? '登录中…' : '登录' }}
         </button>
       </form>
       <p v-if="error" class="error">{{ error }}</p>
       <p class="hint">
-        首次启动时令牌会写入数据库旁的 <code>admin-token.txt</code>，或由
-        <code>server.admin_token</code> 指定。
+        首次启动时密码会写入数据库旁的 <code>admin-password.txt</code>，或由
+        <code>server.admin_password</code> 指定。
       </p>
     </div>
   </div>

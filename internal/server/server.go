@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -23,37 +24,51 @@ import (
 )
 
 type Options struct {
-	Router     *router.Router
-	Forwarder  *transport.Forwarder
-	Store      *store.Store
-	AdminToken string
-	MaxBody    int64
-	Log        *slog.Logger
-	UI         http.Handler
+	Router         *router.Router
+	Forwarder      *transport.Forwarder
+	Store          *store.Store
+	AdminToken     string
+	SessionTTL     time.Duration
+	SecureCookie   bool
+	TrustedProxies []netip.Prefix
+	MaxBody        int64
+	Log            *slog.Logger
+	UI             http.Handler
 }
 
 type Server struct {
-	router     *router.Router
-	forwarder  *transport.Forwarder
-	store      *store.Store
-	adminToken string
-	maxBody    int64
-	log        *slog.Logger
-	ui         http.Handler
+	router         *router.Router
+	forwarder      *transport.Forwarder
+	store          *store.Store
+	adminToken     string
+	maxBody        int64
+	log            *slog.Logger
+	ui             http.Handler
+	sessionTTL     time.Duration
+	secureCookie   bool
+	trustedProxies []netip.Prefix
+	limiter        *loginLimiter
 }
 
 func New(o Options) *Server {
 	if o.MaxBody <= 0 {
 		o.MaxBody = 32 << 20
 	}
+	if o.SessionTTL <= 0 {
+		o.SessionTTL = 12 * time.Hour
+	}
 	return &Server{
-		router:     o.Router,
-		forwarder:  o.Forwarder,
-		store:      o.Store,
-		adminToken: o.AdminToken,
-		maxBody:    o.MaxBody,
-		log:        o.Log,
-		ui:         o.UI,
+		router:         o.Router,
+		forwarder:      o.Forwarder,
+		store:          o.Store,
+		adminToken:     o.AdminToken,
+		maxBody:        o.MaxBody,
+		log:            o.Log,
+		ui:             o.UI,
+		sessionTTL:     o.SessionTTL,
+		secureCookie:   o.SecureCookie,
+		trustedProxies: o.TrustedProxies,
+		limiter:        newLoginLimiter(5*time.Minute, 10),
 	}
 }
 
@@ -74,7 +89,29 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/metrics", metricsHandler())
 	mux.HandleFunc("/admin/api/", s.handleAdmin)
 	mux.HandleFunc("/", s.handleRoot)
-	return s.recoverer(s.withRequestID(normalizePath(mux)))
+	return securityHeaders(s.recoverer(s.withRequestID(normalizePath(mux))))
+}
+
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; " +
+	"connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
+		if isHTTPS(r) {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func normalizePath(next http.Handler) http.Handler {

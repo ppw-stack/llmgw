@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -57,20 +55,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	adminToken := resolveAdminToken(cfg, st, logger)
+	adminUsername := ensureAdmin(cfg, st, logger)
+	adminToken := legacyAdminToken(cfg, st, logger)
 	bootstrapKey(st, logger)
 
 	keys := keypool.NewManager()
 	forwarder := transport.New(rt, st, keys, logger)
 
 	srv := server.New(server.Options{
-		Router:     rt,
-		Forwarder:  forwarder,
-		Store:      st,
-		AdminToken: adminToken,
-		MaxBody:    cfg.Server.MaxBodyBytes,
-		Log:        logger,
-		UI:         webui.Handler(),
+		Router:         rt,
+		Forwarder:      forwarder,
+		Store:          st,
+		AdminToken:     adminToken,
+		SessionTTL:     cfg.Server.SessionTTL.Value(),
+		SecureCookie:   cfg.Server.SecureCookie,
+		TrustedProxies: cfg.Server.TrustedPrefixes,
+		MaxBody:        cfg.Server.MaxBodyBytes,
+		Log:            logger,
+		UI:             webui.Handler(),
 	})
 
 	httpSrv := &http.Server{
@@ -91,7 +93,8 @@ func main() {
 			"addr", cfg.Server.Addr,
 			"openai_base", "http://"+hostPort(cfg.Server.Addr)+"/openai/v1",
 			"anthropic_base", "http://"+hostPort(cfg.Server.Addr)+"/anthropic",
-			"providers", len(cfg.Providers))
+			"providers", len(cfg.Providers),
+			"admin_user", adminUsername)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server", "err", err)
 			stop()
@@ -128,26 +131,76 @@ func newLogger(c config.Log) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, opts))
 }
 
-// resolveAdminToken prefers config, then the database, then generates one.
-func resolveAdminToken(cfg *config.Config, st *store.Store, log *slog.Logger) string {
+// ensureAdmin makes sure the configured admin user exists. When no password is
+// configured and the user is new, a random password is generated and printed
+// exactly once.
+func ensureAdmin(cfg *config.Config, st *store.Store, log *slog.Logger) string {
+	username := cfg.Server.AdminUsername
+	if username == "" {
+		username = "admin"
+	}
+	user, err := st.UserByName(username)
+	if err == nil {
+		if cfg.Server.AdminPassword != "" && !auth.CheckPassword(user.PasswordHash, cfg.Server.AdminPassword) {
+			hash, herr := auth.HashPassword(cfg.Server.AdminPassword)
+			if herr != nil {
+				log.Error("hash admin password", "err", herr)
+			} else if uerr := st.UpdatePassword(username, hash); uerr != nil {
+				log.Error("update admin password", "err", uerr)
+			} else {
+				log.Info("admin password reset from config", "username", username)
+			}
+		}
+		return username
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		log.Error("lookup admin user", "err", err)
+		return username
+	}
+
+	password := cfg.Server.AdminPassword
+	generated := false
+	if password == "" {
+		password, err = auth.RandomPassword(24)
+		if err != nil {
+			log.Error("generate admin password", "err", err)
+			return username
+		}
+		generated = true
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		log.Error("hash admin password", "err", err)
+		return username
+	}
+	if _, err := st.CreateUser(username, hash); err != nil {
+		log.Error("create admin user", "err", err)
+		return username
+	}
+	if !generated {
+		log.Info("admin user created from config", "username", username)
+		return username
+	}
+	path := filepath.Join(filepath.Dir(cfg.Database.Path), "admin-password.txt")
+	_ = os.WriteFile(path, []byte(password+"\n"), 0o600)
+	fmt.Printf("[BOOTSTRAP] admin username: %s\n", username)
+	fmt.Printf("[BOOTSTRAP] admin password: %s\n", password)
+	fmt.Printf("[BOOTSTRAP] also written to %s\n", path)
+	return username
+}
+
+// legacyAdminToken keeps the old Bearer token working, but only when it was
+// explicitly configured or already stored by a previous version.
+func legacyAdminToken(cfg *config.Config, st *store.Store, log *slog.Logger) string {
 	if cfg.Server.AdminToken != "" {
 		return cfg.Server.AdminToken
 	}
 	if v, err := st.GetSetting("admin_token"); err == nil && v != "" {
-		log.Info("admin token loaded from database; see admin-token.txt next to the database file")
+		log.Warn("legacy admin_token found in database and still accepted as a Bearer token; " +
+			"set server.admin_token to keep it or remove the setting to disable it")
 		return v
 	}
-	buf := make([]byte, 24)
-	_, _ = rand.Read(buf)
-	token := hex.EncodeToString(buf)
-	if err := st.SetSetting("admin_token", token); err != nil {
-		log.Error("store admin token", "err", err)
-	}
-	path := filepath.Join(filepath.Dir(cfg.Database.Path), "admin-token.txt")
-	_ = os.WriteFile(path, []byte(token+"\n"), 0o600)
-	fmt.Printf("[BOOTSTRAP] admin token: %s\n", token)
-	fmt.Printf("[BOOTSTRAP] also written to %s\n", path)
-	return token
+	return ""
 }
 
 // bootstrapKey creates the first gateway key so the binary is usable at once.

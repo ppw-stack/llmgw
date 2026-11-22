@@ -99,12 +99,23 @@
 
 Web 控制台（`/`，Vue 3 构建产物内嵌进二进制）：
 
-- 登录：输入 admin token，存于浏览器 localStorage。
+- 登录：用户名 + 密码，成功后由服务端下发 HttpOnly 会话 Cookie。
 - 概览：请求数、输入/输出 tokens、成本，近 1/7/30 天柱状图，按模型/按 Key 聚合。
 - 供应商：只读展示 Provider 与 Endpoint、上游 Key 数量、模型映射。
 - 网关 Key：创建（明文仅显示一次）、启停、删除。
 - 请求日志：按模型过滤，展示状态、延迟、TTFT、tokens、成本、错误码。
 - 接入说明：两条 base_url 与各客户端填法，可一键复制。
+- 修改密码：成功后所有会话失效。
+
+### FR-11 管理认证
+
+- 管理员密码使用 bcrypt 存储，不存在明文。
+- 会话令牌随机 32 字节，数据库只存 SHA-256 哈希，默认 12 小时过期。
+- Cookie 属性：`HttpOnly`、`SameSite=Strict`、HTTPS 下 `Secure`。
+- 登录失败按客户端 IP 限速（5 分钟 10 次），超限返回 `429` + `Retry-After`。
+- 管理写操作写审计日志（登录、登出、改密、Key 增删改）。
+- 可选 `server.admin_token` 作为脚本用 Bearer token；未配置则禁用。
+- 客户端 IP 仅在直连方属于 `trusted_proxies` 时才采信 `X-Forwarded-For`。
 
 REST API：
 
@@ -126,6 +137,8 @@ REST API：
 | NFR-06 | 安全 | 上游 Key 仅从配置/环境读取，不回显于任何接口；网关 Key 仅存哈希 |
 | NFR-07 | 兼容 | OpenAI/Anthropic 官方 SDK、Claude Code、Codex CLI 可直接指向 |
 | NFR-08 | 部署 | 单二进制（darwin/linux, amd64/arm64），无 cgo |
+| NFR-09 | 管理认证 | bcrypt 密码、HttpOnly 会话 Cookie、登录限速、审计日志 |
+| NFR-10 | 公网 | 反代终止 TLS、trusted_proxies、安全响应头、CSP |
 
 ## 6. 验收标准
 

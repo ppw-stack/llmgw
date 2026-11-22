@@ -1,6 +1,70 @@
 # 管理 API
 
-所有管理接口以 `/admin/api` 为前缀，使用 `Authorization: Bearer <admin_token>`。
+所有管理接口以 `/admin/api` 为前缀。
+
+认证方式：
+
+- `POST /admin/api/login`：用户名 + 密码，成功后下发 `llmgw_session` Cookie（HttpOnly / SameSite=Strict / 12h）。
+- 其余接口需要有效会话 Cookie。
+- 若配置了 `server.admin_token`，也接受 `Authorization: Bearer <token>`（用于脚本与旧版本兼容）。
+
+浏览器之外的调用示例：
+
+```bash
+curl -c cookies.txt -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}' \
+  https://gw.example.com/admin/api/login
+
+curl -b cookies.txt https://gw.example.com/admin/api/keys
+```
+
+## 认证
+
+### 登录
+
+```
+POST /admin/api/login
+{"username":"admin","password":"..."}
+
+200
+{"username":"admin","expires_at":"2026-11-22T21:13:24Z"}
+
+Set-Cookie: llmgw_session=...; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200
+```
+
+失败：`401 invalid username or password`；连续失败超限：`429` + `Retry-After`。
+
+### 登出
+
+```
+POST /admin/api/logout   → 204
+```
+
+### 当前用户
+
+```
+GET /admin/api/me
+200 {"username":"admin","api_token":false}
+```
+
+### 修改密码
+
+```
+POST /admin/api/password
+{"old_password":"...","new_password":"..."}   → 204
+```
+
+成功后该用户全部会话失效，需要重新登录。
+
+### 审计日志
+
+```
+GET /admin/api/audit?limit=100
+200 [{"ts":"...","actor":"admin","action":"login","target":"admin",
+      "ip":"203.0.113.9","user_agent":"...","result":"success"}]
+```
+
+`action` 取值：`login`、`logout`、`password_change`、`key.create`、`key.update`、`key.delete`。
 
 ## 网关 Key
 

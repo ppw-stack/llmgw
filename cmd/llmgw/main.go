@@ -163,8 +163,8 @@ func main() {
 			"addr", cfg.Server.Addr,
 			"openai_base", "http://"+hostPort(cfg.Server.Addr)+"/openai/v1",
 			"anthropic_base", "http://"+hostPort(cfg.Server.Addr)+"/anthropic",
-			"instances", len(cfg.Instances),
-			"models", len(cfg.Models),
+			"instances", len(effective.Instances),
+			"models", len(effective.Models),
 			"admin_user", adminUsername)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server", "err", err)

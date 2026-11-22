@@ -23,6 +23,7 @@ import (
 	"github.com/pw/llmgw/internal/server"
 	"github.com/pw/llmgw/internal/store"
 	"github.com/pw/llmgw/internal/transport"
+	"github.com/pw/llmgw/internal/webui"
 )
 
 func main() {
@@ -69,6 +70,7 @@ func main() {
 		AdminToken: adminToken,
 		MaxBody:    cfg.Server.MaxBodyBytes,
 		Log:        logger,
+		UI:         webui.Handler(),
 	})
 
 	httpSrv := &http.Server{

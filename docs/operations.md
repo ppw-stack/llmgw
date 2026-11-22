@@ -81,6 +81,15 @@ pricing:
 [BOOTSTRAP] first gateway key created: sk-gw-xxxxxxxx   (save it now; it is not shown again)
 ```
 
+若未配置 `server.admin_token`，会生成管理令牌并写入 `data/admin-token.txt`（0600）：
+
+```
+[BOOTSTRAP] admin token: <token>
+[BOOTSTRAP] also written to ./data/admin-token.txt
+```
+
+浏览器打开 `http://<host>:8080/`，输入该令牌即可进入控制台。
+
 随后即可：
 
 ```bash

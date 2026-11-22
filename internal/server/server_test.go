@@ -17,6 +17,7 @@ import (
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
 	"github.com/pw/llmgw/internal/transport"
+	"github.com/pw/llmgw/internal/webui"
 )
 
 type reqInfo struct {
@@ -105,6 +106,7 @@ func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []
 		AdminToken: "admin-test",
 		MaxBody:    1 << 20,
 		Log:        logger,
+		UI:         webui.Handler(),
 	})
 	gw := httptest.NewServer(srv.Handler())
 	t.Cleanup(gw.Close)
@@ -402,5 +404,51 @@ func TestPathNormalizationAndModels(t *testing.T) {
 	body := readAll(t, mresp)
 	if !strings.Contains(body, "gpt-test") || strings.Contains(body, "claude-test") {
 		t.Fatalf("models endpoint leaked protocols: %s", body)
+	}
+}
+
+func TestSPAAndUnknownPaths(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"up-1"})
+
+	resp, err := http.Get(gw.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readAll(t, resp)
+	if resp.StatusCode != 200 || !strings.Contains(body, `id="app"`) {
+		t.Fatalf("root should serve the SPA shell: %d %s", resp.StatusCode, body)
+	}
+
+	// Client-side route falls back to the shell.
+	resp, err = http.Get(gw.URL + "/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = readAll(t, resp)
+	if resp.StatusCode != 200 || !strings.Contains(body, `id="app"`) {
+		t.Fatalf("client route fallback failed: %d %s", resp.StatusCode, body)
+	}
+
+	// Missing asset is a real 404, not the shell.
+	resp, err = http.Get(gw.URL + "/assets/missing.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = readAll(t, resp)
+	if resp.StatusCode != 404 {
+		t.Fatalf("missing asset status = %d", resp.StatusCode)
+	}
+
+	// Unknown API path stays JSON with the base_url hint.
+	resp, err = http.Get(gw.URL + "/openai/v2/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = readAll(t, resp)
+	if resp.StatusCode != 404 || !strings.Contains(body, "invalid_request_error") {
+		t.Fatalf("api 404 body = %s", body)
+	}
+	if !strings.Contains(body, "/openai/v1") {
+		t.Fatalf("api 404 should hint the correct base_url: %s", body)
 	}
 }

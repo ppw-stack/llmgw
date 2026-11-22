@@ -47,9 +47,10 @@ internal/keypool/          上游 Key 轮询与失效标记
 internal/auth/             网关 Key 校验
 internal/store/            SQLite schema、仓储、异步日志写入
 internal/usage/            价格表与成本计算
-internal/admin/            管理 REST API
+internal/server/           mux、中间件、数据面 handler、管理 REST API
+internal/webui/            内嵌的 Vite 构建产物（go:embed）
 internal/observ/           metrics、日志
-internal/server/           mux 组装、中间件
+web/                       Vue 3 + Vite 控制台源码
 ```
 
 ## 3. 请求生命周期
@@ -146,7 +147,8 @@ Key 池状态（失效标记、轮询索引）按 `provider name` 迁移到新�
 ## 8. 目录与构建
 
 ```
-make build   # 构建二进制
+make web     # 构建前端到 internal/webui/dist
+make build   # 构建二进制（含内嵌控制台）
 make test    # 单元测试 + race
 make run     # 本地启动（读取 config.yaml）
 ```

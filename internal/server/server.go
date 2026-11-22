@@ -29,6 +29,7 @@ type Options struct {
 	AdminToken string
 	MaxBody    int64
 	Log        *slog.Logger
+	UI         http.Handler
 }
 
 type Server struct {
@@ -38,6 +39,7 @@ type Server struct {
 	adminToken string
 	maxBody    int64
 	log        *slog.Logger
+	ui         http.Handler
 }
 
 func New(o Options) *Server {
@@ -51,6 +53,7 @@ func New(o Options) *Server {
 		adminToken: o.AdminToken,
 		maxBody:    o.MaxBody,
 		log:        o.Log,
+		ui:         o.UI,
 	}
 }
 
@@ -127,11 +130,15 @@ func protocolOfPath(path string) string {
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if isDataPlanePath(r.URL.Path) {
 		protocol := protocolOfPath(r.URL.Path)
 		ingress.WriteError(w, protocol, http.StatusNotFound, "invalid_request_error",
 			"unknown path "+r.URL.Path+". OpenAI base_url must be <gateway>/openai/v1; "+
 				"Anthropic base_url must be <gateway>/anthropic.")
+		return
+	}
+	if s.ui != nil {
+		s.ui.ServeHTTP(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -139,7 +146,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 <html><head><meta charset="utf-8"><title>llmgw</title></head>
 <body style="font-family:ui-sans-serif,system-ui;max-width:720px;margin:48px auto;line-height:1.7">
 <h1>llmgw</h1>
-<p>轻量 LLM 网关。管理台在 M3 提供，当前可用接口：</p>
+<p>Web 控制台未构建。运行 <code>make web</code> 后重新编译。</p>
 <ul>
   <li><code>POST /openai/v1/chat/completions</code></li>
   <li><code>GET  /openai/v1/models</code></li>
@@ -147,8 +154,18 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
   <li><code>GET  /admin/api/keys</code>（需 admin_token）</li>
   <li><code>GET  /metrics</code></li>
 </ul>
-<p>OpenAI base_url: <code>/openai/v1</code> · Anthropic base_url: <code>/anthropic</code></p>
 </body></html>`)
+}
+
+// isDataPlanePath reports whether an unknown path belongs to the API surface
+// rather than the SPA, so callers get a JSON error instead of an HTML shell.
+func isDataPlanePath(path string) bool {
+	for _, prefix := range []string{"/openai", "/anthropic", "/admin", "/v1"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol string) {

@@ -16,9 +16,9 @@
 | 供应商 → 端点两层模型，Key 池轮询 | RPM/TPM/预算、模型白名单 |
 | 上游 401/403 自动换 Key | 自动重试、自动降级 |
 | 请求日志、token 与成本统计 | 多租户、计费、在线支付 |
-| 配置热更新 | 管理台（M3 提供，当前为 REST API） |
-| Prometheus 指标、结构化日志 | MCP、RAG、护栏、协议转换 |
-
+| 配置热更新 | MCP、RAG、护栏 |
+| Web 控制台：概览 / 供应商 / Key / 日志 / 接入说明 | Kubernetes Operator |
+| Prometheus 指标、结构化日志 | |
 ## 快速开始
 
 ```bash
@@ -31,6 +31,10 @@ $EDITOR config.yaml # 填上游 keys 与 models
 
 # 3. 启动
 ./bin/llmgw -config config.yaml
+
+# 4. 打开控制台
+open http://localhost:8080
+#    admin token 在 data/admin-token.txt
 ```
 
 首次启动会打印一个网关 Key（仅一次）：
@@ -113,18 +117,25 @@ internal/store/       SQLite、异步日志、用量查询
 internal/auth/        网关 Key 生成与校验
 internal/observ/      Prometheus 指标
 internal/server/      mux、中间件、数据面 handler、管理 API
+internal/webui/       内嵌的 Vite 构建产物（go:embed）
+web/                  Vue 3 + Vite 控制台源码
 docs/                 需求、架构、路由、API、运维
 ```
 
 ## 开发
 
 ```bash
+make web       # 只重建前端（产物写入 internal/webui/dist）
+make build     # 重建前端 + 编译二进制
 make test      # go test -race ./...
 make vet
 make run       # 读取 ./config.yaml
 ```
 
-依赖：Go 1.26+，无 cgo（SQLite 使用 `modernc.org/sqlite`）。
+修改 `web/` 下的任何文件后，必须执行 `make web`（或 `make build`）才会嵌入新产物。
+前端开发时可用 `cd web && npm run dev`，Vite 会把 `/admin/api` 代理到 `localhost:8080`。
+
+依赖：Go 1.26+、Node 20+，无 cgo（SQLite 使用 `modernc.org/sqlite`）。
 
 ## 文档
 

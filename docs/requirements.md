@@ -95,7 +95,18 @@
 - `/metrics`：请求数、延迟直方图、TTFT、token 计数、上游错误数、日志丢弃数。
 - 结构化 JSON 日志，日志中带 `request_id`；响应头回传 `X-Request-Id`。
 
-### FR-10 管理面
+### FR-10 管理面（Web 控制台 + REST API）
+
+Web 控制台（`/`，Vue 3 构建产物内嵌进二进制）：
+
+- 登录：输入 admin token，存于浏览器 localStorage。
+- 概览：请求数、输入/输出 tokens、成本，近 1/7/30 天柱状图，按模型/按 Key 聚合。
+- 供应商：只读展示 Provider 与 Endpoint、上游 Key 数量、模型映射。
+- 网关 Key：创建（明文仅显示一次）、启停、删除。
+- 请求日志：按模型过滤，展示状态、延迟、TTFT、tokens、成本、错误码。
+- 接入说明：两条 base_url 与各客户端填法，可一键复制。
+
+REST API：
 
 - `POST /admin/api/keys` 创建（返回一次明文）、`GET /admin/api/keys` 列表、`PATCH /admin/api/keys/{id}` 启停、`DELETE`。
 - `GET /admin/api/providers` 查看当前配置的供应商与端点（只读，来自 config.yaml）。
@@ -137,5 +148,5 @@
 | M0 | 文档（本目录） |
 | M1 | 骨架 + OpenAI 直通 + 查表路由 + Key 池 + 日志 + metrics |
 | M2 | Anthropic 入口 + SSE 透传 + usage 嗅探 |
-| M3 | Web 控制台 |
+| M3 | Web 控制台（Vue 3 + Vite，go:embed） |
 | M4 | Docker、发布、端到端验收 |

@@ -1,0 +1,42 @@
+name: llmgw-test
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: llmgw:test
+    container_name: llmgw-test
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./test-config.yaml:/etc/llmgw/config.yaml:ro
+      - llmgw-test-data:/data
+    depends_on:
+      mock:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "llmgw", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  mock:
+    image: python:3.13-alpine
+    container_name: llmgw-mock
+    command: ["python", "/app/mock_upstream.py"]
+    volumes:
+      - ./mock_upstream.py:/app/mock_upstream.py:ro
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
+volumes:
+  llmgw-test-data:

@@ -151,6 +151,14 @@ docker compose logs llmgw     # 首次启动会打印管理员密码
 
 镜像以非 root 用户运行，`/data` 为数据卷，内置 `HEALTHCHECK`（`llmgw -healthcheck`）。详见 [docs/operations.md](docs/operations.md#10-docker-与发布)。
 
+本地测试环境（网关 + 确定性 mock 上游，无需真实 API Key）：
+
+```bash
+docker compose -f deploy/docker-compose.test.yml up -d --build
+```
+
+访问 http://localhost:8080（`admin` / `test-admin-password`）。详见 [deploy/README.md](deploy/README.md)。
+
 ## 版本与发布
 
 ```bash

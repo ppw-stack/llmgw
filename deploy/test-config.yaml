@@ -1,0 +1,44 @@
+# Local test environment: gateway + deterministic mock upstream.
+# Credentials here are test-only; never reuse them in production.
+
+server:
+  addr: ":8080"
+  admin_username: admin
+  admin_password: "test-admin-password"
+  metrics_token: "test-metrics-token"
+  session_ttl: 2h
+  trusted_proxies: ["127.0.0.1/32"]
+  secure_cookie: false
+
+database:
+  path: "/data/llmgw.db"
+
+log:
+  level: debug
+  format: text
+
+providers:
+  - name: mock
+    keys: ["mock-upstream-key"]
+    timeout: 30s
+    endpoints:
+      - name: openai
+        protocol: openai
+        base_url: http://mock:8000
+        models:
+          gpt-test: gpt-test
+          gpt-alias: gpt-upstream-name
+      - name: anthropic
+        protocol: anthropic
+        base_url: http://mock:8000
+        version: "2023-06-01"
+        models:
+          claude-test: claude-test
+
+pricing:
+  gpt-test:
+    input_per_mtok: 1
+    output_per_mtok: 2
+  claude-test:
+    input_per_mtok: 3
+    output_per_mtok: 15

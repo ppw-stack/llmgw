@@ -2,27 +2,34 @@
 
 ## 1. 目标
 
-v1 的路由只有一个动作：**根据请求协议和模型名，查到唯一的目标端点**。
+v1 的路由只有一个动作：**根据请求协议和模型名，查到唯一的目标供应商**。
 
 ```
-(protocol, model) ──查表──> Target{endpoint, provider, upstream_model}
+(protocol, model) ──查表──> Target{provider, base_url, upstream_model}
 ```
 
 没有规则引擎、没有权重、没有优先级、没有 fallback、没有熔断。
 
 ## 2. 索引构建
 
-启动或配置重载时，遍历所有 `provider.endpoints[].models`：
+启动或配置重载时，先把每个供应商解析成路由就绪形态（内置端点在这里展开两个 base URL），再遍历模型列表：
 
 ```go
 for _, p := range providers {
-    for _, ep := range p.Endpoints {
-        for alias, upstream := range ep.Models {
-            k := key{ep.Protocol, alias}
+    eff := p.Effective() // preset 或自定义 URL + 模型
+    for _, ep := range []struct{protocol, baseURL string}{
+        {openai, eff.OpenAIBaseURL},
+        {anthropic, eff.AnthropicBaseURL},
+    } {
+        if ep.baseURL == "" {
+            continue // 只填了一个 base URL 的供应商只开放对应协议
+        }
+        for alias, upstream := range eff.Models {
+            k := key{ep.protocol, alias}
             if _, dup := idx[k]; dup {
-                return fmt.Errorf("model %q duplicated under protocol %q", alias, ep.Protocol)
+                return fmt.Errorf("model %q duplicated under protocol %q", alias, ep.protocol)
             }
-            idx[k] = Target{Provider: p.Name, Endpoint: ep.Name, UpstreamModel: upstream}
+            idx[k] = Target{Provider: p.Name, BaseURL: ep.baseURL, UpstreamModel: upstream}
         }
     }
 }

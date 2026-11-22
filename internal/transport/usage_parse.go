@@ -37,6 +37,11 @@ func (u *usageAcc) observeLine(protocol string, line []byte) {
 		}
 		if gjson.GetBytes(payload, "type").String() == "message_delta" {
 			if r := gjson.GetBytes(payload, "usage"); r.Exists() && r.IsObject() {
+				// Standard Anthropic reports input_tokens at message_start, but
+				// some compatible upstreams (MiniMax) only report it here.
+				if v := r.Get("input_tokens").Int(); v > 0 {
+					u.prompt = v
+				}
 				u.completion = r.Get("output_tokens").Int()
 				if v := r.Get("cache_read_input_tokens").Int(); v > 0 {
 					u.cacheRead = v

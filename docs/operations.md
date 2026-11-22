@@ -34,45 +34,42 @@ log:
   format: json
 
 providers:
+  # 内置端点：只需 preset + API Key
+  # 国内用 minimax-mplan-cn，国际用 minimax-mplan-global（两者 Key 不通用）
+  - name: minimax-cn
+    preset: minimax-mplan-cn
+    api_key: "${MINIMAX_KEY}"
+
+  # 自定义端点：一个 Key + 最多两个 base URL + 模型
   - name: glm
-    keys:
-      - "${GLM_KEY_1}"
-      - "${GLM_KEY_2}"
-    timeout: 120s
-    endpoints:
-      - name: openai
-        protocol: openai
-        base_url: https://open.bigmodel.cn/api/paas/v4
-        models:
-          glm-4.6: glm-4.6
-      - name: anthropic
-        protocol: anthropic
-        base_url: https://open.bigmodel.cn/api/anthropic
-        version: "2023-06-01"
-        models:
-          glm-4.6: glm-4.6
+    api_key: "${GLM_KEY}"
+    models:
+      - glm-4.6
+    openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
 
   - name: deepseek
-    keys: ["${DEEPSEEK_KEY}"]
-    endpoints:
-      - name: openai
-        protocol: openai
-        base_url: https://api.deepseek.com/v1
-        models:
-          deepseek-chat: deepseek-chat
+    api_key: "${DEEPSEEK_KEY}"
+    models: [deepseek-chat]
+    openai_base_url: https://api.deepseek.com/v1
 
 # 可选：用于成本估算，单位美元 / 百万 token
 pricing:
-  glm-4.6:       { input_per_mtok: 0.6, output_per_mtok: 2.2 }
-  deepseek-chat: { input_per_mtok: 0.27, output_per_mtok: 1.1 }
+  MiniMax-M3.1-Flash: { input_per_mtok: 0.3, output_per_mtok: 1.2 }
+  glm-4.6:            { input_per_mtok: 0.6, output_per_mtok: 2.2 }
+  deepseek-chat:      { input_per_mtok: 0.27, output_per_mtok: 1.1 }
 ```
 
 规则：
 
-- `keys` 支持 `${VAR}` 展开；留空表示上游不需要鉴权（如本地 Ollama）。
-- `base_url` 是上游的根，OpenAI 会拼 `/chat/completions`，Anthropic 会拼 `/v1/messages`。
-- 同一个 Provider 下可以同时挂两个协议的端点，共享 `keys`。
-- 同一协议内模型名重复会**拒绝启动**并打印两个来源。
+- `api_key` 支持 `${VAR}` 展开；留空表示上游不需要鉴权（如本地 Ollama）。
+- `models` 支持多行与 `对外名=上游名` 别名；同一份模型同时注册到两个协议。
+- `base_url` 是上游的根，OpenAI 会拼 `/chat/completions`（通常以 `/v1` 结尾），Anthropic 会拼 `/v1/messages`（不要带 `/v1`）。
+- 自定义供应商至少填一个 base URL；只填一个就只开放对应协议。
+- 内置端点（`preset`）不能再填 base URL；URL 与默认模型由程序内置目录提供。
+- 同一协议内模型名重复会**拒绝启动**并打印冲突来源。
+- 超时固定 120s，代理走 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
+- 旧版 `keys + endpoints` 写法已移除，升级时需改成上述形状（数据库中的旧供应商会自动迁移，保留第一个 Key）。
 
 ## 3. 首次启动
 
@@ -157,7 +154,7 @@ GET /metrics    Prometheus
 | `401 invalid gateway key` | Key 停用/删除；重新创建 |
 | `502 upstream unreachable` | 上游域名/DNS/代理问题；查看日志 `upstream_error` |
 | `504 upstream timeout` | 调大 provider `timeout`，或检查上游 |
-| Anthropic 请求 400 `anthropic-version` | 在端点配置 `version`（默认 `2023-06-01`） |
+| Anthropic 请求 400 `anthropic-version` | 网关固定发送 `2023-06-01`；确认上游支持该版本 |
 | 流式无输出 | 检查是否被中间反代缓冲；关闭 nginx `proxy_buffering` |
 
 ## 8. 反向代理注意事项

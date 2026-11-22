@@ -10,17 +10,23 @@ import (
 	"github.com/pw/llmgw/internal/secret"
 )
 
-// ProviderRecord is the storage form of a provider. Upstream keys are kept
+// ProviderSpec is the write form of a provider. The upstream key stays
 // encrypted; callers must use Providers to obtain plaintext config.
+type ProviderSpec struct {
+	Name             string
+	Preset           string
+	EncryptedKey     string
+	Models           config.Models
+	OpenAIBaseURL    string
+	AnthropicBaseURL string
+}
+
+// ProviderRecord is the storage form of a provider.
 type ProviderRecord struct {
-	ID            int64
-	Name          string
-	Proxy         string
-	TimeoutMS     int
-	EncryptedKeys []string
-	Endpoints     []config.Endpoint
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID int64
+	ProviderSpec
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 func (s *Store) CountProviders() (int, error) {
@@ -30,8 +36,9 @@ func (s *Store) CountProviders() (int, error) {
 }
 
 func (s *Store) ListProviderRecords() ([]ProviderRecord, error) {
-	rows, err := s.db.Query(`SELECT id, name, proxy, timeout_ms, keys_enc, endpoints_json,
-		created_at, updated_at FROM providers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, models_json,
+		openai_base_url, anthropic_base_url, created_at, updated_at
+		FROM providers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -39,16 +46,13 @@ func (s *Store) ListProviderRecords() ([]ProviderRecord, error) {
 	var out []ProviderRecord
 	for rows.Next() {
 		var rec ProviderRecord
-		var keysJSON, endpointsJSON, created, updated string
-		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Proxy, &rec.TimeoutMS,
-			&keysJSON, &endpointsJSON, &created, &updated); err != nil {
+		var modelsJSON, created, updated string
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey,
+			&modelsJSON, &rec.OpenAIBaseURL, &rec.AnthropicBaseURL, &created, &updated); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(keysJSON), &rec.EncryptedKeys); err != nil {
-			return nil, fmt.Errorf("provider %q: bad keys: %w", rec.Name, err)
-		}
-		if err := json.Unmarshal([]byte(endpointsJSON), &rec.Endpoints); err != nil {
-			return nil, fmt.Errorf("provider %q: bad endpoints: %w", rec.Name, err)
+		if err := json.Unmarshal([]byte(modelsJSON), &rec.Models); err != nil {
+			return nil, fmt.Errorf("provider %q: bad models: %w", rec.Name, err)
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -57,45 +61,42 @@ func (s *Store) ListProviderRecords() ([]ProviderRecord, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) CreateProvider(name, proxy string, timeoutMS int, encryptedKeys []string,
-	endpoints []config.Endpoint) (*ProviderRecord, error) {
-	keysJSON, err := json.Marshal(encryptedKeys)
+// CreateProvider stores a provider and returns the stored record.
+func (s *Store) CreateProvider(spec ProviderSpec) (*ProviderRecord, error) {
+	modelsJSON, err := json.Marshal(spec.Models)
 	if err != nil {
 		return nil, err
 	}
-	endpointsJSON, err := json.Marshal(endpoints)
-	if err != nil {
-		return nil, err
+	if spec.Models == nil {
+		modelsJSON = []byte("{}")
 	}
 	now := time.Now().UTC()
-	res, err := s.db.Exec(`INSERT INTO providers(name, proxy, timeout_ms, keys_enc,
-		endpoints_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?)`,
-		name, proxy, timeoutMS, string(keysJSON), string(endpointsJSON),
+	res, err := s.db.Exec(`INSERT INTO providers(name, preset, key_enc, models_json,
+		openai_base_url, anthropic_base_url, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		spec.Name, spec.Preset, spec.EncryptedKey, string(modelsJSON),
+		spec.OpenAIBaseURL, spec.AnthropicBaseURL,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &ProviderRecord{
-		ID: id, Name: name, Proxy: proxy, TimeoutMS: timeoutMS,
-		EncryptedKeys: encryptedKeys, Endpoints: endpoints,
-		CreatedAt: now, UpdatedAt: now,
-	}, nil
+	return &ProviderRecord{ID: id, ProviderSpec: spec, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (s *Store) UpdateProvider(id int64, name, proxy string, timeoutMS int,
-	encryptedKeys []string, endpoints []config.Endpoint) error {
-	keysJSON, err := json.Marshal(encryptedKeys)
+// UpdateProvider replaces the stored form of one provider.
+func (s *Store) UpdateProvider(id int64, spec ProviderSpec) error {
+	modelsJSON, err := json.Marshal(spec.Models)
 	if err != nil {
 		return err
 	}
-	endpointsJSON, err := json.Marshal(endpoints)
-	if err != nil {
-		return err
+	if spec.Models == nil {
+		modelsJSON = []byte("{}")
 	}
-	res, err := s.db.Exec(`UPDATE providers SET name=?, proxy=?, timeout_ms=?,
-		keys_enc=?, endpoints_json=?, updated_at=? WHERE id=?`,
-		name, proxy, timeoutMS, string(keysJSON), string(endpointsJSON),
+	res, err := s.db.Exec(`UPDATE providers SET name=?, preset=?, key_enc=?, models_json=?,
+		openai_base_url=?, anthropic_base_url=?, updated_at=? WHERE id=?`,
+		spec.Name, spec.Preset, spec.EncryptedKey, string(modelsJSON),
+		spec.OpenAIBaseURL, spec.AnthropicBaseURL,
 		time.Now().UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return err
@@ -125,20 +126,21 @@ func (s *Store) Providers(box *secret.Box) ([]config.Provider, error) {
 	}
 	out := make([]config.Provider, 0, len(records))
 	for _, rec := range records {
-		keys := make([]string, 0, len(rec.EncryptedKeys))
-		for _, enc := range rec.EncryptedKeys {
-			plain, err := box.Decrypt(enc)
+		key := ""
+		if rec.EncryptedKey != "" {
+			plain, err := box.Decrypt(rec.EncryptedKey)
 			if err != nil {
 				return nil, fmt.Errorf("provider %q: cannot decrypt upstream key: %w", rec.Name, err)
 			}
-			keys = append(keys, plain)
+			key = plain
 		}
 		out = append(out, config.Provider{
-			Name:      rec.Name,
-			Keys:      keys,
-			Timeout:   config.Duration(time.Duration(rec.TimeoutMS) * time.Millisecond),
-			Proxy:     rec.Proxy,
-			Endpoints: rec.Endpoints,
+			Name:             rec.Name,
+			Preset:           rec.Preset,
+			APIKey:           key,
+			Models:           rec.Models,
+			OpenAIBaseURL:    rec.OpenAIBaseURL,
+			AnthropicBaseURL: rec.AnthropicBaseURL,
 		})
 	}
 	return out, nil
@@ -147,19 +149,21 @@ func (s *Store) Providers(box *secret.Box) ([]config.Provider, error) {
 // ImportProviders seeds the database from config.yaml on first start.
 func (s *Store) ImportProviders(providers []config.Provider, box *secret.Box) error {
 	for _, p := range providers {
-		encrypted := make([]string, 0, len(p.Keys))
-		for _, key := range p.Keys {
-			enc, err := box.Encrypt(key)
+		spec := ProviderSpec{
+			Name:             p.Name,
+			Preset:           p.Preset,
+			Models:           p.Models,
+			OpenAIBaseURL:    p.OpenAIBaseURL,
+			AnthropicBaseURL: p.AnthropicBaseURL,
+		}
+		if p.APIKey != "" {
+			enc, err := box.Encrypt(p.APIKey)
 			if err != nil {
 				return err
 			}
-			encrypted = append(encrypted, enc)
+			spec.EncryptedKey = enc
 		}
-		timeoutMS := int(p.Timeout.Value() / time.Millisecond)
-		if timeoutMS <= 0 {
-			timeoutMS = 120000
-		}
-		if _, err := s.CreateProvider(p.Name, p.Proxy, timeoutMS, encrypted, p.Endpoints); err != nil {
+		if _, err := s.CreateProvider(spec); err != nil {
 			if isUniqueViolation(err) {
 				continue
 			}

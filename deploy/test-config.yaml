@@ -19,21 +19,13 @@ log:
 
 providers:
   - name: mock
-    keys: ["mock-upstream-key"]
-    timeout: 30s
-    endpoints:
-      - name: openai
-        protocol: openai
-        base_url: http://mock:8000
-        models:
-          gpt-test: gpt-test
-          gpt-alias: gpt-upstream-name
-      - name: anthropic
-        protocol: anthropic
-        base_url: http://mock:8000
-        version: "2023-06-01"
-        models:
-          claude-test: claude-test
+    api_key: "mock-upstream-key"
+    models:
+      - gpt-test
+      - claude-test
+      - gpt-alias=gpt-upstream-name
+    openai_base_url: http://mock:8000
+    anthropic_base_url: http://mock:8000
 
 pricing:
   gpt-test:

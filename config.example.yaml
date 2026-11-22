@@ -25,38 +25,28 @@ log:
   format: json
 
 providers:
+  # 内置端点：只需选 preset + 填 API Key。
+  # 国内套餐用 minimax-mplan-cn（api.minimax.cn），国际套餐用 minimax-mplan-global。
+  - name: minimax-cn
+    preset: minimax-mplan-cn
+    api_key: "${MINIMAX_KEY}"
+    # 可选：覆盖内置默认模型（默认 MiniMax-M3.1-Flash）
+    # models:
+    #   - MiniMax-M3.1-Flash
+
+  # 自定义端点：任意 code plan 都是「一个 Key + 1~2 个 base URL + 模型」。
   - name: glm
-    keys:
-      - "${GLM_KEY_1}"
-      - "${GLM_KEY_2}"
-    timeout: 120s
-    endpoints:
-      - name: openai
-        protocol: openai
-        base_url: https://open.bigmodel.cn/api/paas/v4
-        models:
-          glm-4.6: glm-4.6
-      - name: anthropic
-        protocol: anthropic
-        base_url: https://open.bigmodel.cn/api/anthropic
-        version: "2023-06-01"
-        models:
-          glm-4.6: glm-4.6
+    api_key: "${GLM_KEY}"
+    models:
+      - glm-4.6
+    openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
 
-  - name: deepseek
-    keys: ["${DEEPSEEK_KEY}"]
-    endpoints:
-      - name: openai
-        protocol: openai
-        base_url: https://api.deepseek.com/v1
-        models:
-          deepseek-chat: deepseek-chat
-
-# Optional. USD per million tokens, used only for cost estimates.
+# 可选。USD per million tokens，仅用于成本估算。
 pricing:
+  MiniMax-M3.1-Flash:
+    input_per_mtok: 0.3
+    output_per_mtok: 1.2
   glm-4.6:
     input_per_mtok: 0.6
     output_per_mtok: 2.2
-  deepseek-chat:
-    input_per_mtok: 0.27
-    output_per_mtok: 1.1

@@ -8,5 +8,5 @@ admin-token.txt
 admin-password.txt
 config.yaml
 .env
-dist/
+/dist/
 build/

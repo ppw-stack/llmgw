@@ -3,55 +3,44 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
 )
 
-type endpointInput struct {
-	Name     string            `json:"name"`
-	Protocol string            `json:"protocol"`
-	BaseURL  string            `json:"base_url"`
-	Version  string            `json:"version"`
-	Models   map[string]string `json:"models"`
-}
-
 type providerInput struct {
-	Name      string          `json:"name"`
-	Proxy     string          `json:"proxy"`
-	TimeoutMS int             `json:"timeout_ms"`
-	Keys      *[]string       `json:"keys"`
-	Endpoints []endpointInput `json:"endpoints"`
-}
-
-type endpointView struct {
-	Name     string            `json:"name"`
-	Protocol string            `json:"protocol"`
-	BaseURL  string            `json:"base_url"`
-	Version  string            `json:"version"`
-	Models   map[string]string `json:"models"`
+	Name             string   `json:"name"`
+	Preset           *string  `json:"preset"`
+	APIKey           *string  `json:"api_key"`
+	Models           []string `json:"models"`
+	OpenAIBaseURL    string   `json:"openai_base_url"`
+	AnthropicBaseURL string   `json:"anthropic_base_url"`
 }
 
 type providerView struct {
-	ID        int64          `json:"id"`
-	Name      string         `json:"name"`
-	Proxy     string         `json:"proxy"`
-	TimeoutMS int            `json:"timeout_ms"`
-	KeyCount  int            `json:"key_count"`
-	KeyHints  []string       `json:"key_hints"`
-	Endpoints []endpointView `json:"endpoints"`
+	ID               int64    `json:"id"`
+	Name             string   `json:"name"`
+	Preset           string   `json:"preset,omitempty"`
+	PresetName       string   `json:"preset_name,omitempty"`
+	Source           string   `json:"source"`
+	DocsURL          string   `json:"docs_url,omitempty"`
+	KeyHint          string   `json:"key_hint"`
+	Models           []string `json:"models"`
+	OpenAIBaseURL    string   `json:"openai_base_url"`
+	AnthropicBaseURL string   `json:"anthropic_base_url"`
 }
 
 func (s *Server) adminProviders(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
 	if rawID == "" {
 		switch r.Method {
 		case http.MethodGet:
-			s.listProviders(w)
+			s.listProviders(w, r)
 		case http.MethodPost:
 			s.createProvider(w, r, id)
 		default:
@@ -74,7 +63,15 @@ func (s *Server) adminProviders(w http.ResponseWriter, r *http.Request, id *admi
 	}
 }
 
-func (s *Server) listProviders(w http.ResponseWriter) {
+func (s *Server) adminProviderPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, preset.All())
+}
+
+func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	records, err := s.store.ListProviderRecords()
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -82,31 +79,52 @@ func (s *Server) listProviders(w http.ResponseWriter) {
 	}
 	views := make([]providerView, 0, len(records))
 	for _, rec := range records {
-		views = append(views, s.providerView(rec))
+		views = append(views, s.providerView(r, rec))
 	}
 	writeJSON(w, http.StatusOK, views)
 }
 
-func (s *Server) providerView(rec store.ProviderRecord) providerView {
-	hints := make([]string, 0, len(rec.EncryptedKeys))
-	for _, enc := range rec.EncryptedKeys {
-		hints = append(hints, s.keyHint(enc))
+func (s *Server) providerView(r *http.Request, rec store.ProviderRecord) providerView {
+	view := providerView{
+		ID:               rec.ID,
+		Name:             rec.Name,
+		Preset:           rec.Preset,
+		Source:           "custom",
+		KeyHint:          s.keyHint(rec.EncryptedKey),
+		Models:           rec.Models.List(),
+		OpenAIBaseURL:    rec.OpenAIBaseURL,
+		AnthropicBaseURL: rec.AnthropicBaseURL,
 	}
-	endpoints := make([]endpointView, 0, len(rec.Endpoints))
-	for _, ep := range rec.Endpoints {
-		endpoints = append(endpoints, endpointView{
-			Name: ep.Name, Protocol: ep.Protocol, BaseURL: ep.BaseURL,
-			Version: ep.Version, Models: ep.Models,
-		})
+	if rec.Preset != "" {
+		view.Source = "builtin"
+		if pr, ok := preset.Lookup(rec.Preset); ok {
+			view.PresetName = pr.FamilyName + "（" + pr.VariantName + "）"
+			view.DocsURL = pr.DocsURL
+		}
+		p := config.Provider{Name: rec.Name, Preset: rec.Preset, Models: rec.Models}
+		eff, err := p.Effective()
+		if err != nil {
+			// The stored values stay in the view, but the mismatch must be
+			// visible in the logs instead of being swallowed.
+			s.log.Error("resolve preset for provider view",
+				"method", r.Method, "path", r.URL.Path, "request_id", requestID(r),
+				"provider", rec.Name, "preset", rec.Preset, "err", err)
+		} else {
+			view.OpenAIBaseURL = eff.OpenAIBaseURL
+			view.AnthropicBaseURL = eff.AnthropicBaseURL
+			view.Models = eff.Models.List()
+		}
 	}
-	return providerView{
-		ID: rec.ID, Name: rec.Name, Proxy: rec.Proxy,
-		TimeoutMS: rec.TimeoutMS, KeyCount: len(rec.EncryptedKeys),
-		KeyHints: hints, Endpoints: endpoints,
+	if view.Models == nil {
+		view.Models = []string{}
 	}
+	return view
 }
 
 func (s *Server) keyHint(enc string) string {
+	if enc == "" {
+		return ""
+	}
 	plain, err := s.box.Decrypt(enc)
 	if err != nil || len(plain) < 4 {
 		return "****"
@@ -120,7 +138,9 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	provider, err := in.toProvider()
+	apiKey := trimOrEmpty(in.APIKey)
+	presetID := trimOrEmpty(in.Preset)
+	provider, err := in.toProvider(presetID, apiKey)
 	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
@@ -142,13 +162,19 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 
-	encoded, err := s.encryptKeys(provider.Keys)
+	encrypted, err := s.encryptKey(provider.APIKey)
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	timeoutMS := int(provider.Timeout.Value() / time.Millisecond)
-	rec, err := s.store.CreateProvider(provider.Name, provider.Proxy, timeoutMS, encoded, provider.Endpoints)
+	rec, err := s.store.CreateProvider(store.ProviderSpec{
+		Name:             provider.Name,
+		Preset:           provider.Preset,
+		EncryptedKey:     encrypted,
+		Models:           provider.Models,
+		OpenAIBaseURL:    provider.OpenAIBaseURL,
+		AnthropicBaseURL: provider.AnthropicBaseURL,
+	})
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -159,18 +185,13 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "provider.create", provider.Name, "success")
-	writeJSON(w, http.StatusCreated, s.providerView(*rec))
+	writeJSON(w, http.StatusCreated, s.providerView(r, *rec))
 }
 
 func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *adminIdentity, providerID int64) {
 	var in providerInput
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-	provider, err := in.toProvider()
-	if err != nil {
-		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -185,7 +206,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 			existing = &records[i]
 			continue
 		}
-		if records[i].Name == provider.Name {
+		if records[i].Name == strings.TrimSpace(in.Name) {
 			writeAdminError(w, http.StatusConflict, "provider name already exists")
 			return
 		}
@@ -194,22 +215,43 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusNotFound, "provider not found")
 		return
 	}
+	presetID := existing.Preset
+	if in.Preset != nil {
+		presetID = trimOrEmpty(in.Preset)
+	}
+	if presetID != existing.Preset {
+		writeAdminError(w, http.StatusBadRequest,
+			"preset cannot be changed; delete this provider and create a new one")
+		return
+	}
+	// Omitting models keeps the stored list; an explicit [] falls back to the
+	// preset defaults (or is rejected for a custom provider).
+	if in.Models == nil {
+		in.Models = existing.Models.List()
+	}
 
-	// An omitted keys field preserves the stored keys; [] clears them.
-	encoded, err := s.resolveKeys(in.Keys, existing)
+	// An omitted or empty api_key means "keep the stored key".
+	encrypted := existing.EncryptedKey
+	if in.APIKey != nil && strings.TrimSpace(*in.APIKey) != "" {
+		encrypted, err = s.encryptKey(strings.TrimSpace(*in.APIKey))
+		if err != nil {
+			writeAdminError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	plainKey := ""
+	if encrypted != "" {
+		if plainKey, err = s.box.Decrypt(encrypted); err != nil {
+			writeAdminError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	provider, err := in.toProvider(presetID, plainKey)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Validate against the decrypted temporary keys so the router check sees
-	// the same shape that will be live afterwards.
-	plainKeys, err := s.decryptKeys(encoded)
-	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	candidate := provider
-	candidate.Keys = plainKeys
 	current, err := s.store.Providers(s.box)
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -218,7 +260,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 	replaced := make([]config.Provider, 0, len(current))
 	for _, p := range current {
 		if p.Name == existing.Name {
-			replaced = append(replaced, candidate)
+			replaced = append(replaced, provider)
 			continue
 		}
 		replaced = append(replaced, p)
@@ -228,9 +270,15 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 
-	timeoutMS := int(provider.Timeout.Value() / time.Millisecond)
-	if err := s.store.UpdateProvider(providerID, provider.Name, provider.Proxy, timeoutMS,
-		encoded, provider.Endpoints); err != nil {
+	spec := store.ProviderSpec{
+		Name:             provider.Name,
+		Preset:           provider.Preset,
+		EncryptedKey:     encrypted,
+		Models:           provider.Models,
+		OpenAIBaseURL:    provider.OpenAIBaseURL,
+		AnthropicBaseURL: provider.AnthropicBaseURL,
+	}
+	if err := s.store.UpdateProvider(providerID, spec); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
 			status = http.StatusNotFound
@@ -244,11 +292,9 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "provider.update", provider.Name, "success")
-	rec := store.ProviderRecord{
-		ID: providerID, Name: provider.Name, Proxy: provider.Proxy,
-		TimeoutMS: timeoutMS, EncryptedKeys: encoded, Endpoints: provider.Endpoints,
-	}
-	writeJSON(w, http.StatusOK, s.providerView(rec))
+	writeJSON(w, http.StatusOK, s.providerView(r, store.ProviderRecord{
+		ID: providerID, ProviderSpec: spec,
+	}))
 }
 
 func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, id *adminIdentity, providerID int64) {
@@ -269,29 +315,31 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, id *admi
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (in providerInput) toProvider() (config.Provider, error) {
-	timeout := time.Duration(in.TimeoutMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 120 * time.Second
+// trimOrEmpty reads an optional request field: a missing pointer and a blank
+// value are both treated as "not supplied".
+func trimOrEmpty(s *string) string {
+	if s == nil {
+		return ""
 	}
-	var keys []string
-	if in.Keys != nil {
-		keys = *in.Keys
-	}
-	endpoints := make([]config.Endpoint, 0, len(in.Endpoints))
-	for _, ep := range in.Endpoints {
-		endpoints = append(endpoints, config.Endpoint{
-			Name: strings.TrimSpace(ep.Name), Protocol: ep.Protocol,
-			BaseURL: strings.TrimSpace(ep.BaseURL), Version: ep.Version,
-			Models: ep.Models,
-		})
+	return strings.TrimSpace(*s)
+}
+
+func (in providerInput) toProvider(presetID, apiKey string) (config.Provider, error) {
+	var models config.Models
+	if len(in.Models) > 0 {
+		parsed, err := config.ParseModels(in.Models)
+		if err != nil {
+			return config.Provider{}, fmt.Errorf("invalid models: %w", err)
+		}
+		models = parsed
 	}
 	p := config.Provider{
-		Name:      strings.TrimSpace(in.Name),
-		Proxy:     strings.TrimSpace(in.Proxy),
-		Timeout:   config.Duration(timeout),
-		Keys:      keys,
-		Endpoints: endpoints,
+		Name:             strings.TrimSpace(in.Name),
+		Preset:           presetID,
+		APIKey:           apiKey,
+		Models:           models,
+		OpenAIBaseURL:    strings.TrimSpace(in.OpenAIBaseURL),
+		AnthropicBaseURL: strings.TrimSpace(in.AnthropicBaseURL),
 	}
 	if err := config.NormalizeProvider(&p); err != nil {
 		return config.Provider{}, err
@@ -310,35 +358,11 @@ func (s *Server) validateProviders(providers []config.Provider) error {
 	return err
 }
 
-func (s *Server) encryptKeys(keys []string) ([]string, error) {
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		enc, err := s.box.Encrypt(k)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, enc)
+func (s *Server) encryptKey(key string) (string, error) {
+	if strings.TrimSpace(key) == "" {
+		return "", nil
 	}
-	return out, nil
-}
-
-func (s *Server) decryptKeys(encoded []string) ([]string, error) {
-	out := make([]string, 0, len(encoded))
-	for _, enc := range encoded {
-		plain, err := s.box.Decrypt(enc)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, plain)
-	}
-	return out, nil
-}
-
-func (s *Server) resolveKeys(keys *[]string, existing *store.ProviderRecord) ([]string, error) {
-	if keys == nil {
-		return existing.EncryptedKeys, nil
-	}
-	return s.encryptKeys(*keys)
+	return s.box.Encrypt(strings.TrimSpace(key))
 }
 
 func (s *Server) reloadProviders() error {

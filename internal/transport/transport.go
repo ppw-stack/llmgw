@@ -11,12 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/ingress"
-	"github.com/pw/llmgw/internal/keypool"
 	"github.com/pw/llmgw/internal/observ"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
@@ -24,26 +22,53 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// Timeout bounds non-streaming upstream calls and the idle gap of a stream.
+// It is fixed on purpose: a provider is just an API key, two base URLs and a
+// model list.
+const upstreamTimeout = config.DefaultTimeout
+
+const maxUpstreamResponseDefault = 64 << 20
+
+// variable so tests can lower the limit without allocating 64 MiB.
+var maxUpstreamResponse int64 = maxUpstreamResponseDefault
+
 // Forwarder turns a resolved target into an upstream call and streams the
 // response back. It intentionally does not retry on 5xx, fall back to another
 // provider, or translate between protocols.
 type Forwarder struct {
-	router *router.Router
-	store  *store.Store
-	keys   *keypool.Manager
-	log    *slog.Logger
-
-	mu      sync.Mutex
-	clients map[string]*http.Client
+	router  *router.Router
+	store   *store.Store
+	log     *slog.Logger
+	client  *http.Client
+	timeout time.Duration
 }
 
-func New(r *router.Router, st *store.Store, keys *keypool.Manager, log *slog.Logger) *Forwarder {
+// New builds a Forwarder with the default upstream timeout.
+func New(r *router.Router, st *store.Store, log *slog.Logger) *Forwarder {
+	return NewWithTimeout(r, st, log, upstreamTimeout)
+}
+
+// NewWithTimeout builds a Forwarder with an explicit upstream timeout. Tests
+// use it to shorten the timeout without touching package-level state.
+func NewWithTimeout(r *router.Router, st *store.Store, log *slog.Logger, timeout time.Duration) *Forwarder {
+	if timeout <= 0 {
+		timeout = upstreamTimeout
+	}
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     true,
+		ResponseHeaderTimeout: timeout,
+	}
 	return &Forwarder{
 		router:  r,
 		store:   st,
-		keys:    keys,
 		log:     log,
-		clients: map[string]*http.Client{},
+		client:  &http.Client{Transport: tr},
+		timeout: timeout,
 	}
 }
 
@@ -54,11 +79,6 @@ type Request struct {
 	APIKeyID  int64
 	RequestID string
 }
-
-const maxUpstreamResponseDefault = 64 << 20
-
-// variable so tests can lower the limit without allocating 64 MiB.
-var maxUpstreamResponse int64 = maxUpstreamResponseDefault
 
 func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) {
 	start := time.Now()
@@ -81,23 +101,20 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 		}
 	}
 
-	pool := f.keys.Get(in.Target.Provider, in.Target.Keys)
-	client := f.clientFor(in.Target)
 	upstreamURL := upstreamURL(in.Target)
 
-	// Non-streaming calls are bounded by the provider timeout. Streaming calls
-	// use ResponseHeaderTimeout plus an idle watchdog in streamSSE.
+	// Non-streaming calls are bounded by the fixed timeout. Streaming calls use
+	// ResponseHeaderTimeout plus an idle watchdog in streamSSE.
 	ctx := r.Context()
 	if !in.Meta.Stream {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, in.Target.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, f.timeout)
 		defer cancel()
 	}
 
 	var resp *http.Response
 	var lastErr error
 
-	lastKeyIndex := -1
 	send := func(payload []byte) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
 		if err != nil {
@@ -105,25 +122,18 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 		}
 		copyRequestHeaders(req.Header, r.Header)
 		req.Header.Set("Content-Type", "application/json")
-
-		keyIndex, key, ok := pool.Next()
-		if !ok {
-			return nil, errNoKey
-		}
-		lastKeyIndex = keyIndex
 		req.Header.Del("Authorization")
 		req.Header.Del("X-Api-Key")
 		req.Header.Del("Anthropic-Version")
-		if key != "" {
-			switch in.Target.Protocol {
-			case config.ProtocolAnthropic:
-				req.Header.Set("x-api-key", key)
-				req.Header.Set("anthropic-version", in.Target.Version)
-			default:
-				req.Header.Set("Authorization", "Bearer "+key)
+		if in.Target.Protocol == config.ProtocolAnthropic {
+			req.Header.Set("anthropic-version", in.Target.Version)
+			if in.Target.Key != "" {
+				req.Header.Set("x-api-key", in.Target.Key)
 			}
+		} else if in.Target.Key != "" {
+			req.Header.Set("Authorization", "Bearer "+in.Target.Key)
 		}
-		return client.Do(req)
+		return f.client.Do(req)
 	}
 
 	resp, lastErr = send(body)
@@ -158,29 +168,6 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 		return
 	}
 	defer resp.Body.Close()
-
-	// A 401/403 from the upstream means the key is bad; burn it and retry once
-	// with the next key in the pool.
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		pool.Invalidate(lastKeyIndex)
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
-		resp.Body.Close()
-		if pool.Available() > 0 {
-			resp, lastErr = send(body)
-			if lastErr != nil {
-				status, code := classifyError(lastErr)
-				ingress.WriteError(w, in.Protocol, status, errorType(status), upstreamMessage(status, code))
-				f.record(in, status, start, 0, usageAcc{estimated: true}, code)
-				return
-			}
-			defer resp.Body.Close()
-		} else {
-			status := resp.StatusCode
-			writeRaw(w, resp, raw, in.RequestID)
-			f.record(in, status, start, 0, usageAcc{}, "upstream_auth")
-			return
-		}
-	}
 
 	acc := usageAcc{}
 	streaming := in.Meta.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300
@@ -218,7 +205,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, in Request) 
 	w.Header().Set("X-Request-Id", in.RequestID)
 	w.WriteHeader(resp.StatusCode)
 
-	ttft, written, writeErr := streamSSE(w, resp.Body, in.Protocol, &acc, start, in.Target.Timeout)
+	ttft, written, writeErr := streamSSE(w, resp.Body, in.Protocol, &acc, start, f.timeout)
 	if writeErr != nil {
 		f.log.Debug("stream interrupted", "request_id", in.RequestID, "err", writeErr.Error())
 	}
@@ -336,32 +323,6 @@ func (f *Forwarder) record(in Request, status int, start time.Time, ttft time.Du
 	}
 }
 
-func (f *Forwarder) clientFor(t router.Target) *http.Client {
-	key := t.Provider + "|" + t.Proxy
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if c, ok := f.clients[key]; ok {
-		return c
-	}
-	tr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          256,
-		MaxIdleConnsPerHost:   64,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		ForceAttemptHTTP2:     true,
-		ResponseHeaderTimeout: t.Timeout,
-	}
-	if t.Proxy != "" {
-		if u, err := url.Parse(t.Proxy); err == nil {
-			tr.Proxy = http.ProxyURL(u)
-		}
-	}
-	c := &http.Client{Transport: tr}
-	f.clients[key] = c
-	return c
-}
-
 func upstreamURL(t router.Target) string {
 	switch t.Protocol {
 	case config.ProtocolAnthropic:
@@ -414,8 +375,6 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-var errNoKey = errors.New("no upstream key available")
-
 func classifyError(err error) (int, string) {
 	if errors.Is(err, context.Canceled) {
 		return 499, "client_canceled"
@@ -430,9 +389,6 @@ func classifyError(err error) (int, string) {
 	var ue *url.Error
 	if errors.As(err, &ue) && ue.Timeout() {
 		return http.StatusGatewayTimeout, "upstream_timeout"
-	}
-	if errors.Is(err, errNoKey) {
-		return http.StatusServiceUnavailable, "no_upstream_key"
 	}
 	return http.StatusBadGateway, "upstream_unreachable"
 }
@@ -452,8 +408,6 @@ func errorType(status int) string {
 
 func upstreamMessage(status int, code string) string {
 	switch code {
-	case "no_upstream_key":
-		return "all upstream keys for this provider are marked invalid"
 	case "upstream_timeout":
 		return "upstream request timed out"
 	case "client_canceled":

@@ -13,8 +13,8 @@
 |---|---|
 | OpenAI / Anthropic 双入口，同协议直通 | 跨协议转换 |
 | 按 `(协议, 模型)` 查表路由 | 规则引擎、权重、优先级、fallback、熔断 |
-| 供应商 → 端点两层模型，Key 池轮询 | RPM/TPM/预算、模型白名单 |
-| 上游 401/403 自动换 Key | 自动重试、自动降级 |
+| 内置端点（MiniMax 编码套餐国内 / 国际）/ 自定义供应商 | RPM/TPM/预算、模型白名单 |
+| 上游 401/403 原样透传 | 自动重试、自动降级 |
 | 请求日志、token 与成本统计 | 多租户、计费、在线支付 |
 | 配置热更新 | MCP、RAG、护栏 |
 | Web 控制台：概览 / 供应商 / Key / 日志 / 接入说明 | Kubernetes Operator |
@@ -27,7 +27,7 @@ make build          # bin/llmgw
 
 # 2. 准备配置
 cp config.example.yaml config.yaml
-$EDITOR config.yaml # 填上游 keys 与 models
+$EDITOR config.yaml # 填上游 Key 与模型（或使用内置端点 preset）
 
 # 3. 启动
 ./bin/llmgw -config config.yaml
@@ -67,25 +67,34 @@ curl localhost:8080/openai/v1/chat/completions \
 
 ## 配置要点
 
+供应商分两类：**内置端点**（只填 preset + api_key）与**自定义端点**（手填 base URL）。
+
 ```yaml
 providers:
+  # 内置端点：两个 base URL 与默认模型由程序内置
+  - name: minimax-cn
+    preset: minimax-mplan-cn          # 国内：api.minimax.cn
+    api_key: "${MINIMAX_KEY}"
+  # - name: minimax
+  #   preset: minimax-mplan-global    # 国际：api.minimax.io
+
+  # 自定义端点：一个 Key + 两个 base URL + 模型列表
   - name: glm
-    keys: ["${GLM_KEY_1}", "${GLM_KEY_2}"]   # 同一供应商共享 Key 池
-    endpoints:
-      - protocol: openai                    # 上游协议
-        base_url: https://open.bigmodel.cn/api/paas/v4
-        models:
-          glm-4.6: glm-4.6                  # 对外模型名: 上游模型名
-      - protocol: anthropic
-        base_url: https://open.bigmodel.cn/api/anthropic
-        models:
-          glm-4.6: glm-4.6
+    api_key: "${GLM_KEY}"                  # 单个上游 Key
+    models:
+      - glm-4.6                            # 对外名与上游名相同
+    openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
 ```
 
-- 每个请求按 `(协议, 模型)` 哈希查表，命中唯一端点。
-- 同一协议下模型名重复 → 拒绝启动并报出两个来源。
+- `models` 支持多行，`对外名=上游名` 可做别名（例如 `claude-sonnet-4-5=glm-4.6`）。
+- 同一份模型同时注册到两个协议入口；只填一个 base URL 就只开放对应协议。
+- 每个请求按 `(协议, 模型)` 哈希查表，命中唯一供应商。
+- 同一协议下模型名重复 → 拒绝保存/启动并报出两个来源。
 - 模型只在另一个协议存在时，请求会得到 `400` 并提示改用哪个 base_url。
 - 改配置后 1 秒内自动生效，在途流式请求不受影响。
+- 超时固定 120s；代理使用进程的 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
+- 内置端点的文档：MiniMax 编码套餐国内 <https://platform.minimaxi.com/docs/m-plan/other-tools>、国际 <https://platform.minimax.io/docs/m-plan/other-tools>。两边 Key 不通用，按套餐归属选择 `minimax-mplan-cn` / `minimax-mplan-global`。
 
 ## 管理 API
 
@@ -124,7 +133,7 @@ cmd/llmgw/            入口：配置、启动、热更新、优雅退出
 internal/config/      YAML 解析、校验、${ENV} 展开
 internal/ingress/     路径归一化、协议判定、模型/流式元数据解析
 internal/router/      查表路由与快照
-internal/keypool/     上游 Key 轮询与失效标记
+internal/preset/      内置端点目录（MiniMax 编码套餐等）
 internal/transport/   转发、SSE 透传、usage 嗅探、错误分类
 internal/store/       SQLite、异步日志、用量查询
 internal/auth/        网关 Key 生成、密码哈希、会话令牌

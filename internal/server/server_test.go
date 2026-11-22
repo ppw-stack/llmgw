@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/config"
-	"github.com/pw/llmgw/internal/keypool"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
 	"github.com/pw/llmgw/internal/transport"
@@ -58,6 +58,11 @@ func record(c *capture, r *http.Request) {
 }
 
 func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string, opts ...func(*Options)) (*httptest.Server, *store.Store, string) {
+	return setupConfig(t, cap, upstreamHandler, keys, nil, opts...)
+}
+
+func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string,
+	mutate func(*config.Config), opts ...func(*Options)) (*httptest.Server, *store.Store, string) {
 	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,26 +75,31 @@ func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []
 	}))
 	t.Cleanup(upstream.Close)
 
+	upstreamKey := ""
+	if len(keys) > 0 {
+		upstreamKey = keys[0]
+	}
 	cfg := &config.Config{
 		Providers: []config.Provider{{
-			Name:    "test",
-			Keys:    keys,
-			Timeout: config.Duration(5 * time.Second),
-			Endpoints: []config.Endpoint{
-				{Name: "openai", Protocol: config.ProtocolOpenAI, BaseURL: upstream.URL,
-					Models: map[string]string{"gpt-test": "gpt-upstream"}},
-				{Name: "anthropic", Protocol: config.ProtocolAnthropic, BaseURL: upstream.URL,
-					Version: "2023-06-01", Models: map[string]string{"claude-test": "claude-upstream"}},
-			},
+			Name:             "test",
+			APIKey:           upstreamKey,
+			Models:           config.Models{"gpt-test": "gpt-upstream", "claude-test": "claude-upstream"},
+			OpenAIBaseURL:    upstream.URL,
+			AnthropicBaseURL: upstream.URL,
 		}},
 		Pricing: map[string]config.Price{
 			"gpt-test":    {InputPerMTok: 1, OutputPerMTok: 2},
 			"claude-test": {InputPerMTok: 3, OutputPerMTok: 15},
 		},
 	}
+	if mutate != nil {
+		mutate(cfg)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"), logger)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -99,7 +109,7 @@ func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []
 	if err := rt.Reload(cfg); err != nil {
 		t.Fatalf("reload router: %v", err)
 	}
-	fw := transport.New(rt, st, keypool.NewManager(), logger)
+	fw := transport.New(rt, st, logger)
 
 	plain, hash, prefix, err := auth.Generate()
 	if err != nil {
@@ -305,12 +315,15 @@ func TestAnthropicStream(t *testing.T) {
 
 func TestCrossProtocolRejected(t *testing.T) {
 	cap := &capture{}
-	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+	gw, _, key := setupConfig(t, cap, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream must not be called")
-	}, []string{"up-1"})
+	}, []string{"up-1"}, func(cfg *config.Config) {
+		// Only the OpenAI entry exists, so the same models are unreachable
+		// through the Anthropic entry and the error must point at /openai/v1.
+		cfg.Providers[0].AnthropicBaseURL = ""
+	})
 
-	// claude-test only exists on the Anthropic endpoint.
-	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
+	resp := post(t, gw.URL+"/anthropic/v1/messages", key,
 		`{"model":"claude-test","messages":[{"role":"user","content":"hi"}]}`)
 	body := readAll(t, resp)
 	if resp.StatusCode != http.StatusBadRequest {
@@ -375,33 +388,6 @@ func TestAuthFailures(t *testing.T) {
 	}
 }
 
-func TestUpstream401RotatesKey(t *testing.T) {
-	cap := &capture{}
-	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "Bearer bad" {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = io.WriteString(w, `{"error":{"message":"bad key"}}`)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
-	}, []string{"good", "bad"})
-
-	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
-		`{"model":"gpt-test","messages":[]}`)
-	body := readAll(t, resp)
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, body)
-	}
-	reqs := cap.all()
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 upstream attempts, got %d", len(reqs))
-	}
-	if reqs[1].Authorization != "Bearer good" {
-		t.Fatalf("second attempt auth = %q", reqs[1].Authorization)
-	}
-}
-
 func TestPathNormalizationAndModels(t *testing.T) {
 	cap := &capture{}
 	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
@@ -423,8 +409,8 @@ func TestPathNormalizationAndModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := readAll(t, mresp)
-	if !strings.Contains(body, "gpt-test") || strings.Contains(body, "claude-test") {
-		t.Fatalf("models endpoint leaked protocols: %s", body)
+	if !strings.Contains(body, "gpt-test") || !strings.Contains(body, "claude-test") {
+		t.Fatalf("models endpoint should list both registered models: %s", body)
 	}
 }
 

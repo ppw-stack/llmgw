@@ -10,6 +10,19 @@ export interface ApiOptions {
 }
 
 /**
+ * 从错误响应体中取出可展示的错误信息。
+ *
+ * 响应体可能不是 JSON（反向代理返回的 HTML、空响应体等），此时返回 null。
+ */
+function parseErrorMessage(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null || !('error' in body)) return null;
+  const error = body.error;
+  if (typeof error !== 'object' || error === null || !('message' in error)) return null;
+  const message = error.message;
+  return typeof message === 'string' && message !== '' ? message : null;
+}
+
+/**
  * 调用管理台接口。
  *
  * @param path 相对 `/admin/api` 的路径，例如 `/providers`
@@ -30,14 +43,9 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
     window.dispatchEvent(new Event('llmgw-unauthorized'));
   }
   if (!res.ok) {
-    let message = res.statusText;
-    try {
-      const body = (await res.json()) as { error?: { message?: string } };
-      message = body.error?.message || message;
-    } catch {
-      /* 非 JSON 错误体，保留 statusText */
-    }
-    throw new Error(message);
+    // 错误体不一定是 JSON，解析失败时回退到 statusText。
+    const body: unknown = await res.json().catch(() => null);
+    throw new Error(parseErrorMessage(body) || res.statusText);
   }
   if (res.status === 204) return null as T;
   return (await res.json()) as T;

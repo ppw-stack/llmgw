@@ -92,11 +92,15 @@ export interface UsageByKey {
   cost_usd: number;
 }
 
-/** GET /admin/api/usage 的整体结构 */
+/**
+ * GET /admin/api/usage 的整体结构。
+ *
+ * 后端在统计区间内没有流量时返回 null 切片（而非空数组），故三个数组均为可空。
+ */
 export interface UsageReport {
-  daily: UsageDay[];
-  by_model: UsageByModel[];
-  by_key: UsageByKey[];
+  daily: UsageDay[] | null;
+  by_model: UsageByModel[] | null;
+  by_key: UsageByKey[] | null;
 }
 
 /** GET /admin/api/logs 中的一条请求日志 */

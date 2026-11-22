@@ -23,7 +23,7 @@ async function load() {
 
 const totals = computed(() => {
   const t = { requests: 0, prompt: 0, completion: 0, cost: 0 };
-  for (const d of report.value.daily) {
+  for (const d of report.value.daily ?? []) {
     t.requests += d.requests;
     t.prompt += d.prompt_tokens;
     t.completion += d.completion_tokens;
@@ -33,7 +33,7 @@ const totals = computed(() => {
 });
 
 const maxDaily = computed(() => {
-  const list = report.value.daily;
+  const list = report.value.daily ?? [];
   return Math.max(1, ...list.map((d) => d.requests));
 });
 
@@ -81,10 +81,10 @@ onMounted(() => {
     <div class="card">
       <h3>每日请求</h3>
       <p v-if="loading" class="muted">加载中…</p>
-      <p v-else-if="!report.daily.length" class="muted">暂无数据</p>
+      <p v-else-if="!report.daily?.length" class="muted">暂无数据</p>
       <div v-else class="bars">
         <div
-          v-for="d in report.daily"
+          v-for="d in report.daily ?? []"
           :key="d.day"
           class="bar-col"
           :title="`${d.day}: ${d.requests} 次`"
@@ -107,14 +107,14 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="m in report.by_model" :key="m.model">
+            <tr v-for="m in report.by_model ?? []" :key="m.model">
               <td>
                 <code>{{ m.model }}</code>
               </td>
               <td class="num">{{ formatNumber(m.requests) }}</td>
               <td class="num">{{ formatUSD(m.cost_usd) }}</td>
             </tr>
-            <tr v-if="!report.by_model.length">
+            <tr v-if="!report.by_model?.length">
               <td colspan="3" class="muted">暂无数据</td>
             </tr>
           </tbody>
@@ -132,12 +132,12 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="k in report.by_key" :key="k.key_id">
+            <tr v-for="k in report.by_key ?? []" :key="k.key_id">
               <td>{{ k.name || '#' + k.key_id }}</td>
               <td class="num">{{ formatNumber(k.requests) }}</td>
               <td class="num">{{ formatUSD(k.cost_usd) }}</td>
             </tr>
-            <tr v-if="!report.by_key.length">
+            <tr v-if="!report.by_key?.length">
               <td colspan="3" class="muted">暂无数据</td>
             </tr>
           </tbody>

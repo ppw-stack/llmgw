@@ -71,6 +71,17 @@ func TestEstimateTokens(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamUsageFromMessageDelta(t *testing.T) {
+	var acc usageAcc
+	acc.observeLine(config.ProtocolAnthropic,
+		[]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}`))
+	acc.observeLine(config.ProtocolAnthropic,
+		[]byte(`data: {"type":"message_delta","usage":{"input_tokens":1,"output_tokens":3,"cache_read_input_tokens":205}}`))
+	if !acc.seen || acc.prompt != 1 || acc.completion != 3 || acc.cacheRead != 205 {
+		t.Fatalf("usage = %+v", acc)
+	}
+}
+
 func TestResponseTooLargeIsRejected(t *testing.T) {
 	old := maxUpstreamResponse
 	maxUpstreamResponse = 1024

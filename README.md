@@ -162,6 +162,19 @@ make release   # dist/llmgw_<version>_{darwin,linux}_{amd64,arm64}.tar.gz + chec
 
 版本号、提交号与构建时间通过 `-ldflags -X` 注入。
 
+## CI / CD
+
+- `.github/workflows/ci.yml`：push 与 PR 时执行 `gofmt` 检查、`go vet`、`go test -race`、`govulncheck`，并验证前端可构建。
+- `.github/workflows/release.yml`：推送 `v*` tag 时构建四个平台的发布包，并创建 GitHub Release。
+- `.github/workflows/docker.yml`：推送 `v*` tag 时构建多架构镜像并推送到 `ghcr.io/<owner>/llmgw`。
+
+发布一个版本：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## 开发
 
 ```bash

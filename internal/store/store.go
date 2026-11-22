@@ -330,6 +330,33 @@ type legacyEndpoint struct {
 	Models   map[string]string `json:"models"`
 }
 
+// UnmarshalJSON accepts both the old Go field names (BaseURL, Protocol) and
+// the later snake_case form. Old releases marshalled config.Endpoint with JSON
+// field names because it only carried yaml tags.
+func (e *legacyEndpoint) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k, v := range raw {
+		switch normalizeLegacyKey(k) {
+		case "protocol":
+			_ = json.Unmarshal(v, &e.Protocol)
+		case "baseurl":
+			_ = json.Unmarshal(v, &e.BaseURL)
+		case "models":
+			_ = json.Unmarshal(v, &e.Models)
+		}
+	}
+	return nil
+}
+
+func normalizeLegacyKey(k string) string {
+	k = strings.ToLower(k)
+	k = strings.ReplaceAll(k, "_", "")
+	return strings.ReplaceAll(k, "-", "")
+}
+
 func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpointsJSON string,
 	log *slog.Logger) ProviderSpec {
 	spec := ProviderSpec{Name: name}

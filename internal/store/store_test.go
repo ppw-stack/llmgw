@@ -175,6 +175,22 @@ func TestProviderCRUD(t *testing.T) {
 	}
 }
 
+func TestLegacyEndpointAcceptsBothJSONForms(t *testing.T) {
+	cases := []string{
+		`{"Protocol":"openai","BaseURL":"https://x/v1","Models":{"m":"m"}}`,
+		`{"protocol":"openai","base_url":"https://x/v1","models":{"m":"m"}}`,
+	}
+	for _, raw := range cases {
+		var ep legacyEndpoint
+		if err := json.Unmarshal([]byte(raw), &ep); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if ep.Protocol != "openai" || ep.BaseURL != "https://x/v1" || ep.Models["m"] != "m" {
+			t.Fatalf("%s -> %+v", raw, ep)
+		}
+	}
+}
+
 func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -195,11 +211,13 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys, _ := json.Marshal([]string{"enc-first", "enc-second"})
+	// The old release marshalled config.Endpoint with Go field names (it only
+	// carried yaml tags), so the migration must accept BaseURL, not base_url.
 	endpoints, _ := json.Marshal([]map[string]any{
-		{"name": "openai", "protocol": "openai", "base_url": "https://a/v4",
-			"models": map[string]string{"glm-4.6": "glm-4.6"}},
-		{"name": "anthropic", "protocol": "anthropic", "base_url": "https://a/anthropic/",
-			"models": map[string]string{"glm-4.6": "glm-4.6", "claude-sonnet-4-5": "glm-4.6"}},
+		{"Name": "openai", "Protocol": "openai", "BaseURL": "https://a/v4",
+			"Models": map[string]string{"glm-4.6": "glm-4.6"}},
+		{"Name": "anthropic", "Protocol": "anthropic", "BaseURL": "https://a/anthropic/",
+			"Models": map[string]string{"glm-4.6": "glm-4.6", "claude-sonnet-4-5": "glm-4.6"}},
 	})
 	if _, err := db.Exec(`INSERT INTO providers(name, proxy, timeout_ms, keys_enc,
 		endpoints_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?)`,

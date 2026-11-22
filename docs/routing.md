@@ -2,49 +2,63 @@
 
 ## 1. 目标
 
-v1 的路由只有一个动作：**根据请求协议和模型名，查到唯一的目标供应商**。
+v1 的路由只有一个动作：**根据请求协议和模型名，查到一组候选上游**。
 
 ```
-(protocol, model) ──查表──> Target{provider, base_url, upstream_model}
+(protocol, model) ──查表──> []Target{instance, base_url, upstream_model}
 ```
 
-没有规则引擎、没有权重、没有优先级、没有 fallback、没有熔断。
+第一个候选是主实例，其余是备实例。主实例失败时按顺序往后切换。
 
-## 2. 索引构建
+没有规则引擎、没有权重轮询、没有跨协议转换。
 
-启动或配置重载时，先把每个供应商解析成路由就绪形态（内置端点在这里展开两个 base URL），再遍历模型列表：
+## 2. 两层模型
+
+路由表由两层配置编译而成，二者的职责严格分离：
+
+| 层 | 是什么 | 持有 |
+|---|---|---|
+| **Instance** | 物理上游接入点 | 地址、账号 Key、协议入口、熔断参数 |
+| **Model** | 逻辑模型 | 对外名、上游名、分流策略、候选实例链 |
+
+这样划分的原因很实际：一个账号通常能提供多个模型，一个模型也常由多个账号提供 —— 这是**多对多**关系。把模型挂在账号下面（早期版本的做法）会导致「两个账号提供同一个模型」无法表达，把策略挂在账号下面则无法让不同模型用不同策略。
+
+- **实例**不携带任何分流策略：同一个实例可以被任意多个模型引用，各模型自带策略与优先级。
+- **模型名全局唯一**：同一个对外模型名只能定义一次，因此路由键 `(protocol, model)` 永远唯一。
+
+## 3. 索引构建
+
+启动或配置重载时，先把实例展开成路由就绪形态（内置端点在这里补齐协议入口），再遍历模型：
 
 ```go
-for _, p := range providers {
-    eff := p.Effective() // preset 或自定义 URL + 模型
-    for _, ep := range []struct{protocol, baseURL string}{
-        {openai, eff.OpenAIBaseURL},
-        {anthropic, eff.AnthropicBaseURL},
-    } {
-        if ep.baseURL == "" {
-            continue // 只填了一个 base URL 的供应商只开放对应协议
-        }
-        for alias, upstream := range eff.Models {
-            k := key{ep.protocol, alias}
-            if _, dup := idx[k]; dup {
-                return fmt.Errorf("model %q duplicated under protocol %q", alias, ep.protocol)
-            }
-            idx[k] = Target{Provider: p.Name, BaseURL: ep.baseURL, UpstreamModel: upstream}
+for _, m := range models {
+    for _, cand := range m.Instances {   // 已按 priority 升序
+        inst := instances[cand.Instance]
+        for _, ep := range inst.Endpoints {
+            k := key{ep.Protocol, m.Name}
+            idx[k] = append(idx[k], Target{
+                Instance: inst.Name,
+                BaseURL:  ep.BaseURL,
+                Key:      inst.APIKey,
+                UpstreamModel: m.Upstream,
+            })
         }
     }
 }
 ```
 
-**唯一硬约束**：同一协议下模型名不能重复。冲突直接拒绝加载，报出两个来源。这样路由结果永远可预测。
+**唯一硬约束**：模型名全局唯一。冲突直接拒绝加载，报出重复的模型名。这样路由结果永远可预测。
 
-## 3. 查询
+候选链的顺序由 `priority` 决定（数字越小越优先），同优先级按配置顺序。
+
+## 4. 查询
 
 ```go
-func (r *Router) Resolve(protocol, model string) (Target, error) {
+func (r *Router) Resolve(protocol, model string) ([]Target, error) {
     if t, ok := (*r.snapshot.Load())[key{protocol, model}]; ok {
         return t, nil
     }
-    return Target{}, &ModelNotFound{Model: model, Protocol: protocol}
+    return nil, &ModelNotFound{Model: model, Protocol: protocol}
 }
 ```
 
@@ -55,23 +69,57 @@ model "glm-4.6" is not configured for the OpenAI protocol;
 it is available via the Anthropic endpoint (/anthropic)
 ```
 
-## 4. 协议隔离
+## 5. 失败切换
 
-协议来自 URL 前缀，在 ingress 阶段确定，路由层不接收 `headers`，从结构上杜绝跨协议命中。
+候选链上的实例按顺序尝试。判定规则：
 
-## 5. 演进路径
+| 上游结果 | 是否切换 |
+|---|---|
+| 连接失败 / 超时 | 切换 |
+| `5xx` | 切换 |
+| `429` | 切换 |
+| `4xx`（400 / 401 / 404 …） | **不切换**，原样透传给客户端 |
+| 客户端断开 | 不切换 |
 
-`router` 包对外只暴露 `Resolve(ctx, protocol, model)`。将来引入规则时：
+`4xx` 描述的是请求本身，换一个上游重试只会重复失败；`429` 与 `5xx` 描述的是上游，换一个实例可能成功。
+
+**流式响应的边界**：切换只发生在拿到上游响应头之前。响应头一旦返回，网关已经把状态行写给了客户端，此时再换上游会让客户端收到两份 SSE 流，因此流中途断开只能报错，不重放。
+
+每次尝试各记一条请求日志，失败的条目带上失败的实例名，因此事后能看出「为什么切了」。
+
+## 6. 熔断
+
+一个持续故障的实例不应该让每个请求都先付一次超时。实例级熔断参数：
+
+- `max_fails`：连续失败多少次后跳过一次（默认 3）
+- `cooldown_secs`：跳过多长时间（默认 30 秒）
+
+熔断状态放在网关进程内，**不进路由快照** —— 否则每次改配置热重载都会把计数清零，刚被摘除的实例立刻复活，比没有熔断更糟。冷却结束后实例会被重新探测。
+
+熔断是**物理层**的属性：某个实例连不上，对引用它的所有模型都是故障，所以参数挂在实例上而不是模型上。
+
+## 7. 协议隔离
+
+协议来自 URL 前缀，在 ingress 阶段确定，路由层不接收 `headers`，从结构上杜绝跨协议命中。候选链按协议分别构建，一个只提供 OpenAI 入口的实例不会出现在 Anthropic 端点上。
+
+## 8. 演进路径
+
+`router` 包对外只暴露 `Resolve(protocol, model) []Target`。将来引入规则时：
 
 1. 在查表之前插入规则匹配；
-2. 候选从单个 `Target` 变为 `[]Target`；
-3. 选择策略（权重/优先级/fallback/熔断）在 router 内部实现。
+2. 候选从 `[]Target` 变为更丰富的候选描述；
+3. 选择策略（权重 / 优先级 / 熔断）在 router 内部实现。
 
 ingress、transport、日志、管理台均无需改动。
 
-## 6. 测试
+`strategy` 字段已经预留（当前只实现 `failover`），`weight` 字段也已就位。将来加轮询或按权重分配时不需要改配置结构。
 
-- 表驱动：`(protocol, model)` → 期望 Target / 未命中。
-- 冲突检测：同协议重复模型 → 加载失败，错误包含两个来源。
+## 9. 测试
+
+- 表驱动：`(protocol, model)` → 期望候选链 / 未命中。
+- 冲突检测：模型名重复 → 加载失败，错误包含重复的名字。
 - 跨协议提示：模型只在另一协议存在时，错误信息给出提示。
+- 候选链排序：按 `priority` 升序，同优先级按配置顺序。
+- 失败切换：5xx / 429 切换、4xx 不切换、全部失败返回最后一个上游错误。
+- 熔断：达到阈值后跳过实例，冷却结束后恢复。
 - 热更新：替换快照后进行中的请求仍使用旧 Target。

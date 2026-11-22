@@ -18,7 +18,7 @@
                        ▼
         ┌──────────────────────────────┐
         │ router（查表）               │
-        │  (protocol, model) → Target  │
+        │ (protocol, model) → []Target│
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
@@ -26,6 +26,7 @@
         │  注入上游 Key（单 Key）       │
         │  最小改写：model + 鉴权头     │
         │  转发 + SSE 透传 + usage 嗅探 │
+        │  失败时切下一个候选           │
         └──────────────┬───────────────┘
                        ▼
                   上游 API
@@ -33,13 +34,16 @@
               usage/log（异步）→ SQLite / Prometheus
 ```
 
+候选链由两层配置编译而来：**Instance**（物理上游接入点）与 **Model**（逻辑模型）。详见 `docs/routing.md`。
+
 ## 2. 包结构
 
 ```
 cmd/llmgw/                 main：加载配置、启动 HTTP、优雅退出
 internal/config/           YAML 解析、校验、环境变量展开、热重载
 internal/preset/           内置端点目录（MiniMax 编码套餐等）
-internal/router/           查表路由与 Target
+internal/router/           查表路由与候选链 Target
+internal/health/           上游接入点的熔断状态（跨热重载存活）
 internal/ingress/          路径归一化、协议判定、请求元数据解析
 internal/transport/        转发、SSE 透传、usage 嗅探、失败分类
 internal/auth/             网关 Key 生成、bcrypt 密码、会话令牌
@@ -57,14 +61,15 @@ web/                       Vue 3 + Vite 控制台源码
 1. **归一化路径**，确定 `protocol`（`openai` | `anthropic`）。
 2. **鉴权**：从 `Authorization: Bearer` 或 `x-api-key` 取网关 Key，SHA-256 后在内存缓存中比对（启动时加载，管理面变更时同步更新），请求路径不查库。
 3. **解析元数据**：只取 `model` 与 `stream`，用 `jsonparser` 流式读取，不反序列化整个 body。
-4. **路由**：`router.Resolve(protocol, model)` → `Target{Provider, Protocol, BaseURL, UpstreamModel}`。
+4. **路由**：`router.Resolve(protocol, model)` → `[]Target{Instance, Protocol, BaseURL, UpstreamModel}`，按优先级排序的候选链。
 5. **改写 body**：用 `sjson` 仅替换 `model`；OpenAI 流式请求注入 `stream_options.include_usage`。
-6. **注入上游鉴权**：每个供应商一个 Key；空 Key 表示上游无需鉴权。
+6. **注入上游鉴权**：每个上游接入点一个 Key；空 Key 表示上游无需鉴权。
 7. **构造上游请求**：拼接 base_url 与路径，**先全量剥离**客户端鉴权头与 `anthropic-version`，再注入上游鉴权。
 8. **转发**：
    - 非流式：读完整响应 → 解析 usage → 写回客户端。
    - 流式：逐行读取上游 SSE，边转发边嗅探 usage，每个事件 flush。
-9. **收尾**：记录耗时、TTFT、token、成本；写入异步队列；更新 metrics。
+9. **失败切换**：连接失败、超时、`5xx`、`429` 时换下一个候选重试；`4xx` 原样透传。流式响应一旦拿到上游响应头即锁定该上游。
+10. **收尾**：记录耗时、TTFT、token、成本；写入异步队列；更新 metrics。
 
 ## 4. 关键实现约束
 
@@ -102,17 +107,20 @@ req.Header.Set("anthropic-version", "2023-06-01")     // Anthropic 固定版本
 
 | 情况 | 行为 |
 |---|---|
-| 连接失败 / DNS | 502 |
-| 建连或读超时 | 504 |
-| 上游 4xx / 5xx（含 401/403） | 原样透传 status + body，不重试 |
+| 连接失败 / DNS | 502，有备实例则切换 |
+| 建连或读超时 | 504，有备实例则切换 |
+| 上游 5xx | 有备实例则切换，否则原样透传 status + body |
+| 上游 429 | 有备实例则切换，否则原样透传 |
+| 上游 4xx（含 401/403） | 原样透传 status + body，**不切换** |
 | 流式首包后错误 | 不重试，写出错误事件并结束 |
 | 模型未配置 | 404，遵循入口协议错误体 |
 
 ## 5. 并发模型
 
 - 每个请求一个 goroutine，上游请求使用共享 `http.Transport`（连接池）。
-- 超时固定 120s：非流式请求受 context 总超时约束；流式请求首包受 `ResponseHeaderTimeout` 约束，传输中由 idle watchdog 在超时后关闭上游连接。
+- 超时全局默认 120s（`upstream_timeout`），单个接入点只能调低：非流式请求受 context 总超时约束；流式请求首包受 `ResponseHeaderTimeout` 约束，传输中由 idle watchdog 在超时后关闭上游连接。
 - 路由快照用 `atomic.Pointer[Snapshot]`，读路径无锁。
+- 熔断状态放在 `internal/health` 的长期对象里，**不进快照**：配置热重载不能把熔断计数清零。
 - 网关 Key 用 `sync.RWMutex` 保护的内存缓存；SQLite 只承担启动加载、管理面写入与异步日志。
 - 日志写入：有界 channel（8192）+ 单写协程 + 批量事务；满则丢弃并 `gw_log_dropped_total++`。
 - 关闭顺序：停止接收新请求 → 等待在途请求（上限 30s）→ 冲刷日志队列 → 关闭 DB。
@@ -129,18 +137,20 @@ fsnotify 或 1s mtime 轮询
 atomic.Pointer.Store(new)
 ```
 
-供应商配置来自数据库；内置端点的两个 base URL 在构建时从代码目录解析，升级即生效。
+上游拓扑配置来自数据库；内置端点的端点地址在构建时从代码目录解析，升级即生效。
 
 ## 7. 数据库
 
-- `providers`：供应商（内置 preset 或自定义两个 base URL，单个上游 Key 为 AES-256-GCM 密文）
+- `instances`：上游接入点（内置 preset 或自定义端点列表，单个上游 Key 为 AES-256-GCM 密文，附熔断参数）
+- `models`：模型（对外名、上游名、策略）
+- `model_instances`：模型与接入点的候选关系（优先级、权重）
 - `api_keys`
 - `users`、`sessions`、`audit_logs`
 - `request_logs`
 - `usage_daily`
 - `settings`
 
-供应商在首次启动时从 `config.yaml` 导入，之后由控制台/管理 API 维护。`config.yaml` 的 `providers` 仅在数据库为空时生效。
+拓扑在首次启动时从 `config.yaml` 的 `instances` / `models` 导入，之后由控制台/管理 API 维护。旧的 `providers` 表会在启动时自动迁移成实例与模型。
 
 上游 Key 的加密主密钥来自 `server.master_key`，未配置时自动生成在数据库目录的 `master.key`（0600）。丢失该文件将无法解密已保存的上游 Key。
 

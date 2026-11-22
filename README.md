@@ -12,12 +12,14 @@
 | 能做 | 不做 |
 |---|---|
 | OpenAI / Anthropic 双入口，同协议直通 | 跨协议转换 |
-| 按 `(协议, 模型)` 查表路由 | 规则引擎、权重、优先级、fallback、熔断 |
-| 内置端点（MiniMax 编码套餐国内 / 国际）/ 自定义供应商 | RPM/TPM/预算、模型白名单 |
-| 上游 401/403 原样透传 | 自动重试、自动降级 |
+| 按 `(协议, 模型)` 查表路由，得到候选链 | 规则引擎、权重轮询 |
+| 同一模型挂多个上游，主实例失败自动切换 | 跨实例限流、预算 |
+| 上游接入点熔断（连续失败后跳过） | 主动健康检查 |
+| 内置端点（MiniMax 编码套餐国内 / 国际）/ 自定义接入点 | RPM/TPM/预算、模型白名单 |
+| 上游 401/403 原样透传 | 4xx 自动重试 |
 | 请求日志、token 与成本统计 | 多租户、计费、在线支付 |
 | 配置热更新 | MCP、RAG、护栏 |
-| Web 控制台：概览 / 供应商 / Key / 日志 / 接入说明 | Kubernetes Operator |
+| Web 控制台：概览 / 上游接入点 / 模型 / Key / 日志 / 接入说明 | Kubernetes Operator |
 | Prometheus 指标、结构化日志 | |
 ## 快速开始
 
@@ -67,33 +69,62 @@ curl localhost:8080/openai/v1/chat/completions \
 
 ## 配置要点
 
-供应商分两类：**内置端点**（只填 preset + api_key）与**自定义端点**（手填 base URL）。
+上游拓扑分两层：**上游接入点**（一个账号 + 它提供的端点）与**模型**（对外名 + 候选接入点链）。
 
 ```yaml
-providers:
-  # 内置端点：两个 base URL 与默认模型由程序内置
+instances:
+  # 内置端点：端点地址由程序内置，随版本升级自动更新
   - name: minimax-cn
     preset: minimax-mplan-cn          # 国内：api.minimax.cn
     api_key: "${MINIMAX_KEY}"
   # - name: minimax
   #   preset: minimax-mplan-global    # 国际：api.minimax.io
 
-  # 自定义端点：一个 Key + 两个 base URL + 模型列表
+  # 同一个上游的第二个账号，作为主实例的备份
+  - name: minimax-cn-backup
+    preset: minimax-mplan-cn
+    api_key: "${MINIMAX_KEY_BACKUP}"
+
+  # 自定义端点：一个 Key + 1~2 个端点
   - name: glm
-    api_key: "${GLM_KEY}"                  # 单个上游 Key
-    models:
-      - glm-4.6                            # 对外名与上游名相同
-    openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4
-    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
+    api_key: "${GLM_KEY}"
+    endpoints:
+      - protocol: openai
+        base_url: https://open.bigmodel.cn/api/coding/paas/v4
+      - protocol: anthropic
+        base_url: https://open.bigmodel.cn/api/anthropic
+
+models:
+  # 单实例
+  - name: MiniMax-M3.1-Flash
+    upstream: MiniMax-M3.1-Flash
+    instances:
+      - name: minimax-cn
+
+  # 主备：主实例失败后自动切到备份
+  - name: MiniMax-M3.1-Flash[1m]
+    upstream: MiniMax-M3.1-Flash
+    instances:
+      - name: minimax-cn
+        priority: 0
+      - name: minimax-cn-backup
+        priority: 1
+
+  # 别名：对外叫 claude-sonnet-4-5，上游仍是 glm-4.6
+  - name: claude-sonnet-4-5
+    upstream: glm-4.6
+    instances:
+      - name: glm
 ```
 
-- `models` 支持多行，`对外名=上游名` 可做别名（例如 `claude-sonnet-4-5=glm-4.6`）。
-- 同一份模型同时注册到两个协议入口；只填一个 base URL 就只开放对应协议。
-- 每个请求按 `(协议, 模型)` 哈希查表，命中唯一供应商。
-- 同一协议下模型名重复 → 拒绝保存/启动并报出两个来源。
+- 模型名全局唯一；`upstream` 省略时与 `name` 相同，这就是别名机制。
+- 接入点只填一个端点就只开放对应协议；模型同时注册到它能提供的每个协议入口。
+- 每个请求按 `(协议, 模型)` 哈希查表，得到一条按 `priority` 排序的候选链。
+- 上游返回 5xx / 429 / 超时时自动切到下一个候选；4xx 不切换，原样透传。
+- 接入点连续失败 3 次后跳过 30 秒（`max_fails` / `cooldown_secs` 可调）。
 - 模型只在另一个协议存在时，请求会得到 `400` 并提示改用哪个 base_url。
 - 改配置后 1 秒内自动生效，在途流式请求不受影响。
-- 超时固定 120s；代理使用进程的 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
+- 上游超时全局默认 120s，单个接入点只能调低；代理使用进程的 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
 - 内置端点的文档：MiniMax 编码套餐国内 <https://platform.minimaxi.com/docs/m-plan/other-tools>、国际 <https://platform.minimax.io/docs/m-plan/other-tools>。两边 Key 不通用，按套餐归属选择 `minimax-mplan-cn` / `minimax-mplan-global`。
 
 ## 管理 API
@@ -109,8 +140,9 @@ curl -b cookies.txt -X POST localhost:8080/admin/api/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"laptop"}'
 
-# 查看供应商、日志、用量、审计
-curl -b cookies.txt localhost:8080/admin/api/providers
+# 查看上游接入点、模型、日志、用量、审计
+curl -b cookies.txt localhost:8080/admin/api/instances
+curl -b cookies.txt localhost:8080/admin/api/models
 curl -b cookies.txt "localhost:8080/admin/api/logs?limit=20"
 curl -b cookies.txt "localhost:8080/admin/api/usage?days=7"
 curl -b cookies.txt "localhost:8080/admin/api/audit?limit=20"

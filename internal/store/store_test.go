@@ -120,7 +120,7 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 	t.Fatal("log row was not written")
 }
 
-func TestProviderCRUD(t *testing.T) {
+func TestInstanceAndModelCRUD(t *testing.T) {
 	st := testStore(t)
 	box, err := secret.New(make([]byte, 32))
 	if err != nil {
@@ -131,12 +131,15 @@ func TestProviderCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec, err := st.CreateProvider(ProviderSpec{
-		Name:             "glm",
-		EncryptedKey:     enc,
-		Models:           config.Models{"glm-4.6": "glm-4.6"},
-		OpenAIBaseURL:    "https://a/v4",
-		AnthropicBaseURL: "https://a/anthropic",
+	rec, err := st.CreateInstance(InstanceSpec{
+		Name:         "glm",
+		EncryptedKey: enc,
+		Endpoints: []config.Endpoint{
+			{Protocol: config.ProtocolOpenAI, BaseURL: "https://a/v4"},
+			{Protocol: config.ProtocolAnthropic, BaseURL: "https://a/anthropic"},
+		},
+		MaxFails:     2,
+		CooldownSecs: 15,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -145,36 +148,125 @@ func TestProviderCRUD(t *testing.T) {
 		t.Fatal("missing id")
 	}
 
-	providers, err := st.Providers(box)
+	instances, models, err := st.Topology(box)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(providers) != 1 || providers[0].APIKey != "sk-upstream" {
-		t.Fatalf("providers = %+v", providers)
+	if len(instances) != 1 || instances[0].APIKey != "sk-upstream" {
+		t.Fatalf("instances = %+v", instances)
+	}
+	if len(instances[0].Endpoints) != 2 {
+		t.Fatalf("endpoints = %+v", instances[0].Endpoints)
+	}
+	if len(models) != 0 {
+		t.Fatalf("models = %+v", models)
 	}
 
-	if err := st.UpdateProvider(rec.ID, ProviderSpec{
-		Name:          "glm",
-		Preset:        "minimax-mplan-global",
-		EncryptedKey:  enc,
-		Models:        config.Models{"m": "m"},
-		OpenAIBaseURL: "",
+	if err := st.UpdateInstance(rec.ID, InstanceSpec{
+		Name:         "glm",
+		Preset:       "minimax-mplan-global",
+		EncryptedKey: enc,
+		Endpoints:    []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://b/v1"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	records, err := st.ListProviderRecords()
+	records, err := st.ListInstanceRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if records[0].Preset != "minimax-mplan-global" || records[0].OpenAIBaseURL != "" {
+	if records[0].Preset != "minimax-mplan-global" || len(records[0].Endpoints) != 1 {
 		t.Fatalf("record = %+v", records[0])
 	}
 
-	if err := st.DeleteProvider(rec.ID); err != nil {
+	modelRec, err := st.CreateModel(ModelSpec{
+		Name:     "glm-4.6",
+		Upstream: "glm-4.6",
+		Strategy: config.StrategyFailover,
+		Instances: []ModelInstanceSpec{
+			{Instance: "glm", Priority: 0, Weight: 100},
+		},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DeleteProvider(rec.ID); err != ErrNotFound {
+	if modelRec.ID == 0 {
+		t.Fatal("missing model id")
+	}
+	_, models, err = st.Topology(box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || len(models[0].Instances) != 1 {
+		t.Fatalf("models = %+v", models)
+	}
+	if models[0].Instances[0].Name != "glm" {
+		t.Fatalf("model instances = %+v", models[0].Instances)
+	}
+
+	// An instance that still serves a model cannot be deleted.
+	if err := st.DeleteInstance(rec.ID); err == nil {
+		t.Fatal("expected the delete to be refused")
+	}
+
+	if err := st.DeleteModel(modelRec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteInstance(rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteInstance(rec.ID); err != ErrNotFound {
 		t.Fatalf("second delete = %v", err)
+	}
+}
+
+func TestModelCannotReferenceAnUnknownInstance(t *testing.T) {
+	st := testStore(t)
+	_, err := st.CreateModel(ModelSpec{
+		Name:      "m",
+		Upstream:  "m",
+		Strategy:  config.StrategyFailover,
+		Instances: []ModelInstanceSpec{{Instance: "ghost"}},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+// TestModelWithSeveralInstancesReadsBackAsOneModel guards the join that
+// produces one row per candidate.
+func TestModelWithSeveralInstancesReadsBackAsOneModel(t *testing.T) {
+	st := testStore(t)
+	for _, name := range []string{"a", "b"} {
+		if _, err := st.CreateInstance(InstanceSpec{
+			Name:      name,
+			Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://x/v1"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.CreateModel(ModelSpec{
+		Name:     "m",
+		Upstream: "m",
+		Strategy: config.StrategyFailover,
+		Instances: []ModelInstanceSpec{
+			{Instance: "a", Priority: 0, Weight: 100},
+			{Instance: "b", Priority: 1, Weight: 100},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := st.ListModelRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v", records)
+	}
+	if len(records[0].Instances) != 2 {
+		t.Fatalf("candidates = %+v", records[0].Instances)
+	}
+	if records[0].Instances[0].Instance != "a" || records[0].Instances[1].Instance != "b" {
+		t.Fatalf("candidates not ordered by priority: %+v", records[0].Instances)
 	}
 }
 
@@ -241,7 +333,7 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	}
 	defer st.Close()
 
-	records, err := st.ListProviderRecords()
+	records, err := st.ListInstanceRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,14 +347,32 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	if rec.EncryptedKey != "enc-first" {
 		t.Fatalf("key = %q", rec.EncryptedKey)
 	}
-	if rec.OpenAIBaseURL != "https://a/v4" || rec.AnthropicBaseURL != "https://a/anthropic" {
-		t.Fatalf("urls = %q %q", rec.OpenAIBaseURL, rec.AnthropicBaseURL)
+	if len(rec.Endpoints) != 2 {
+		t.Fatalf("endpoints = %+v", rec.Endpoints)
 	}
-	if rec.Models["glm-4.6"] != "glm-4.6" || rec.Models["claude-sonnet-4-5"] != "glm-4.6" {
-		t.Fatalf("models = %v", rec.Models)
+	if rec.Endpoints[0].BaseURL != "https://a/v4" || rec.Endpoints[1].BaseURL != "https://a/anthropic" {
+		t.Fatalf("urls = %+v", rec.Endpoints)
 	}
 	if rec.CreatedAt.IsZero() {
 		t.Fatal("timestamp lost")
+	}
+
+	models, err := st.ListModelRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v", models)
+	}
+	names := map[string]string{}
+	for _, m := range models {
+		names[m.Name] = m.Upstream
+		if len(m.Instances) != 1 || m.Instances[0].Instance != "glm" {
+			t.Fatalf("model %q instances = %+v", m.Name, m.Instances)
+		}
+	}
+	if names["glm-4.6"] != "glm-4.6" || names["claude-sonnet-4-5"] != "glm-4.6" {
+		t.Fatalf("models = %v", names)
 	}
 
 	// Reopening must not migrate again.
@@ -273,7 +383,71 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st2.Close()
-	if n, err := st2.CountProviders(); err != nil || n != 1 {
+	if n, err := st2.CountInstances(); err != nil || n != 1 {
 		t.Fatalf("count after reopen = %d, %v", n, err)
+	}
+	if n, err := st2.CountModels(); err != nil || n != 2 {
+		t.Fatalf("model count after reopen = %d, %v", n, err)
+	}
+}
+
+// TestPresetProviderTableIsMigrated covers the preset-aware legacy table.
+func TestPresetProviderTableIsMigrated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-preset.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE providers (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		name              TEXT NOT NULL UNIQUE,
+		preset            TEXT NOT NULL DEFAULT '',
+		key_enc           TEXT NOT NULL DEFAULT '',
+		models_json       TEXT NOT NULL DEFAULT '{}',
+		openai_base_url   TEXT NOT NULL DEFAULT '',
+		anthropic_base_url TEXT NOT NULL DEFAULT '',
+		created_at        TEXT NOT NULL,
+		updated_at        TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, _ := json.Marshal(map[string]string{"glm-4.6": "glm-4.6"})
+	if _, err := db.Exec(`INSERT INTO providers(name, preset, key_enc, models_json,
+		openai_base_url, anthropic_base_url, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		"glm", "", "enc-key", string(models), "https://a/v4", "https://a/anthropic",
+		"2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := Open(ctx, path, logger)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer st.Close()
+
+	records, err := st.ListInstanceRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].EncryptedKey != "enc-key" {
+		t.Fatalf("records = %+v", records)
+	}
+	if len(records[0].Endpoints) != 2 {
+		t.Fatalf("endpoints = %+v", records[0].Endpoints)
+	}
+	modelRecords, err := st.ListModelRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(modelRecords) != 1 || modelRecords[0].Name != "glm-4.6" {
+		t.Fatalf("models = %+v", modelRecords)
 	}
 }

@@ -17,15 +17,28 @@ log:
   level: debug
   format: text
 
-providers:
+instances:
   - name: mock
     api_key: "mock-upstream-key"
-    models:
-      - gpt-test
-      - claude-test
-      - gpt-alias=gpt-upstream-name
-    openai_base_url: http://mock:8000
-    anthropic_base_url: http://mock:8000
+    endpoints:
+      - protocol: openai
+        base_url: http://mock:8000
+      - protocol: anthropic
+        base_url: http://mock:8000
+
+models:
+  - name: gpt-test
+    upstream: gpt-test
+    instances:
+      - name: mock
+  - name: claude-test
+    upstream: claude-test
+    instances:
+      - name: mock
+  - name: gpt-alias
+    upstream: gpt-upstream-name
+    instances:
+      - name: mock
 
 pricing:
   gpt-test:

@@ -397,7 +397,7 @@ tbody tr:last-child td {
   font-weight: 600;
 }
 
-/* providers */
+/* 上游接入点与模型 */
 
 .provider-head {
   display: flex;
@@ -657,4 +657,20 @@ textarea:focus {
 .key-hints code {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* 表单里可增删的行（端点、候选接入点） */
+
+.row select.input-fixed {
+  flex: 0 0 140px;
+}
+
+.row select.input-grow {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.row input.input-num {
+  flex: 0 0 92px;
+  min-width: 0;
 }

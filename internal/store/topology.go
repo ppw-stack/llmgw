@@ -1,0 +1,413 @@
+package store
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/secret"
+)
+
+// InstanceSpec is the write form of an instance. The upstream key stays
+// encrypted; callers must use Topology to obtain the plaintext form.
+type InstanceSpec struct {
+	Name         string
+	Preset       string
+	EncryptedKey string
+	Endpoints    []config.Endpoint
+	MaxFails     int
+	CooldownSecs int
+	TimeoutSecs  int
+}
+
+// InstanceRecord is the storage form of an instance.
+type InstanceRecord struct {
+	ID int64
+	InstanceSpec
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ModelInstanceSpec binds a model to one instance. The instance is referenced
+// by name because that is how the configuration and the admin API speak.
+type ModelInstanceSpec struct {
+	Instance string
+	Priority int
+	Weight   int
+}
+
+// ModelSpec is the write form of a model.
+type ModelSpec struct {
+	Name      string
+	Upstream  string
+	Strategy  string
+	Instances []ModelInstanceSpec
+}
+
+// ModelRecord is the storage form of a model.
+type ModelRecord struct {
+	ID int64
+	ModelSpec
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func (s *Store) CountInstances() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM instances`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
+	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, endpoints_json,
+		max_fails, cooldown_secs, timeout_secs, created_at, updated_at
+		FROM instances ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InstanceRecord
+	for rows.Next() {
+		var (
+			rec       InstanceRecord
+			endpoints string
+			created   string
+			updated   string
+		)
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &endpoints,
+			&rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs, &created, &updated); err != nil {
+			return nil, err
+		}
+		if endpoints != "" {
+			if err := json.Unmarshal([]byte(endpoints), &rec.Endpoints); err != nil {
+				return nil, fmt.Errorf("instance %q: bad endpoints: %w", rec.Name, err)
+			}
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateInstance stores an instance and returns the stored record.
+func (s *Store) CreateInstance(spec InstanceSpec) (*InstanceRecord, error) {
+	endpointsJSON, err := json.Marshal(spec.Endpoints)
+	if err != nil {
+		return nil, err
+	}
+	if spec.Endpoints == nil {
+		endpointsJSON = []byte("[]")
+	}
+	now := nowStamp()
+	res, err := s.db.Exec(`INSERT INTO instances(name, preset, key_enc, endpoints_json,
+		max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON),
+		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return &InstanceRecord{ID: id, InstanceSpec: spec, CreatedAt: nowTime(now), UpdatedAt: nowTime(now)}, nil
+}
+
+// UpdateInstance replaces the stored form of one instance.
+func (s *Store) UpdateInstance(id int64, spec InstanceSpec) error {
+	endpointsJSON, err := json.Marshal(spec.Endpoints)
+	if err != nil {
+		return err
+	}
+	if spec.Endpoints == nil {
+		endpointsJSON = []byte("[]")
+	}
+	res, err := s.db.Exec(`UPDATE instances SET name=?, preset=?, key_enc=?, endpoints_json=?,
+		max_fails=?, cooldown_secs=?, timeout_secs=?, updated_at=? WHERE id=?`,
+		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON),
+		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteInstance removes an instance. An instance that still serves a model is
+// refused, because a model without candidates cannot be routed.
+func (s *Store) DeleteInstance(id int64) error {
+	var used int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM model_instances WHERE instance_id = ?`, id).Scan(&used)
+	if err != nil {
+		return err
+	}
+	if used > 0 {
+		return fmt.Errorf("instance is still used by %d model(s); remove it from those models first", used)
+	}
+	res, err := s.db.Exec(`DELETE FROM instances WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CountModels() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM models`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) ListModelRecords() ([]ModelRecord, error) {
+	rows, err := s.db.Query(`SELECT m.id, m.name, m.upstream, m.strategy, m.created_at, m.updated_at,
+		i.name, mi.priority, mi.weight
+		FROM models m
+		LEFT JOIN model_instances mi ON mi.model_id = m.id
+		LEFT JOIN instances i ON i.id = mi.instance_id
+		ORDER BY m.id, mi.priority, i.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ModelRecord
+	for rows.Next() {
+		var (
+			rec      ModelRecord
+			created  string
+			updated  string
+			instName sql.NullString
+			priority sql.NullInt64
+			weight   sql.NullInt64
+		)
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Upstream, &rec.Strategy, &created, &updated,
+			&instName, &priority, &weight); err != nil {
+			return nil, err
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		if instName.Valid {
+			rec.Instances = append(rec.Instances, ModelInstanceSpec{
+				Instance: instName.String,
+				Priority: int(priority.Int64),
+				Weight:   int(weight.Int64),
+			})
+		}
+		// The join produces one row per candidate, so the rows of one model
+		// are folded into a single record.
+		if len(out) > 0 && out[len(out)-1].ID == rec.ID {
+			out[len(out)-1].Instances = append(out[len(out)-1].Instances, rec.Instances...)
+			continue
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateModel stores a model together with its candidate list.
+func (s *Store) CreateModel(spec ModelSpec) (*ModelRecord, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := nowStamp()
+	res, err := tx.Exec(`INSERT INTO models(name, upstream, strategy, created_at, updated_at)
+		VALUES(?,?,?,?,?)`, spec.Name, spec.Upstream, spec.Strategy, now, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	if err := replaceModelInstances(tx, id, spec.Instances); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &ModelRecord{ID: id, ModelSpec: spec, CreatedAt: nowTime(now), UpdatedAt: nowTime(now)}, nil
+}
+
+// UpdateModel replaces the stored form of one model, including its candidate
+// list.
+func (s *Store) UpdateModel(id int64, spec ModelSpec) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE models SET name=?, upstream=?, strategy=?, updated_at=? WHERE id=?`,
+		spec.Name, spec.Upstream, spec.Strategy, nowStamp(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if err := replaceModelInstances(tx, id, spec.Instances); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteModel removes a model and its candidate list.
+func (s *Store) DeleteModel(id int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM model_instances WHERE model_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM models WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
+// replaceModelInstances rewrites the candidate list of one model.
+func replaceModelInstances(tx *sql.Tx, modelID int64, instances []ModelInstanceSpec) error {
+	if _, err := tx.Exec(`DELETE FROM model_instances WHERE model_id = ?`, modelID); err != nil {
+		return err
+	}
+	for _, mi := range instances {
+		var instanceID int64
+		err := tx.QueryRow(`SELECT id FROM instances WHERE name = ?`, mi.Instance).Scan(&instanceID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return fmt.Errorf("instance %q does not exist", mi.Instance)
+			}
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO model_instances(model_id, instance_id, priority, weight)
+			VALUES(?,?,?,?)`, modelID, instanceID, mi.Priority, mi.Weight); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Topology reads the whole upstream topology and decrypts the upstream keys.
+func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, error) {
+	records, err := s.ListInstanceRecords()
+	if err != nil {
+		return nil, nil, err
+	}
+	instances := make([]config.Instance, 0, len(records))
+	for _, rec := range records {
+		key := ""
+		if rec.EncryptedKey != "" {
+			plain, err := box.Decrypt(rec.EncryptedKey)
+			if err != nil {
+				return nil, nil, fmt.Errorf("instance %q: cannot decrypt upstream key: %w", rec.Name, err)
+			}
+			key = plain
+		}
+		instances = append(instances, config.Instance{
+			Name:         rec.Name,
+			Preset:       rec.Preset,
+			APIKey:       key,
+			Endpoints:    rec.Endpoints,
+			MaxFails:     rec.MaxFails,
+			CooldownSecs: rec.CooldownSecs,
+			TimeoutSecs:  rec.TimeoutSecs,
+		})
+	}
+
+	modelRecords, err := s.ListModelRecords()
+	if err != nil {
+		return nil, nil, err
+	}
+	models := make([]config.Model, 0, len(modelRecords))
+	for _, rec := range modelRecords {
+		m := config.Model{
+			Name:     rec.Name,
+			Upstream: rec.Upstream,
+			Strategy: rec.Strategy,
+		}
+		for _, mi := range rec.Instances {
+			m.Instances = append(m.Instances, config.ModelInstance{
+				Name:     mi.Instance,
+				Priority: mi.Priority,
+				Weight:   mi.Weight,
+			})
+		}
+		models = append(models, m)
+	}
+	return instances, models, nil
+}
+
+// ImportTopology seeds the database from config.yaml on first start.
+func (s *Store) ImportTopology(instances []config.Instance, models []config.Model, box *secret.Box) error {
+	for _, inst := range instances {
+		encrypted := ""
+		if inst.APIKey != "" {
+			enc, err := box.Encrypt(inst.APIKey)
+			if err != nil {
+				return err
+			}
+			encrypted = enc
+		}
+		spec := InstanceSpec{
+			Name:         inst.Name,
+			Preset:       inst.Preset,
+			EncryptedKey: encrypted,
+			Endpoints:    inst.Endpoints,
+			MaxFails:     inst.MaxFails,
+			CooldownSecs: inst.CooldownSecs,
+			TimeoutSecs:  inst.TimeoutSecs,
+		}
+		if _, err := s.CreateInstance(spec); err != nil {
+			if isUniqueViolation(err) {
+				continue
+			}
+			return err
+		}
+	}
+	for _, m := range models {
+		spec := ModelSpec{
+			Name:     m.Name,
+			Upstream: m.Upstream,
+			Strategy: m.Strategy,
+		}
+		for _, mi := range m.Instances {
+			spec.Instances = append(spec.Instances, ModelInstanceSpec{
+				Instance: mi.Name,
+				Priority: mi.Priority,
+				Weight:   mi.Weight,
+			})
+		}
+		if _, err := s.CreateModel(spec); err != nil {
+			if isUniqueViolation(err) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func nowTime(stamp string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, stamp)
+	return t
+}
+
+// isUniqueViolation reports whether the error is a unique constraint failure.
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint")
+}

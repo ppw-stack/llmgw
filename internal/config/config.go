@@ -10,11 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pw/llmgw/internal/preset"
 	"gopkg.in/yaml.v3"
-)
-
-// Protocols supported by the gateway. v1 does not translate between them.
+) // Protocols supported by the gateway. v1 does not translate between them.
 const (
 	ProtocolOpenAI    = "openai"
 	ProtocolAnthropic = "anthropic"
@@ -24,7 +21,8 @@ const (
 const DefaultAnthropicVersion = "2023-06-01"
 
 // DefaultTimeout bounds non-streaming upstream calls and the idle gap of a
-// streaming response. It is deliberately not configurable per provider.
+// streaming response. The global default may be overridden with
+// upstream_timeout; an instance may only lower it.
 const DefaultTimeout = 120 * time.Second
 
 // Duration lets YAML accept either "120s" or a bare number of seconds.
@@ -54,8 +52,14 @@ type Config struct {
 	Server    Server           `yaml:"server"`
 	Database  Database         `yaml:"database"`
 	Log       Log              `yaml:"log"`
+	Instances []Instance       `yaml:"instances"`
+	Models    []Model          `yaml:"models"`
 	Providers []Provider       `yaml:"providers"`
 	Pricing   map[string]Price `yaml:"pricing"`
+
+	// UpstreamTimeout bounds non-streaming upstream calls and the idle gap of
+	// a streaming response. An instance may lower it, never raise it.
+	UpstreamTimeout Duration `yaml:"upstream_timeout"`
 }
 
 type Server struct {
@@ -84,9 +88,8 @@ type Log struct {
 	Format string `yaml:"format"`
 }
 
-// Provider is either a built-in preset (Preset set) or a custom upstream
-// (openai_base_url / anthropic_base_url set). The same model list is exposed on
-// both protocol entries; a code plan offers the same models through both.
+// Provider is the legacy single-upstream form. It is still accepted in
+// config.yaml and is expanded into one instance plus its models on load.
 type Provider struct {
 	Name             string `yaml:"name"`
 	Preset           string `yaml:"preset"`
@@ -184,6 +187,7 @@ func defaults() *Config {
 	c.Database.Path = "./data/llmgw.db"
 	c.Log.Level = "info"
 	c.Log.Format = "json"
+	c.UpstreamTimeout = Duration(DefaultTimeout)
 	return c
 }
 
@@ -208,8 +212,13 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(c); err != nil {
 		msg := fmt.Errorf("parse %s: %w", path, err)
 		if strings.Contains(err.Error(), "config.Provider") {
-			msg = fmt.Errorf("%w; providers now accept api_key, models, openai_base_url and "+
-				"anthropic_base_url (or preset); the old keys/endpoints form was removed", msg)
+			msg = fmt.Errorf("%w; the legacy providers form now accepts name, api_key, models, "+
+				"openai_base_url and anthropic_base_url (or preset); the old keys/endpoints form "+
+				"was removed", msg)
+		}
+		if strings.Contains(err.Error(), "config.Instance") {
+			msg = fmt.Errorf("%w; an instance accepts name, api_key, preset and a list of "+
+				"endpoints ({protocol, base_url})", msg)
 		}
 		return nil, msg
 	}
@@ -278,11 +287,13 @@ func (c *Config) normalize() error {
 	if c.Database.Path == "" {
 		return fmt.Errorf("database.path is required")
 	}
-	if len(c.Providers) == 0 {
-		return fmt.Errorf("at least one provider is required")
+	if c.UpstreamTimeout <= 0 {
+		c.UpstreamTimeout = Duration(DefaultTimeout)
+	}
+	if len(c.Instances) == 0 && len(c.Models) == 0 && len(c.Providers) == 0 {
+		return fmt.Errorf("at least one instance is required")
 	}
 
-	seen := map[string]bool{}
 	for pi := range c.Providers {
 		p := &c.Providers[pi]
 		p.Name = strings.TrimSpace(expandEnv(p.Name))
@@ -290,72 +301,76 @@ func (c *Config) normalize() error {
 		p.APIKey = strings.TrimSpace(expandEnv(p.APIKey))
 		p.OpenAIBaseURL = strings.TrimSpace(expandEnv(p.OpenAIBaseURL))
 		p.AnthropicBaseURL = strings.TrimSpace(expandEnv(p.AnthropicBaseURL))
-		if err := NormalizeProvider(p); err != nil {
+	}
+	if err := c.expandLegacyProviders(); err != nil {
+		return err
+	}
+
+	seenInstance := map[string]bool{}
+	for ii := range c.Instances {
+		p := &c.Instances[ii]
+		p.Name = strings.TrimSpace(expandEnv(p.Name))
+		p.Preset = strings.TrimSpace(expandEnv(p.Preset))
+		p.APIKey = strings.TrimSpace(expandEnv(p.APIKey))
+		for ei := range p.Endpoints {
+			p.Endpoints[ei].BaseURL = strings.TrimSpace(expandEnv(p.Endpoints[ei].BaseURL))
+		}
+		if err := NormalizeInstance(p); err != nil {
 			return err
 		}
-		if seen[p.Name] {
-			return fmt.Errorf("duplicate provider %q", p.Name)
+		if seenInstance[p.Name] {
+			return fmt.Errorf("duplicate instance %q", p.Name)
 		}
-		seen[p.Name] = true
+		seenInstance[p.Name] = true
 	}
-	return nil
-}
 
-// NormalizeProvider applies defaults and validates one provider. It does not
-// expand environment variables; that is only meaningful for config.yaml input.
-func NormalizeProvider(p *Provider) error {
-	p.Name = strings.TrimSpace(p.Name)
-	if p.Name == "" {
-		return fmt.Errorf("provider name is required")
-	}
-	p.Preset = strings.TrimSpace(p.Preset)
-	p.APIKey = strings.TrimSpace(p.APIKey)
-	p.OpenAIBaseURL = strings.TrimSpace(p.OpenAIBaseURL)
-	p.AnthropicBaseURL = strings.TrimSpace(p.AnthropicBaseURL)
-
-	if p.Preset != "" {
-		pr, ok := preset.Lookup(p.Preset)
-		if !ok {
-			return fmt.Errorf("provider %q: unknown preset %q", p.Name, p.Preset)
+	seenModel := map[string]bool{}
+	for mi := range c.Models {
+		m := &c.Models[mi]
+		m.Name = strings.TrimSpace(expandEnv(m.Name))
+		m.Upstream = strings.TrimSpace(expandEnv(m.Upstream))
+		for ii := range m.Instances {
+			m.Instances[ii].Name = strings.TrimSpace(expandEnv(m.Instances[ii].Name))
 		}
-		if p.OpenAIBaseURL != "" || p.AnthropicBaseURL != "" {
-			return fmt.Errorf("provider %q: preset %q supplies its own base URLs; "+
-				"remove openai_base_url/anthropic_base_url or use a custom provider", p.Name, p.Preset)
+		if err := NormalizeModel(m); err != nil {
+			return err
 		}
-		if len(p.Models) == 0 {
-			models, err := ParseModels(pr.Models)
-			if err != nil {
-				return fmt.Errorf("provider %q: preset %q: %w", p.Name, p.Preset, err)
+		if seenModel[m.Name] {
+			return fmt.Errorf("duplicate model %q", m.Name)
+		}
+		seenModel[m.Name] = true
+		for _, mi := range m.Instances {
+			if !seenInstance[mi.Name] {
+				return fmt.Errorf("model %q: instance %q does not exist", m.Name, mi.Name)
 			}
-			p.Models = models
 		}
-	} else {
-		if p.OpenAIBaseURL == "" && p.AnthropicBaseURL == "" {
-			return fmt.Errorf("provider %q: at least one of openai_base_url or anthropic_base_url is required", p.Name)
-		}
-	}
-
-	var err error
-	if p.OpenAIBaseURL, err = normalizeBaseURL(p.Name, "openai_base_url", p.OpenAIBaseURL); err != nil {
-		return err
-	}
-	if p.AnthropicBaseURL, err = normalizeBaseURL(p.Name, "anthropic_base_url", p.AnthropicBaseURL); err != nil {
-		return err
-	}
-	if p.Models, err = normalizeModels(p.Models); err != nil {
-		return fmt.Errorf("provider %q: %w", p.Name, err)
 	}
 	return nil
 }
 
-func normalizeBaseURL(provider, field, raw string) (string, error) {
+// expandLegacyProviders turns the legacy provider list into the instance and
+// model form. Old config files therefore keep working unchanged.
+func (c *Config) expandLegacyProviders() error {
+	for _, p := range c.Providers {
+		inst, models, err := ExpandProvider(p)
+		if err != nil {
+			return err
+		}
+		c.Instances = append(c.Instances, inst)
+		c.Models = append(c.Models, models...)
+	}
+	c.Providers = nil
+	return nil
+}
+
+func normalizeBaseURL(owner, field, raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", fmt.Errorf("provider %q: %s must be an absolute http(s) URL, got %q",
-			provider, field, raw)
+		return "", fmt.Errorf("%s: %s must be an absolute http(s) URL, got %q",
+			owner, field, raw)
 	}
 	return strings.TrimRight(raw, "/"), nil
 }
@@ -373,54 +388,5 @@ func normalizeModels(m Models) (Models, error) {
 		}
 		out[name] = up
 	}
-	return out, nil
-}
-
-// Effective is the routing-ready form of a provider.
-type Effective struct {
-	Name             string
-	Preset           string
-	APIKey           string
-	Models           Models
-	OpenAIBaseURL    string
-	AnthropicBaseURL string
-}
-
-// Effective resolves presets and applies the shared defaults. It is used both
-// when building the router and when rendering the admin API. On error the
-// returned Effective is the zero value and the error already carries the
-// provider context, so callers can report it as is.
-func (p Provider) Effective() (Effective, error) {
-	out := Effective{
-		Name:             p.Name,
-		Preset:           p.Preset,
-		APIKey:           p.APIKey,
-		Models:           p.Models,
-		OpenAIBaseURL:    strings.TrimRight(strings.TrimSpace(p.OpenAIBaseURL), "/"),
-		AnthropicBaseURL: strings.TrimRight(strings.TrimSpace(p.AnthropicBaseURL), "/"),
-	}
-	if p.Preset != "" {
-		pr, ok := preset.Lookup(p.Preset)
-		if !ok {
-			return Effective{}, fmt.Errorf("provider %q: unknown preset %q", p.Name, p.Preset)
-		}
-		out.OpenAIBaseURL = strings.TrimRight(pr.OpenAIBaseURL, "/")
-		out.AnthropicBaseURL = strings.TrimRight(pr.AnthropicBaseURL, "/")
-		if len(out.Models) == 0 {
-			models, err := ParseModels(pr.Models)
-			if err != nil {
-				return Effective{}, fmt.Errorf("provider %q: preset %q: %w", p.Name, p.Preset, err)
-			}
-			out.Models = models
-		}
-	}
-	if out.OpenAIBaseURL == "" && out.AnthropicBaseURL == "" {
-		return Effective{}, fmt.Errorf("provider %q: at least one upstream base URL is required", p.Name)
-	}
-	models, err := normalizeModels(out.Models)
-	if err != nil {
-		return Effective{}, fmt.Errorf("provider %q: %w", p.Name, err)
-	}
-	out.Models = models
 	return out, nil
 }

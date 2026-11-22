@@ -30,8 +30,8 @@ var (
 
 	UpstreamErrors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gw_upstream_errors_total",
-		Help: "Upstream failures, by provider and class.",
-	}, []string{"provider", "class"})
+		Help: "Upstream failures, by instance and class.",
+	}, []string{"instance", "class"})
 
 	LogDropped = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "gw_log_dropped_total",

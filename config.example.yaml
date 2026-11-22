@@ -24,23 +24,66 @@ log:
   level: info
   format: json
 
-providers:
-  # 内置端点：只需选 preset + 填 API Key。
+# 上游调用的全局超时：约束非流式请求与流式响应的空闲间隔。
+# 单个实例可以用 timeout_secs 调低（不能调高）。
+upstream_timeout: 120s
+
+# 上游接入点（物理层）：一个账号 + 它提供的协议入口。
+# 这里不写分流策略——策略属于下面的模型层。
+instances:
+  # 内置端点：端点地址由程序内置，随版本升级自动更新。
   # 国内套餐用 minimax-mplan-cn（api.minimax.cn），国际套餐用 minimax-mplan-global。
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
-    # 可选：覆盖内置默认模型（默认 MiniMax-M3.1-Flash）
-    # models:
-    #   - MiniMax-M3.1-Flash
+    # 熔断：连续失败 max_fails 次后跳过该实例 cooldown_secs 秒
+    max_fails: 3
+    cooldown_secs: 30
+    # 单实例超时（秒）；0 表示用上面的全局 upstream_timeout
+    timeout_secs: 0
 
-  # 自定义端点：任意 code plan 都是「一个 Key + 1~2 个 base URL + 模型」。
+  # 同一个上游地址的两个账号，构成主备：
+  # 两者都可以服务同一个模型，靠模型的 priority 决定谁先被调用。
+  - name: minimax-cn-backup
+    preset: minimax-mplan-cn
+    api_key: "${MINIMAX_KEY_BACKUP}"
+    max_fails: 3
+    cooldown_secs: 30
+
+  # 自定义端点：任意 code plan 都是「一个 Key + 1~2 个端点」。
   - name: glm
     api_key: "${GLM_KEY}"
-    models:
-      - glm-4.6
-    openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4
-    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
+    endpoints:
+      - protocol: openai
+        base_url: https://open.bigmodel.cn/api/coding/paas/v4
+      - protocol: anthropic
+        base_url: https://open.bigmodel.cn/api/anthropic
+
+# 模型（逻辑层）：对外模型名 + 候选实例链 + 分流策略。
+models:
+  # 单实例
+  - name: MiniMax-M3.1-Flash
+    upstream: MiniMax-M3.1-Flash
+    strategy: failover
+    instances:
+      - name: minimax-cn
+
+  # 主备：priority 越小越优先，主实例失败后自动切到下一个
+  - name: MiniMax-M3.1-Flash[1m]
+    upstream: MiniMax-M3.1-Flash
+    strategy: failover
+    instances:
+      - name: minimax-cn
+        priority: 0
+      - name: minimax-cn-backup
+        priority: 1
+
+  # 别名：对外叫 claude-sonnet-4-5，上游仍是 glm-4.6
+  - name: claude-sonnet-4-5
+    upstream: glm-4.6
+    strategy: failover
+    instances:
+      - name: glm
 
 # 可选。USD per million tokens，仅用于成本估算。
 pricing:
@@ -50,3 +93,11 @@ pricing:
   glm-4.6:
     input_per_mtok: 0.6
     output_per_mtok: 2.2
+
+# 兼容写法：旧的 providers 列表仍然可用，加载时自动展开成
+# 一个实例 + 若干模型（每个 provider 只会生成一个实例）。
+# providers:
+#   - name: glm
+#     api_key: "${GLM_KEY}"
+#     models: [glm-4.6]
+#     openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4

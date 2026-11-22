@@ -281,7 +281,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 		return
 	}
 
-	target, err := s.router.Resolve(protocol, meta.Model)
+	targets, err := s.router.Resolve(protocol, meta.Model)
 	if err != nil {
 		var nf *router.ModelNotFoundError
 		if errors.As(err, &nf) && nf.Hint != "" {
@@ -299,7 +299,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 	s.forwarder.Forward(w, r, transport.Request{
 		Protocol:  protocol,
 		Meta:      meta,
-		Target:    target,
+		Targets:   targets,
 		APIKeyID:  key.ID,
 		RequestID: requestID(r),
 	})

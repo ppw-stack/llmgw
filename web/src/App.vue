@@ -5,7 +5,8 @@ import type { Me } from './types';
 import LoginView from './views/LoginView.vue';
 import PasswordDialog from './views/PasswordDialog.vue';
 import OverviewView from './views/OverviewView.vue';
-import ProvidersView from './views/ProvidersView.vue';
+import InstancesView from './views/InstancesView.vue';
+import ModelsView from './views/ModelsView.vue';
 import KeysView from './views/KeysView.vue';
 import LogsView from './views/LogsView.vue';
 import AccessView from './views/AccessView.vue';
@@ -18,7 +19,8 @@ interface Tab {
 
 const tabs = [
   { id: 'overview', label: '概览', component: OverviewView },
-  { id: 'providers', label: '供应商', component: ProvidersView },
+  { id: 'instances', label: '上游接入点', component: InstancesView },
+  { id: 'models', label: '模型', component: ModelsView },
   { id: 'keys', label: '网关 Key', component: KeysView },
   { id: 'logs', label: '请求日志', component: LogsView },
   { id: 'access', label: '接入说明', component: AccessView },

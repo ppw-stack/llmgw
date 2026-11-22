@@ -11,8 +11,14 @@ export interface Me {
   api_token: string;
 }
 
-/** GET /admin/api/providers 中的单个供应商 */
-export interface Provider {
+/** 上游接入点的一个协议入口 */
+export interface InstanceEndpoint {
+  protocol: 'openai' | 'anthropic';
+  base_url: string;
+}
+
+/** GET /admin/api/instances 中的单个上游接入点 */
+export interface Instance {
   id: number;
   name: string;
   preset?: string;
@@ -20,13 +26,31 @@ export interface Provider {
   source: 'builtin' | 'custom';
   docs_url?: string;
   key_hint: string;
+  endpoints: InstanceEndpoint[];
+  max_fails: number;
+  cooldown_secs: number;
+  timeout_secs: number;
   models: string[];
-  openai_base_url: string;
-  anthropic_base_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 新建 / 更新上游接入点时提交的内容 */
+export interface InstancePayload {
+  name: string;
+  /** 仅内置端点模式提交，且创建后不可更改 */
+  preset?: string;
+  /** 新建必填；编辑时留空表示保留原有 Key */
+  api_key?: string;
+  /** 仅自定义端点模式提交 */
+  endpoints?: InstanceEndpoint[];
+  max_fails?: number;
+  cooldown_secs?: number;
+  timeout_secs?: number;
 }
 
 /** GET /admin/api/provider-presets 中的内置端点预设 */
-export interface ProviderPreset {
+export interface InstancePreset {
   id: string;
   family: string;
   family_name: string;
@@ -38,14 +62,30 @@ export interface ProviderPreset {
   models: string[];
 }
 
-/** 新建 / 更新供应商时提交的内容 */
-export interface ProviderPayload {
+/** 模型绑定的一个候选上游接入点 */
+export interface ModelInstance {
+  instance: string;
+  priority: number;
+  weight: number;
+}
+
+/** GET /admin/api/models 中的单个模型 */
+export interface Model {
+  id: number;
   name: string;
-  models: string[];
-  preset: string;
-  openai_base_url?: string;
-  anthropic_base_url?: string;
-  api_key?: string;
+  upstream: string;
+  strategy: 'failover';
+  instances: ModelInstance[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 新建 / 更新模型时提交的内容 */
+export interface ModelPayload {
+  name: string;
+  upstream: string;
+  strategy: string;
+  instances: ModelInstance[];
 }
 
 /** GET /admin/api/keys 中的网关 Key */

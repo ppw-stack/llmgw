@@ -16,6 +16,7 @@ import (
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/router"
+	"github.com/pw/llmgw/internal/secret"
 	"github.com/pw/llmgw/internal/store"
 	"github.com/pw/llmgw/internal/transport"
 	"github.com/pw/llmgw/internal/webui"
@@ -80,13 +81,26 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 		upstreamKey = keys[0]
 	}
 	cfg := &config.Config{
-		Providers: []config.Provider{{
-			Name:             "test",
-			APIKey:           upstreamKey,
-			Models:           config.Models{"gpt-test": "gpt-upstream", "claude-test": "claude-upstream"},
-			OpenAIBaseURL:    upstream.URL,
-			AnthropicBaseURL: upstream.URL,
+		Instances: []config.Instance{{
+			Name:   "test",
+			APIKey: upstreamKey,
+			Endpoints: []config.Endpoint{
+				{Protocol: config.ProtocolOpenAI, BaseURL: upstream.URL},
+				{Protocol: config.ProtocolAnthropic, BaseURL: upstream.URL},
+			},
 		}},
+		Models: []config.Model{
+			{
+				Name:      "gpt-test",
+				Upstream:  "gpt-upstream",
+				Instances: []config.ModelInstance{{Name: "test"}},
+			},
+			{
+				Name:      "claude-test",
+				Upstream:  "claude-upstream",
+				Instances: []config.ModelInstance{{Name: "test"}},
+			},
+		},
 		Pricing: map[string]config.Price{
 			"gpt-test":    {InputPerMTok: 1, OutputPerMTok: 2},
 			"claude-test": {InputPerMTok: 3, OutputPerMTok: 15},
@@ -104,6 +118,16 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+
+	// The database is the source of truth for the upstream topology, so the
+	// seed mirrors what the gateway does on a fresh install.
+	box, err := secret.New(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ImportTopology(cfg.Instances, cfg.Models, box); err != nil {
+		t.Fatalf("seed topology: %v", err)
+	}
 
 	rt := router.New()
 	if err := rt.Reload(cfg); err != nil {
@@ -123,6 +147,7 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 		Router:     rt,
 		Forwarder:  fw,
 		Store:      st,
+		Box:        box,
 		AdminToken: "admin-test",
 		MaxBody:    1 << 20,
 		Log:        logger,
@@ -320,7 +345,7 @@ func TestCrossProtocolRejected(t *testing.T) {
 	}, []string{"up-1"}, func(cfg *config.Config) {
 		// Only the OpenAI entry exists, so the same models are unreachable
 		// through the Anthropic entry and the error must point at /openai/v1.
-		cfg.Providers[0].AnthropicBaseURL = ""
+		cfg.Instances[0].Endpoints = cfg.Instances[0].Endpoints[:1]
 	})
 
 	resp := post(t, gw.URL+"/anthropic/v1/messages", key,

@@ -77,23 +77,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	providers, err := st.Providers(boxCipher)
+	instances, models, err := st.Topology(boxCipher)
 	if err != nil {
-		logger.Error("load providers", "err", err)
+		logger.Error("load upstream topology", "err", err)
 		_ = st.Close()
 		os.Exit(1)
 	}
-	if len(providers) == 0 && len(cfg.Providers) > 0 {
-		if err := st.ImportProviders(cfg.Providers, boxCipher); err != nil {
-			logger.Error("import providers from config", "err", err)
+	if len(instances) == 0 && len(cfg.Instances) > 0 {
+		if err := st.ImportTopology(cfg.Instances, cfg.Models, boxCipher); err != nil {
+			logger.Error("import upstream topology from config", "err", err)
 			_ = st.Close()
 			os.Exit(1)
 		}
-		providers = cfg.Providers
-		logger.Info("imported providers from config.yaml", "count", len(providers))
+		instances, models, err = st.Topology(boxCipher)
+		if err != nil {
+			logger.Error("reload upstream topology", "err", err)
+			_ = st.Close()
+			os.Exit(1)
+		}
+		logger.Info("imported upstream topology from config.yaml",
+			"instances", len(instances), "models", len(models))
 	}
 	effective := *cfg
-	effective.Providers = providers
+	effective.Instances = instances
+	effective.Models = models
 
 	if err := rt.Reload(&effective); err != nil {
 		logger.Error("invalid config", "err", err)
@@ -105,7 +112,7 @@ func main() {
 	adminToken := legacyAdminToken(cfg, st, logger)
 	bootstrapKey(st, logger)
 
-	forwarder := transport.New(rt, st, logger)
+	forwarder := transport.NewWithTimeout(rt, st, logger, cfg.UpstreamTimeout.Value())
 
 	srv, err := server.New(server.Options{
 		Router:         rt,
@@ -140,12 +147,13 @@ func main() {
 	}
 	go cleanupSessions(ctx, st, logger)
 	go watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
-		dbProviders, err := st.Providers(boxCipher)
+		dbInstances, dbModels, err := st.Topology(boxCipher)
 		if err != nil {
 			return err
 		}
-		if len(dbProviders) > 0 {
-			c.Providers = dbProviders
+		if len(dbInstances) > 0 {
+			c.Instances = dbInstances
+			c.Models = dbModels
 		}
 		return rt.Reload(c)
 	})
@@ -155,7 +163,8 @@ func main() {
 			"addr", cfg.Server.Addr,
 			"openai_base", "http://"+hostPort(cfg.Server.Addr)+"/openai/v1",
 			"anthropic_base", "http://"+hostPort(cfg.Server.Addr)+"/anthropic",
-			"providers", len(cfg.Providers),
+			"instances", len(cfg.Instances),
+			"models", len(cfg.Models),
 			"admin_user", adminUsername)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server", "err", err)
@@ -351,7 +360,7 @@ func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(
 				log.Error("config reload rejected; keeping previous config", "err", err)
 				continue
 			}
-			log.Info("config reloaded", "providers", len(cfg.Providers))
+			log.Info("config reloaded", "instances", len(cfg.Instances), "models", len(cfg.Models))
 		}
 	}
 }

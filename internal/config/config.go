@@ -160,6 +160,15 @@ func (c *Config) normalize() error {
 		for ki := range p.Keys {
 			p.Keys[ki] = expandEnv(strings.TrimSpace(p.Keys[ki]))
 		}
+		// Unset ${ENV} variables expand to "", which would otherwise be treated
+		// as a valid (empty) key. Drop them instead.
+		kept := p.Keys[:0]
+		for _, k := range p.Keys {
+			if k != "" {
+				kept = append(kept, k)
+			}
+		}
+		p.Keys = kept
 		if len(p.Endpoints) == 0 {
 			return fmt.Errorf("provider %q: at least one endpoint is required", p.Name)
 		}

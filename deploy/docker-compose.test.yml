@@ -5,6 +5,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        DATE: ${DATE:-unknown}
     image: llmgw:test
     container_name: llmgw-test
     restart: unless-stopped

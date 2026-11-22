@@ -1,6 +1,12 @@
 # 贡献流程
 
-`main` 分支受保护：只能通过 Pull Request 合并，且必须通过 `test` 与 `frontend` 两个 CI 检查。
+`main` 分支受保护：只能通过 Pull Request 合并，且必须通过以下三个检查：
+
+- `test`：gofmt、vet、race 测试、govulncheck
+- `frontend`：控制台构建
+- `Kody Code Review`：自动代码审查
+
+三个检查全部通过后才能合并。
 
 ## 分支
 
@@ -33,7 +39,7 @@ git push -u origin feat/xxx
 gh pr create --fill
 ```
 
-CI 通过后合并（仓库只允许 squash）：
+三个检查全部通过后合并（仓库只允许 squash）：
 
 ```bash
 gh pr merge --squash --delete-branch

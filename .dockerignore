@@ -1,0 +1,16 @@
+.git
+.gitignore
+.github
+bin
+dist
+build
+data
+web/node_modules
+internal/webui/dist
+config.yaml
+*.db
+*.db-shm
+*.db-wal
+admin-token.txt
+admin-password.txt
+*.log

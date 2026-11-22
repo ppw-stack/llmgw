@@ -26,10 +26,20 @@ import (
 
 func main() {
 	var (
-		configPath = flag.String("config", "config.yaml", "path to config file")
-		addr       = flag.String("addr", "", "override server.addr")
+		configPath  = flag.String("config", "config.yaml", "path to config file")
+		addr        = flag.String("addr", "", "override server.addr")
+		showVersion = flag.Bool("version", false, "print version and exit")
+		healthcheck = flag.Bool("healthcheck", false, "probe the local /healthz endpoint and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("llmgw %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+	if *healthcheck {
+		os.Exit(runHealthcheck())
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -263,4 +273,31 @@ func hostPort(addr string) string {
 		return "localhost" + addr
 	}
 	return addr
+}
+
+// version metadata, injected at build time via -ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// runHealthcheck lets a distroless container probe itself without a shell.
+func runHealthcheck() int {
+	url := os.Getenv("LLMGW_HEALTHCHECK_URL")
+	if url == "" {
+		url = "http://127.0.0.1:8080/healthz"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
 }

@@ -149,10 +149,12 @@ Key 池状态（失效标记、轮询索引）按 `provider name` 迁移到新�
 ## 8. 目录与构建
 
 ```
-make web     # 构建前端到 internal/webui/dist
-make build   # 构建二进制（含内嵌控制台）
-make test    # 单元测试 + race
-make run     # 本地启动（读取 config.yaml）
+make web      # 构建前端到 internal/webui/dist
+make build    # 构建二进制（含内嵌控制台，注入版本信息）
+make test     # 单元测试 + race
+make run      # 本地启动（读取 config.yaml）
+make docker   # 构建容器镜像
+make release  # 跨平台发布包
 ```
 
 无 cgo：`modernc.org/sqlite`。交叉编译：

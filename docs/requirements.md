@@ -162,4 +162,4 @@ REST API：
 | M1 | 骨架 + OpenAI 直通 + 查表路由 + Key 池 + 日志 + metrics |
 | M2 | Anthropic 入口 + SSE 透传 + usage 嗅探 |
 | M3 | Web 控制台（Vue 3 + Vite，go:embed） |
-| M4 | Docker、发布、端到端验收 |
+| M4 | Docker 多阶段镜像、`-version`/`-healthcheck`、跨平台发布包 |

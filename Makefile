@@ -1,6 +1,10 @@
-.PHONY: build web test run fmt vet clean
+.PHONY: build web test run fmt vet clean docker release
 
 BIN := bin/llmgw
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 # Rebuild the embedded console. Required after changing anything under web/.
 web:
@@ -8,7 +12,7 @@ web:
 
 build: web
 	@mkdir -p bin
-	go build -trimpath -o $(BIN) ./cmd/llmgw
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/llmgw
 
 test:
 	go test -race ./...
@@ -22,5 +26,15 @@ fmt:
 vet:
 	go vet ./...
 
+docker:
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg DATE=$(DATE) \
+		-t llmgw:$(VERSION) .
+
+release:
+	VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE) ./scripts/release.sh
+
 clean:
-	rm -rf bin
+	rm -rf bin dist build

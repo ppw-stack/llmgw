@@ -136,6 +136,32 @@ web/                  Vue 3 + Vite 控制台源码
 docs/                 需求、架构、路由、API、运维
 ```
 
+## Docker
+
+```bash
+# 构建镜像（多阶段：Node 构建前端 → Go 编译 → Alpine 运行时）
+make docker
+
+# 或使用 compose
+cp config.example.yaml config.yaml
+# 把 database.path 改成 /data/llmgw.db，并按需填上游 Key
+docker compose up -d --build
+docker compose logs llmgw     # 首次启动会打印管理员密码
+```
+
+镜像以非 root 用户运行，`/data` 为数据卷，内置 `HEALTHCHECK`（`llmgw -healthcheck`）。详见 [docs/operations.md](docs/operations.md#10-docker-与发布)。
+
+## 版本与发布
+
+```bash
+./bin/llmgw -version
+# llmgw <version> (commit <sha>, built <utc>)
+
+make release   # dist/llmgw_<version>_{darwin,linux}_{amd64,arm64}.tar.gz + checksums.txt
+```
+
+版本号、提交号与构建时间通过 `-ldflags -X` 注入。
+
 ## 开发
 
 ```bash

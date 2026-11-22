@@ -218,3 +218,69 @@ server:
 - `/metrics` 未内置鉴权；公网暴露时请在反代层限制来源 IP 或加 Basic Auth。
 - 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - 建议定期轮换管理员密码（控制台“修改密码”）与上游 Key。
+
+## 10. Docker 与发布
+
+### 10.1 镜像
+
+```bash
+make docker          # 构建 llmgw:<version>
+# 等价于
+docker build -t llmgw:local .
+```
+
+三阶段构建：`node:24-alpine` 构建控制台 → `golang:1.27-alpine` 静态编译 → `alpine:3.22` 运行时。
+
+运行时特性：
+
+- 非 root 用户 `llmgw`，`/data` 为数据卷；
+- 内置 `HEALTHCHECK CMD ["llmgw","-healthcheck"]`，探针不依赖 curl；
+- 二进制静态链接，无 cgo；
+- 配置默认读取 `/etc/llmgw/config.yaml`。
+
+### 10.2 compose 部署
+
+```bash
+cp config.example.yaml config.yaml
+# 修改 database.path: "/data/llmgw.db"
+# 上游 Key 用环境变量注入
+export GLM_KEY_1=xxx
+docker compose up -d --build
+docker compose logs -f llmgw
+```
+
+首次启动会把管理员密码写入 `/data/admin-password.txt`（容器内），可通过：
+
+```bash
+docker compose exec llmgw cat /data/admin-password.txt
+```
+
+compose 默认启用 `read_only: true`、`no-new-privileges`、独立数据卷 `llmgw-data`。
+
+### 10.3 发布产物
+
+```bash
+make release
+```
+
+生成四个平台包与校验和：
+
+```
+dist/llmgw_<version>_darwin_arm64.tar.gz
+dist/llmgw_<version>_darwin_amd64.tar.gz
+dist/llmgw_<version>_linux_arm64.tar.gz
+dist/llmgw_<version>_linux_amd64.tar.gz
+dist/checksums.txt
+```
+
+每个包内含二进制、`config.example.yaml`、`README.md`。
+
+### 10.4 健康检查
+
+```bash
+llmgw -healthcheck                    # 默认探测 http://127.0.0.1:8080/healthz
+LLMGW_HEALTHCHECK_URL=http://127.0.0.1:9000/healthz llmgw -healthcheck
+```
+
+退出码 0 表示健康。修改了监听端口时，在容器环境变量里覆盖 URL。
+

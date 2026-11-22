@@ -189,7 +189,7 @@ make run        # 读取 ./config.yaml
 修改 `web/` 下的任何文件后，必须执行 `make build-all`（或先 `make web` 再 `make build`）才会嵌入新产物。
 前端开发时可用 `cd web && npm run dev`，Vite 会把 `/admin/api` 代理到 `localhost:8080`。
 
-依赖：Go 1.26+、Node 20+，无 cgo（SQLite 使用 `modernc.org/sqlite`）。
+依赖：Go 1.27+、Node 22+，无 cgo（SQLite 使用 `modernc.org/sqlite`）。
 
 ## 文档
 

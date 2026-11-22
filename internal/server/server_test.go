@@ -88,6 +88,7 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 				{Protocol: config.ProtocolOpenAI, BaseURL: upstream.URL},
 				{Protocol: config.ProtocolAnthropic, BaseURL: upstream.URL},
 			},
+			Models: []string{"gpt-upstream", "claude-upstream"},
 		}},
 		Models: []config.Model{
 			{

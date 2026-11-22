@@ -25,6 +25,7 @@ instances:
         base_url: http://mock:8000
       - protocol: anthropic
         base_url: http://mock:8000
+    models: [gpt-test, claude-test, gpt-upstream-name]
 
 models:
   - name: gpt-test

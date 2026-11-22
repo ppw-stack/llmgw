@@ -18,11 +18,13 @@ func testConfig() *config.Config {
 					{Protocol: config.ProtocolOpenAI, BaseURL: "https://a/v4"},
 					{Protocol: config.ProtocolAnthropic, BaseURL: "https://a/anthropic"},
 				},
+				Models: []string{"glm-4.6", "claude-3"},
 			},
 			{
 				Name:      "deepseek",
 				APIKey:    "k2",
 				Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://b/v1"}},
+				Models:    []string{"deepseek-chat"},
 			},
 		},
 		Models: []config.Model{
@@ -112,6 +114,7 @@ func TestSameModelOnSeveralInstances(t *testing.T) {
 		Name:      "glm-backup",
 		APIKey:    "k3",
 		Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://c/v1"}},
+		Models:    []string{"glm-4.6"},
 	})
 	cfg.Models[0].Instances = []config.ModelInstance{
 		{Name: "glm-backup", Priority: 1},
@@ -216,6 +219,7 @@ func TestPresetProviderRouting(t *testing.T) {
 			Name:   "minimax",
 			Preset: "minimax-mplan-global",
 			APIKey: "sk-cp",
+			Models: []string{"MiniMax-M3.1-Flash"},
 		}},
 		Models: []config.Model{{
 			Name:     "MiniMax-M3.1-Flash",
@@ -265,5 +269,18 @@ func TestInstanceTimeoutAndBreakerParamsReachTheTarget(t *testing.T) {
 	}
 	if targets[0].MaxFails != 5 || targets[0].Cooldown != 15*time.Second {
 		t.Fatalf("breaker params = %+v", targets[0])
+	}
+}
+
+func TestModelRejectsAnInstanceThatDoesNotDeclareTheUpstream(t *testing.T) {
+	cfg := testConfig()
+	cfg.Instances[1].Models = []string{"something-else"}
+	r := New()
+	err := r.Reload(cfg)
+	if err == nil {
+		t.Fatal("expected a declaration error")
+	}
+	if !strings.Contains(err.Error(), "does not declare upstream model") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

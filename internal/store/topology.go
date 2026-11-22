@@ -18,6 +18,7 @@ type InstanceSpec struct {
 	Preset       string
 	EncryptedKey string
 	Endpoints    []config.Endpoint
+	Models       []string
 	MaxFails     int
 	CooldownSecs int
 	TimeoutSecs  int
@@ -62,7 +63,7 @@ func (s *Store) CountInstances() (int, error) {
 }
 
 func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
-	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, endpoints_json,
+	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, endpoints_json, models_json,
 		max_fails, cooldown_secs, timeout_secs, created_at, updated_at
 		FROM instances ORDER BY id`)
 	if err != nil {
@@ -74,16 +75,22 @@ func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 		var (
 			rec       InstanceRecord
 			endpoints string
+			models    string
 			created   string
 			updated   string
 		)
-		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &endpoints,
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &endpoints, &models,
 			&rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs, &created, &updated); err != nil {
 			return nil, err
 		}
 		if endpoints != "" {
 			if err := json.Unmarshal([]byte(endpoints), &rec.Endpoints); err != nil {
 				return nil, fmt.Errorf("instance %q: bad endpoints: %w", rec.Name, err)
+			}
+		}
+		if models != "" {
+			if err := json.Unmarshal([]byte(models), &rec.Models); err != nil {
+				return nil, fmt.Errorf("instance %q: bad models: %w", rec.Name, err)
 			}
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -105,11 +112,18 @@ func (s *Store) CreateInstance(spec InstanceSpec) (*InstanceRecord, error) {
 	if spec.Endpoints == nil {
 		endpointsJSON = []byte("[]")
 	}
+	modelsJSON, err := json.Marshal(spec.Models)
+	if err != nil {
+		return nil, err
+	}
+	if spec.Models == nil {
+		modelsJSON = []byte("[]")
+	}
 	now := nowStamp()
 	res, err := s.db.Exec(`INSERT INTO instances(name, preset, key_enc, endpoints_json,
-		max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
-		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON),
+		models_json, max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON), string(modelsJSON),
 		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
 	if err != nil {
 		return nil, err
@@ -127,9 +141,16 @@ func (s *Store) UpdateInstance(id int64, spec InstanceSpec) error {
 	if spec.Endpoints == nil {
 		endpointsJSON = []byte("[]")
 	}
+	modelsJSON, err := json.Marshal(spec.Models)
+	if err != nil {
+		return err
+	}
+	if spec.Models == nil {
+		modelsJSON = []byte("[]")
+	}
 	res, err := s.db.Exec(`UPDATE instances SET name=?, preset=?, key_enc=?, endpoints_json=?,
-		max_fails=?, cooldown_secs=?, timeout_secs=?, updated_at=? WHERE id=?`,
-		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON),
+		models_json=?, max_fails=?, cooldown_secs=?, timeout_secs=?, updated_at=? WHERE id=?`,
+		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON), string(modelsJSON),
 		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
 	if err != nil {
 		return err
@@ -323,6 +344,7 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 			Preset:       rec.Preset,
 			APIKey:       key,
 			Endpoints:    rec.Endpoints,
+			Models:       rec.Models,
 			MaxFails:     rec.MaxFails,
 			CooldownSecs: rec.CooldownSecs,
 			TimeoutSecs:  rec.TimeoutSecs,
@@ -368,6 +390,7 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 			Preset:       inst.Preset,
 			EncryptedKey: encrypted,
 			Endpoints:    inst.Endpoints,
+			Models:       inst.Models,
 			MaxFails:     inst.MaxFails,
 			CooldownSecs: inst.CooldownSecs,
 			TimeoutSecs:  inst.TimeoutSecs,

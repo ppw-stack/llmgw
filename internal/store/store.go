@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS instances (
     preset          TEXT    NOT NULL DEFAULT '',
     key_enc         TEXT    NOT NULL DEFAULT '',
     endpoints_json  TEXT    NOT NULL DEFAULT '[]',
+    models_json     TEXT    NOT NULL DEFAULT '[]',
     max_fails       INTEGER NOT NULL DEFAULT 3,
     cooldown_secs   INTEGER NOT NULL DEFAULT 30,
     timeout_secs    INTEGER NOT NULL DEFAULT 0,
@@ -215,6 +217,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate providers: %w", err)
 	}
+	if err := migrateInstanceModels(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance models: %w", err)
+	}
 	s := &Store{
 		db:   db,
 		logs: make(chan LogEntry, 8192),
@@ -277,10 +283,14 @@ func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		modelsJSON, err := json.Marshal(inst.Models)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO instances(name, preset, key_enc, endpoints_json,
-			max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`,
-			inst.Name, inst.Preset, mp.encryptedKey, string(endpointsJSON),
+			models_json, max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			inst.Name, inst.Preset, mp.encryptedKey, string(endpointsJSON), string(modelsJSON),
 			inst.MaxFails, inst.CooldownSecs, inst.TimeoutSecs,
 			nowStamp(), nowStamp()); err != nil {
 			return err
@@ -401,6 +411,131 @@ func readPresetProviders(ctx context.Context, db *sql.DB) ([]migratedProvider, e
 }
 
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// migrateInstanceModels adds the capability column and backfills it for rows
+// that predate it. Backfilling keeps an existing deployment routable without
+// asking the operator to re-enter every instance.
+func migrateInstanceModels(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	if !cols["models_json"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE instances ADD COLUMN models_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return err
+		}
+	}
+	return backfillInstanceModels(ctx, db, log)
+}
+
+type pendingInstance struct {
+	id     int64
+	name   string
+	preset string
+}
+
+func backfillInstanceModels(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, name, preset FROM instances WHERE models_json = '' OR models_json = '[]'`)
+	if err != nil {
+		return err
+	}
+	var pending []pendingInstance
+	for rows.Next() {
+		var p pendingInstance
+		if err := rows.Scan(&p.id, &p.name, &p.preset); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(pending) == 0 {
+		return nil
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, p := range pending {
+		names, err := instanceUpstreamNames(ctx, tx, p)
+		if err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			log.Warn("instance declares no models and none could be derived; "+
+				"set its models list before routing a model through it",
+				"instance", p.name)
+			continue
+		}
+		encoded, err := json.Marshal(names)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE instances SET models_json = ? WHERE id = ?`, string(encoded), p.id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// instanceUpstreamNames unions the preset default models with the upstream
+// names the instance currently serves. Both matter: the preset describes the
+// account, the references describe what routing already relies on.
+func instanceUpstreamNames(ctx context.Context, tx *sql.Tx, p pendingInstance) ([]string, error) {
+	seen := map[string]bool{}
+	out := []string{}
+	if p.preset != "" {
+		if names, err := config.PresetModels(p.preset); err == nil {
+			for _, name := range names {
+				if !seen[name] {
+					seen[name] = true
+					out = append(out, name)
+				}
+			}
+		}
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT m.upstream FROM models m
+		 JOIN model_instances mi ON mi.model_id = m.id
+		 WHERE mi.instance_id = ? ORDER BY m.upstream`, p.id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	sort.Strings(out)
+	return out, nil
+}
 
 func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")

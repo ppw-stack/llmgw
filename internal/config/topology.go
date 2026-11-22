@@ -31,11 +31,18 @@ type Endpoint struct {
 // serves. It carries no routing strategy - the strategy belongs to the model
 // that uses the instance, because one instance may serve several models with
 // different strategies.
+//
+// Models lists the upstream model names the account can serve. It is the
+// capability half of the topology: the model side says which instance it
+// wants, this side says what the instance can actually handle. It is
+// required, so a typo in a model's upstream name fails at configuration time
+// instead of at the first upstream call.
 type Instance struct {
 	Name         string     `yaml:"name"`
 	Preset       string     `yaml:"preset"`
 	APIKey       string     `yaml:"api_key"`
 	Endpoints    []Endpoint `yaml:"endpoints"`
+	Models       []string   `yaml:"models"`
 	MaxFails     int        `yaml:"max_fails"`
 	CooldownSecs int        `yaml:"cooldown_secs"`
 	TimeoutSecs  int        `yaml:"timeout_secs"`
@@ -69,6 +76,7 @@ type EffectiveInstance struct {
 	Name         string
 	APIKey       string
 	Endpoints    []EffectiveEndpoint
+	Models       []string
 	MaxFails     int
 	CooldownSecs int
 	Timeout      time.Duration
@@ -111,6 +119,29 @@ func presetEndpoints(pr preset.Preset) []Endpoint {
 		})
 	}
 	return out
+}
+
+// PresetModels returns the upstream model names a built-in preset declares.
+func PresetModels(id string) ([]string, error) {
+	pr, ok := preset.Lookup(id)
+	if !ok {
+		return nil, fmt.Errorf("unknown preset %q", id)
+	}
+	parsed, err := ParseModels(pr.Models)
+	if err != nil {
+		return nil, fmt.Errorf("preset %q: %w", id, err)
+	}
+	seen := make(map[string]bool, len(parsed))
+	out := make([]string, 0, len(parsed))
+	for _, upstream := range parsed {
+		if seen[upstream] {
+			continue
+		}
+		seen[upstream] = true
+		out = append(out, upstream)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // sameEndpoints reports whether two endpoint lists describe the same
@@ -181,6 +212,13 @@ func NormalizeInstance(in *Instance) error {
 		}
 		ep.BaseURL = base
 	}
+
+	models, err := normalizeModelNames(in.Name, in.Models)
+	if err != nil {
+		return err
+	}
+	in.Models = models
+
 	if in.MaxFails <= 0 {
 		in.MaxFails = DefaultMaxFails
 	}
@@ -191,6 +229,30 @@ func NormalizeInstance(in *Instance) error {
 		return fmt.Errorf("instance %q: timeout_secs must not be negative", in.Name)
 	}
 	return nil
+}
+
+// normalizeModelNames trims, de-duplicates and sorts the upstream model names
+// one instance declares. An instance must declare at least one, otherwise it
+// can never serve anything.
+func normalizeModelNames(owner string, raw []string) ([]string, error) {
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		name := strings.TrimSpace(item)
+		if name == "" {
+			return nil, fmt.Errorf("instance %q: models must not contain an empty name", owner)
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("instance %q: at least one supported model is required in models", owner)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // NormalizeModel validates one model and fills in the defaults. The candidate
@@ -244,6 +306,7 @@ func NormalizeModel(in *Model) error {
 func (c *Config) Effective() (Effective, error) {
 	out := Effective{}
 	known := make(map[string]bool, len(c.Instances))
+	supports := make(map[string]map[string]bool, len(c.Instances))
 	for i := range c.Instances {
 		inst := &c.Instances[i]
 		if inst.Name == "" {
@@ -257,6 +320,7 @@ func (c *Config) Effective() (Effective, error) {
 		eff := EffectiveInstance{
 			Name:         inst.Name,
 			APIKey:       inst.APIKey,
+			Models:       append([]string(nil), inst.Models...),
 			MaxFails:     inst.MaxFails,
 			CooldownSecs: inst.CooldownSecs,
 		}
@@ -269,6 +333,11 @@ func (c *Config) Effective() (Effective, error) {
 		if inst.TimeoutSecs > 0 {
 			eff.Timeout = time.Duration(inst.TimeoutSecs) * time.Second
 		}
+		names := make(map[string]bool, len(inst.Models))
+		for _, name := range inst.Models {
+			names[name] = true
+		}
+		supports[inst.Name] = names
 		endpoints := inst.Endpoints
 		if len(endpoints) == 0 && inst.Preset != "" {
 			// A preset instance that was not expanded yet still routes.
@@ -313,6 +382,13 @@ func (c *Config) Effective() (Effective, error) {
 		for _, mi := range m.Instances {
 			if !known[mi.Name] {
 				return Effective{}, fmt.Errorf("model %q: instance %q does not exist", m.Name, mi.Name)
+			}
+			// Every candidate must declare the upstream name: putting an
+			// instance in the chain means it is expected to serve it.
+			if !supports[mi.Name][upstream] {
+				return Effective{}, fmt.Errorf(
+					"model %q: instance %q does not declare upstream model %q in its models list",
+					m.Name, mi.Name, upstream)
 			}
 			weight := mi.Weight
 			if weight <= 0 {
@@ -400,5 +476,19 @@ func ExpandProvider(p Provider) (Instance, []Model, error) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
+	// The legacy form knows exactly which upstream models it serves, so the
+	// capability list is derived from them instead of being hand-written.
+	seenUpstream := make(map[string]bool, len(out))
+	upstreams := make([]string, 0, len(out))
+	for _, m := range out {
+		if seenUpstream[m.Upstream] {
+			continue
+		}
+		seenUpstream[m.Upstream] = true
+		upstreams = append(upstreams, m.Upstream)
+	}
+	sort.Strings(upstreams)
+	inst.Models = upstreams
 	return inst, out, nil
 }

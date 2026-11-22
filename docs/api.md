@@ -156,16 +156,16 @@ GET /admin/api/instances
     {"protocol": "openai", "base_url": "https://api.minimax.io/v1"},
     {"protocol": "anthropic", "base_url": "https://api.minimax.io/anthropic"}
   ],
+  "models": ["MiniMax-M3.1-Flash"],
   "max_fails": 3,
   "cooldown_secs": 30,
   "timeout_secs": 0,
-  "models": ["MiniMax-M3.1-Flash"],
   "created_at": "2026-11-22T10:00:00Z",
   "updated_at": "2026-11-22T10:00:00Z"
 }]
 ```
 
-上游 Key 只返回末四位掩码，永不返回明文。`timeout_secs` 为 `0` 表示使用全局 `upstream_timeout`。`models` 列出由该接入点承载的模型。
+上游 Key 只返回末四位掩码，永不返回明文。`timeout_secs` 为 `0` 表示使用全局 `upstream_timeout`。`models` 是该接入点**声明支持的上游模型名**（必填），不是"当前被哪些模型引用"——后者由客户端从 `GET /admin/api/models` 自行 join。
 
 #### 创建
 
@@ -176,7 +176,8 @@ POST /admin/api/instances
 {
   "name": "minimax",
   "preset": "minimax-mplan-global",
-  "api_key": "sk-cp-..."
+  "api_key": "sk-cp-...",
+  "models": ["MiniMax-M3.1-Flash"]
 }
 ```
 
@@ -191,6 +192,7 @@ POST /admin/api/instances
     {"protocol": "openai", "base_url": "https://open.bigmodel.cn/api/coding/paas/v4"},
     {"protocol": "anthropic", "base_url": "https://open.bigmodel.cn/api/anthropic"}
   ],
+  "models": ["glm-4.6"],
   "max_fails": 3,
   "cooldown_secs": 30
 }
@@ -198,7 +200,7 @@ POST /admin/api/instances
 201 <instance view>
 ```
 
-熔断参数可省略，默认 `max_fails=3`、`cooldown_secs=30`。
+`models` 必填，至少一项；熔断参数可省略，默认 `max_fails=3`、`cooldown_secs=30`。
 
 校验失败返回 `400`；名称重复返回 `409`。内置端点不允许再传 `endpoints`。
 
@@ -218,6 +220,7 @@ PUT /admin/api/instances/1
 - 传非空 `api_key`：整体替换。
 - 省略 `preset`：沿用现有值；显式传入不同的 preset 返回 `400`（需删除重建）。
 - 内置端点的端点由 preset 决定，不接受自定义端点。
+- `models` 必填，更新时整体替换。
 
 #### 删除
 
@@ -272,6 +275,7 @@ DELETE /admin/api/models/1 → 204
 - 同一个模型不能重复引用同一个接入点。
 - 模型名重复返回 `409`。
 - `strategy` 目前只接受 `failover`。
+- 模型的 `upstream` 必须出现在**每个**候选接入点的 `models` 声明里，否则返回 `400`（报出是哪个接入点缺哪一项）。
 
 ### 兼容接口
 

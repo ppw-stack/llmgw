@@ -219,12 +219,14 @@ instances:
     endpoints:
       - {protocol: openai, base_url: "https://api.minimax.cn/v1"}
       - {protocol: anthropic, base_url: "https://api.minimax.cn/anthropic"}
+    models: [MiniMax-M3.1-Flash]
     max_fails: 2
     cooldown_secs: 10
   - name: cn-b
     api_key: "k-b"
     endpoints:
       - {protocol: openai, base_url: "https://api.minimax.cn/v1"}
+    models: [MiniMax-M3.1-Flash]
 models:
   - name: MiniMax-M3.1-Flash
     instances:
@@ -301,12 +303,84 @@ func TestUnsupportedStrategyRejected(t *testing.T) {
 
 func TestInstanceNameMustBeUnique(t *testing.T) {
 	body := strings.Replace(topologyConfig, "models:\n  - name: MiniMax-M3.1-Flash",
-		"  - name: cn-a\n    api_key: \"k-c\"\n    endpoints:\n"+
+		"  - name: cn-a\n    api_key: \"k-c\"\n    models: [MiniMax-M3.1-Flash]\n    endpoints:\n"+
 			"      - {protocol: openai, base_url: \"https://example.com/v1\"}\n"+
 			"models:\n  - name: MiniMax-M3.1-Flash", 1)
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "duplicate instance") {
 		t.Fatalf("expected duplicate instance error, got %v", err)
+	}
+}
+
+func TestInstanceRequiresModels(t *testing.T) {
+	body := strings.Replace(topologyConfig, "    models: [MiniMax-M3.1-Flash]\n    max_fails: 2",
+		"    max_fails: 2", 1)
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "at least one supported model") {
+		t.Fatalf("expected models error, got %v", err)
+	}
+}
+
+func TestInstanceModelsAreSortedAndDeduplicated(t *testing.T) {
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: only
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://example.com/v1"}
+    models: [z-model, a-model, z-model]
+`
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Instances[0].Models
+	if len(got) != 2 || got[0] != "a-model" || got[1] != "z-model" {
+		t.Fatalf("models = %v", got)
+	}
+}
+
+func TestModelUpstreamMustBeDeclaredByEveryCandidate(t *testing.T) {
+	body := strings.Replace(topologyConfig, "    models: [MiniMax-M3.1-Flash]\nmodels:",
+		"    models: [other-model]\nmodels:", 1)
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "does not declare upstream model") {
+		t.Fatalf("expected declaration error, got %v", err)
+	}
+}
+
+func TestDeclaredUpstreamMatchesAlias(t *testing.T) {
+	// The declaration is matched against the upstream name, not the public
+	// model name, because that is what the vendor receives.
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: glm
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://example.com/v1"}
+    models: [glm-4.6]
+models:
+  - name: claude-sonnet-4-5
+    upstream: glm-4.6
+    instances:
+      - {name: glm}
+`
+	if _, err := Load(writeConfig(t, body)); err != nil {
+		t.Fatalf("upstream alias should match the declaration: %v", err)
+	}
+
+	body = strings.Replace(body, "models: [glm-4.6]", "models: [claude-sonnet-4-5]", 1)
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "does not declare upstream model") {
+		t.Fatalf("public name must not satisfy the declaration: %v", err)
 	}
 }
 
@@ -329,6 +403,7 @@ instances:
   - name: mm
     preset: minimax-mplan-cn
     api_key: "k"
+    models: [MiniMax-M3.1-Flash]
 models:
   - name: MiniMax-M3.1-Flash
     instances:
@@ -358,6 +433,7 @@ instances:
     api_key: "k"
     endpoints:
       - {protocol: openai, base_url: "https://example.com/v1"}
+    models: [MiniMax-M3.1-Flash]
 models:
   - name: MiniMax-M3.1-Flash
     instances:

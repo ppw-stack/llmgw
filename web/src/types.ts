@@ -27,10 +27,11 @@ export interface Instance {
   docs_url?: string;
   key_hint: string;
   endpoints: InstanceEndpoint[];
+  /** 该接入点支持的上游模型名，模型引用它的前提 */
+  models: string[];
   max_fails: number;
   cooldown_secs: number;
   timeout_secs: number;
-  models: string[];
   created_at: string;
   updated_at: string;
 }
@@ -44,6 +45,8 @@ export interface InstancePayload {
   api_key?: string;
   /** 仅自定义端点模式提交 */
   endpoints?: InstanceEndpoint[];
+  /** 必填：该接入点支持的上游模型名 */
+  models: string[];
   max_fails?: number;
   cooldown_secs?: number;
   timeout_secs?: number;

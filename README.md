@@ -77,6 +77,7 @@ instances:
   - name: minimax-cn
     preset: minimax-mplan-cn          # 国内：api.minimax.cn
     api_key: "${MINIMAX_KEY}"
+    models: [MiniMax-M3.1-Flash]      # 必填：这个账号能服务哪些上游模型名
   # - name: minimax
   #   preset: minimax-mplan-global    # 国际：api.minimax.io
 
@@ -84,6 +85,7 @@ instances:
   - name: minimax-cn-backup
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY_BACKUP}"
+    models: [MiniMax-M3.1-Flash]
 
   # 自定义端点：一个 Key + 1~2 个端点
   - name: glm
@@ -93,6 +95,7 @@ instances:
         base_url: https://open.bigmodel.cn/api/coding/paas/v4
       - protocol: anthropic
         base_url: https://open.bigmodel.cn/api/anthropic
+    models: [glm-4.6]
 
 models:
   # 单实例
@@ -118,6 +121,7 @@ models:
 ```
 
 - 模型名全局唯一；`upstream` 省略时与 `name` 相同，这就是别名机制。
+- 接入点的 `models` 必填；模型的上游名必须被每个候选接入点声明，否则拒绝保存/启动。
 - 接入点只填一个端点就只开放对应协议；模型同时注册到它能提供的每个协议入口。
 - 每个请求按 `(协议, 模型)` 哈希查表，得到一条按 `priority` 排序的候选链。
 - 上游返回 5xx / 429 / 超时时自动切到下一个候选；4xx 不切换，原样透传。

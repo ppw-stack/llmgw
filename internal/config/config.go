@@ -345,6 +345,11 @@ func (c *Config) normalize() error {
 			}
 		}
 	}
+	// Compiling the topology once here makes a bad declaration fail at load
+	// time instead of at the first upstream call.
+	if _, err := c.Effective(); err != nil {
+		return err
+	}
 	return nil
 }
 

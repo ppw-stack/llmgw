@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { api } from '../api';
-import type { Instance, InstanceEndpoint, InstancePayload, InstancePreset } from '../types';
+import type { Instance, InstanceEndpoint, InstancePayload, InstancePreset, Model } from '../types';
 import { confirmAction } from '../utils/confirm';
 import { errorMessage } from '../utils/error';
 
@@ -22,17 +22,26 @@ interface InstanceForm {
   apiKey: string;
   keyHint: string;
   endpoints: EndpointRow[];
+  modelsText: string;
   maxFails: string;
   cooldownSecs: string;
   timeoutSecs: string;
 }
 
 const instances = ref<Instance[]>([]);
+const models = ref<Model[]>([]);
 const presets = ref<InstancePreset[]>([]);
 const loading = ref(true);
 const error = ref('');
 const editing = ref<InstanceForm | null>(null);
 const saving = ref(false);
+
+/** 当前有哪些对外模型引用了这个接入点。信息来自 /models，不额外落库。 */
+function usedBy(instanceName: string): string[] {
+  return models.value
+    .filter((m) => m.instances.some((c) => c.instance === instanceName))
+    .map((m) => m.name);
+}
 
 function presetLabel(p: InstancePreset): string {
   return p.variant_name ? `${p.family_name}（${p.variant_name}）` : p.family_name;
@@ -72,23 +81,27 @@ function newForm(): InstanceForm {
     apiKey: '',
     keyHint: '',
     endpoints: [{ protocol: 'openai', base_url: '' }],
+    modelsText: '',
     maxFails: '3',
     cooldownSecs: '30',
     timeoutSecs: '0',
   };
 }
 
-function applyPreset(form: InstanceForm, id: string) {
+function applyPreset(form: InstanceForm, id: string, overwriteModels: boolean) {
   form.preset = id;
   const preset = findPreset(id);
   if (!preset) return;
   if (!form.name.trim()) form.name = preset.default_name;
+  if (overwriteModels || !form.modelsText.trim()) {
+    form.modelsText = preset.models.join('\n');
+  }
 }
 
 function choosePreset(id: string) {
   const form = editing.value;
   if (!form) return;
-  applyPreset(form, id);
+  applyPreset(form, id, true);
 }
 
 function onPresetChange(event: Event) {
@@ -102,7 +115,7 @@ function setMode(mode: InstanceMode) {
   if (!form) return;
   form.mode = mode;
   if (mode === 'builtin') {
-    applyPreset(form, form.preset || presets.value[0]?.id || '');
+    applyPreset(form, form.preset || presets.value[0]?.id || '', true);
   }
 }
 
@@ -113,6 +126,14 @@ function addEndpoint(form: InstanceForm) {
 function removeEndpoint(form: InstanceForm, index: number) {
   if (form.endpoints.length <= 1) return;
   form.endpoints.splice(index, 1);
+}
+
+/** 把多行文本切成非空的模型名列表。 */
+function modelLines(text: string): string[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 /** 解析表单里的非负整数，非法时返回 null。 */
@@ -160,7 +181,12 @@ async function load() {
   loading.value = true;
   error.value = '';
   try {
-    instances.value = await api<Instance[]>('/instances');
+    const [instanceList, modelList] = await Promise.all([
+      api<Instance[]>('/instances'),
+      api<Model[]>('/models'),
+    ]);
+    instances.value = instanceList;
+    models.value = modelList;
   } catch (e) {
     error.value = errorMessage(e);
   } finally {
@@ -186,6 +212,7 @@ function openEdit(inst: Instance) {
       protocol: ep.protocol,
       base_url: ep.base_url,
     })),
+    modelsText: inst.models.join('\n'),
     maxFails: String(inst.max_fails),
     cooldownSecs: String(inst.cooldown_secs),
     timeoutSecs: String(inst.timeout_secs),
@@ -206,6 +233,12 @@ async function save() {
     return;
   }
 
+  const supported = modelLines(f.modelsText);
+  if (!supported.length) {
+    error.value = '请填写该接入点支持的上游模型名（每行一个）';
+    return;
+  }
+
   const maxFails = parseCount(f.maxFails);
   const cooldownSecs = parseCount(f.cooldownSecs);
   const timeoutSecs = parseCount(f.timeoutSecs);
@@ -214,7 +247,7 @@ async function save() {
     return;
   }
 
-  const payload: InstancePayload = { name };
+  const payload: InstancePayload = { name, models: supported };
   if (f.mode === 'builtin') {
     // preset 一旦创建不可更改：编辑已有接入点时不提交该字段。
     if (f.id === null) payload.preset = f.preset;
@@ -333,8 +366,12 @@ onMounted(async () => {
       </div>
 
       <div class="models">
-        <span v-if="!inst.models.length" class="muted small">暂无模型引用</span>
+        <span v-if="!inst.models.length" class="muted small">未声明支持的模型</span>
         <span v-for="model in inst.models" :key="model" class="tag">{{ model }}</span>
+      </div>
+
+      <div v-if="usedBy(inst.name).length" class="row small muted">
+        <span>已被模型引用：{{ usedBy(inst.name).join('、') }}</span>
       </div>
     </div>
 
@@ -449,6 +486,19 @@ onMounted(async () => {
             <div class="row">
               <button class="ghost" @click="addEndpoint(editing)">添加端点</button>
             </div>
+          </div>
+
+          <div class="field span-2">
+            <label for="instance-models">支持的模型（每行一个上游模型名，必填）</label>
+            <textarea
+              id="instance-models"
+              v-model="editing.modelsText"
+              rows="3"
+              placeholder="MiniMax-M3.1-Flash"
+            ></textarea>
+            <p class="muted small">
+              模型页把模型挂到这个接入点前，会校验模型的上游名是否在此列表内。
+            </p>
           </div>
 
           <div class="field">

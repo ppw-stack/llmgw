@@ -43,11 +43,13 @@ instances:
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
+    models: [MiniMax-M3.1-Flash]
 
   # 同一个上游的第二个账号，作为主实例的备份
   - name: minimax-cn-backup
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY_BACKUP}"
+    models: [MiniMax-M3.1-Flash]
 
   # 自定义端点：一个 Key + 1~2 个端点
   - name: glm
@@ -57,12 +59,14 @@ instances:
         base_url: https://open.bigmodel.cn/api/coding/paas/v4
       - protocol: anthropic
         base_url: https://open.bigmodel.cn/api/anthropic
+    models: [glm-4.6]
 
   - name: deepseek
     api_key: "${DEEPSEEK_KEY}"
     endpoints:
       - protocol: openai
         base_url: https://api.deepseek.com/v1
+    models: [deepseek-chat]
 
 # 模型（逻辑层）：对外名 + 上游名 + 候选接入点链
 models:
@@ -107,6 +111,7 @@ pricing:
 - 自定义接入点至少填一个端点；只填一个就只开放对应协议。
 - 内置端点（`preset`）不能再填端点；地址由程序内置目录提供。
 - 模型名全局唯一，重复会**拒绝启动**。
+- 接入点的 `models` 必填；模型的上游名必须被每个候选接入点声明，否则拒绝启动。
 - `priority` 数字越小越优先；上游返回 5xx / 429 / 超时时自动切到下一个候选，4xx 不切换。
 - 熔断：接入点连续失败 `max_fails`（默认 3）次后跳过 `cooldown_secs`（默认 30 秒）。熔断状态在进程内，配置热重载不会清零。
 - 代理走 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。

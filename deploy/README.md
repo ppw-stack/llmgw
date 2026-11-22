@@ -45,6 +45,8 @@ curl -b /tmp/llmgw-cookies -H 'Content-Type: application/json' \
 
 「内置端点」下拉里可选 MiniMax 编码套餐（国内 `api.minimax.cn` / 国际 `api.minimax.io`）；两边 Key 不通用。也可以选「自定义端点」手填地址。
 
+每个接入点还要填「支持的模型」——这是它声明能服务的上游模型名。模型页把模型挂到接入点上时，会校验模型的上游名是否在这份声明里。
+
 首次启动会把 `test-config.yaml` 里的 `mock` 接入点与三个模型导入数据库（Key 加密），之后以页面为准。`database.path` 指向 `/data/llmgw.db`，主密钥自动生成在 `/data/master.key`。
 
 > 删除数据卷会同时丢失数据库、上游 Key 与主密钥。

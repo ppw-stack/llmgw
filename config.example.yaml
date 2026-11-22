@@ -36,6 +36,8 @@ instances:
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
+    # 必填：这个账号能服务哪些上游模型名。模型引用它时必须在此列表内。
+    models: [MiniMax-M3.1-Flash]
     # 熔断：连续失败 max_fails 次后跳过该实例 cooldown_secs 秒
     max_fails: 3
     cooldown_secs: 30
@@ -47,6 +49,7 @@ instances:
   - name: minimax-cn-backup
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY_BACKUP}"
+    models: [MiniMax-M3.1-Flash]
     max_fails: 3
     cooldown_secs: 30
 
@@ -58,6 +61,7 @@ instances:
         base_url: https://open.bigmodel.cn/api/coding/paas/v4
       - protocol: anthropic
         base_url: https://open.bigmodel.cn/api/anthropic
+    models: [glm-4.6]
 
 # 模型（逻辑层）：对外模型名 + 候选实例链 + 分流策略。
 models:

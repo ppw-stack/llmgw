@@ -27,8 +27,41 @@ const error = ref('');
 const editing = ref<ModelForm | null>(null);
 const saving = ref(false);
 
-/** 可以被模型引用的上游接入点名称。 */
-const instanceNames = computed<string[]>(() => instances.value.map((i) => i.name));
+/** 当前模型真正发给上游的名字：留空时与对外名相同。 */
+const currentUpstream = computed<string>(() => {
+  const form = editing.value;
+  if (!form) return '';
+  return form.upstream.trim() || form.name.trim();
+});
+
+/** 接入点是否声明支持该上游模型名。未填上游名时不限制。 */
+function supports(inst: Instance, upstream: string): boolean {
+  return upstream === '' || inst.models.includes(upstream);
+}
+
+function instanceByName(name: string): Instance | null {
+  return instances.value.find((i) => i.name === name) ?? null;
+}
+
+/** 该候选接入点是否与当前上游名不匹配。 */
+function candidateUnsupported(name: string): boolean {
+  const inst = instanceByName(name);
+  if (!inst) return false;
+  return !supports(inst, currentUpstream.value);
+}
+
+/** 列表页用：某个候选接入点是否声明支持该模型的上游名。 */
+function modelCandidateUnsupported(m: Model, instanceName: string): boolean {
+  const inst = instanceByName(instanceName);
+  if (!inst) return true;
+  return !inst.models.includes(m.upstream);
+}
+
+/** 下拉框里的接入点标签，顺带展示它声明的模型。 */
+function optionLabel(inst: Instance): string {
+  if (!inst.models.length) return `${inst.name}（未声明模型）`;
+  return `${inst.name}（支持：${inst.models.join('、')}）`;
+}
 
 /** 按优先级排序的候选链，排在最前面的是主接入点。 */
 function sortedCandidates(m: Model): ModelInstance[] {
@@ -36,12 +69,11 @@ function sortedCandidates(m: Model): ModelInstance[] {
 }
 
 function newForm(): ModelForm {
-  const first = instances.value[0];
   return {
     id: null,
     name: '',
     upstream: '',
-    candidates: [{ instance: first ? first.name : '', priority: '0', weight: '100' }],
+    candidates: [{ instance: '', priority: '0', weight: '100' }],
   };
 }
 
@@ -227,6 +259,9 @@ onMounted(() => {
           </span>
           <code class="base">{{ c.instance }}</code>
           <span class="muted small">优先级 {{ c.priority }} · 权重 {{ c.weight }}</span>
+          <span v-if="modelCandidateUnsupported(m, c.instance)" class="badge off">
+            未声明支持 {{ m.upstream }}
+          </span>
         </div>
       </div>
     </div>
@@ -250,6 +285,9 @@ onMounted(() => {
               v-model="editing.upstream"
               placeholder="留空则与对外模型名相同"
             />
+            <p class="muted small">
+              这里填的是真正发给上游的模型名，候选接入点的「支持的模型」必须包含它。
+            </p>
           </div>
 
           <div class="field span-2 readonly">
@@ -266,47 +304,58 @@ onMounted(() => {
             <span class="field-caption">
               候选接入点（优先级数字越小越优先，主接入点失败后自动切换到下一个）
             </span>
-            <div v-for="(row, index) in editing.candidates" :key="index" class="row">
-              <label class="visually-hidden" :for="`model-candidate-instance-${index}`">
-                上游接入点
-              </label>
-              <select
-                :id="`model-candidate-instance-${index}`"
-                v-model="row.instance"
-                class="input-grow"
-              >
-                <option value="" disabled>请选择接入点</option>
-                <option v-for="option in instanceNames" :key="option" :value="option">
-                  {{ option }}
-                </option>
-              </select>
-              <label class="visually-hidden" :for="`model-candidate-priority-${index}`"
-                >优先级</label
-              >
-              <input
-                :id="`model-candidate-priority-${index}`"
-                v-model="row.priority"
-                class="input-num"
-                type="text"
-                inputmode="numeric"
-                placeholder="优先级"
-              />
-              <label class="visually-hidden" :for="`model-candidate-weight-${index}`">权重</label>
-              <input
-                :id="`model-candidate-weight-${index}`"
-                v-model="row.weight"
-                class="input-num"
-                type="text"
-                inputmode="numeric"
-                placeholder="权重"
-              />
-              <button
-                class="ghost danger"
-                :disabled="editing.candidates.length <= 1"
-                @click="removeCandidate(editing, index)"
-              >
-                删除
-              </button>
+            <div v-for="(row, index) in editing.candidates" :key="index">
+              <div class="row">
+                <label class="visually-hidden" :for="`model-candidate-instance-${index}`">
+                  上游接入点
+                </label>
+                <select
+                  :id="`model-candidate-instance-${index}`"
+                  v-model="row.instance"
+                  class="input-grow"
+                >
+                  <option value="" disabled>请选择接入点</option>
+                  <option
+                    v-for="inst in instances"
+                    :key="inst.name"
+                    :value="inst.name"
+                    :disabled="!supports(inst, currentUpstream) && row.instance !== inst.name"
+                  >
+                    {{ optionLabel(inst) }}
+                  </option>
+                </select>
+                <label class="visually-hidden" :for="`model-candidate-priority-${index}`"
+                  >优先级</label
+                >
+                <input
+                  :id="`model-candidate-priority-${index}`"
+                  v-model="row.priority"
+                  class="input-num"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="优先级"
+                />
+                <label class="visually-hidden" :for="`model-candidate-weight-${index}`">权重</label>
+                <input
+                  :id="`model-candidate-weight-${index}`"
+                  v-model="row.weight"
+                  class="input-num"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="权重"
+                />
+                <button
+                  class="ghost danger"
+                  :disabled="editing.candidates.length <= 1"
+                  @click="removeCandidate(editing, index)"
+                >
+                  删除
+                </button>
+              </div>
+              <p v-if="row.instance && candidateUnsupported(row.instance)" class="error small">
+                该接入点未声明支持
+                {{ currentUpstream }}，请先到「上游接入点」页补充声明，或换一个候选。
+              </p>
             </div>
             <div class="row">
               <button class="ghost" @click="addCandidate(editing)">添加候选</button>

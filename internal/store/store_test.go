@@ -138,6 +138,7 @@ func TestInstanceAndModelCRUD(t *testing.T) {
 			{Protocol: config.ProtocolOpenAI, BaseURL: "https://a/v4"},
 			{Protocol: config.ProtocolAnthropic, BaseURL: "https://a/anthropic"},
 		},
+		Models:       []string{"glm-4.6"},
 		MaxFails:     2,
 		CooldownSecs: 15,
 	})
@@ -167,6 +168,7 @@ func TestInstanceAndModelCRUD(t *testing.T) {
 		Preset:       "minimax-mplan-global",
 		EncryptedKey: enc,
 		Endpoints:    []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://b/v1"}},
+		Models:       []string{"glm-4.6"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +242,7 @@ func TestModelWithSeveralInstancesReadsBackAsOneModel(t *testing.T) {
 		if _, err := st.CreateInstance(InstanceSpec{
 			Name:      name,
 			Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://x/v1"}},
+			Models:    []string{"m"},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -356,6 +359,9 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	if rec.CreatedAt.IsZero() {
 		t.Fatal("timestamp lost")
 	}
+	if len(rec.Models) != 1 || rec.Models[0] != "glm-4.6" {
+		t.Fatalf("migrated declaration = %v", rec.Models)
+	}
 
 	models, err := st.ListModelRecords()
 	if err != nil {
@@ -443,11 +449,86 @@ func TestPresetProviderTableIsMigrated(t *testing.T) {
 	if len(records[0].Endpoints) != 2 {
 		t.Fatalf("endpoints = %+v", records[0].Endpoints)
 	}
+	if len(records[0].Models) != 1 || records[0].Models[0] != "glm-4.6" {
+		t.Fatalf("declaration = %v", records[0].Models)
+	}
 	modelRecords, err := st.ListModelRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(modelRecords) != 1 || modelRecords[0].Name != "glm-4.6" {
 		t.Fatalf("models = %+v", modelRecords)
+	}
+}
+
+// TestInstanceModelsAreBackfilled covers an upgrade from the release that had
+// the instance table but not the capability column yet.
+func TestInstanceModelsAreBackfilled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "no-models.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`CREATE TABLE instances (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			name            TEXT    NOT NULL UNIQUE,
+			preset          TEXT    NOT NULL DEFAULT '',
+			key_enc         TEXT    NOT NULL DEFAULT '',
+			endpoints_json  TEXT    NOT NULL DEFAULT '[]',
+			max_fails       INTEGER NOT NULL DEFAULT 3,
+			cooldown_secs   INTEGER NOT NULL DEFAULT 30,
+			timeout_secs    INTEGER NOT NULL DEFAULT 0,
+			created_at      TEXT    NOT NULL,
+			updated_at      TEXT    NOT NULL
+		)`,
+		`CREATE TABLE models (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT    NOT NULL UNIQUE,
+			upstream    TEXT    NOT NULL DEFAULT '',
+			strategy    TEXT    NOT NULL DEFAULT 'failover',
+			created_at  TEXT    NOT NULL,
+			updated_at  TEXT    NOT NULL
+		)`,
+		`CREATE TABLE model_instances (
+			model_id    INTEGER NOT NULL,
+			instance_id INTEGER NOT NULL,
+			priority    INTEGER NOT NULL DEFAULT 0,
+			weight      INTEGER NOT NULL DEFAULT 100,
+			PRIMARY KEY (model_id, instance_id)
+		)`,
+		`INSERT INTO instances(id, name, created_at, updated_at)
+			VALUES (1, 'old-instance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO models(id, name, upstream, created_at, updated_at)
+			VALUES (1, 'old-model', 'old-upstream', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO model_instances(model_id, instance_id) VALUES (1, 1)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := Open(ctx, path, logger)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	records, err := st.ListInstanceRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v", records)
+	}
+	if len(records[0].Models) != 1 || records[0].Models[0] != "old-upstream" {
+		t.Fatalf("models = %v", records[0].Models)
 	}
 }

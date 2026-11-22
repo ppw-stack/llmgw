@@ -32,6 +32,7 @@ func expectedKeyHint(key string) string {
 
 func instanceBody(name, apiKey string) string {
 	return `{"name":"` + name + `","api_key":"` + apiKey + `",
+	  "models":["gpt-upstream"],
 	  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v1"}]}`
 }
 
@@ -97,6 +98,7 @@ func TestInstanceCRUD(t *testing.T) {
 
 	// Update without api_key preserves the stored key.
 	update := `{"name":"ui-instance",
+	  "models":["gpt-upstream"],
 	  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v2"}],
 	  "max_fails":5,"cooldown_secs":15}`
 	resp = adminRequest(t, http.MethodPut, gw.URL+"/admin/api/instances/"+itoa(created.ID), update)
@@ -147,7 +149,7 @@ func TestModelCRUD(t *testing.T) {
 
 	// A model may list several instances; the order is the priority.
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
-		`{"name":"ui-model","upstream":"ui-upstream","strategy":"failover",
+		`{"name":"ui-model","upstream":"gpt-upstream","strategy":"failover",
 		  "instances":[{"instance":"test","priority":0},{"instance":"backup","priority":1}]}`)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -155,7 +157,7 @@ func TestModelCRUD(t *testing.T) {
 		t.Fatalf("create model = %d %s", resp.StatusCode, body)
 	}
 	created := decodeModel(t, resp)
-	if created.Name != "ui-model" || created.Upstream != "ui-upstream" {
+	if created.Name != "ui-model" || created.Upstream != "gpt-upstream" {
 		t.Fatalf("model = %+v", created)
 	}
 	if len(created.Instances) != 2 {
@@ -246,7 +248,8 @@ func TestPresetInstanceCRUD(t *testing.T) {
 	// Create with only a key: the endpoints come from the preset.
 	presetKey := testAPIKey("TEST_PRESET_API_KEY", "9999")
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
-		`{"name":"minimax","preset":"minimax-mplan-global","api_key":"`+presetKey+`"}`)
+		`{"name":"minimax","preset":"minimax-mplan-global","api_key":"`+presetKey+`",
+		  "models":["MiniMax-M3.1-Flash"]}`)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -279,6 +282,7 @@ func TestPresetInstanceCRUD(t *testing.T) {
 	// A preset instance may not carry custom endpoints.
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
 		`{"name":"bad","preset":"minimax-mplan-global","api_key":"k",
+		  "models":["MiniMax-M3.1-Flash"],
 		  "endpoints":[{"protocol":"openai","base_url":"https://example.com/v1"}]}`)
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -307,5 +311,29 @@ func TestProviderCompatView(t *testing.T) {
 	}
 	if list[0].OpenAIBaseURL == "" {
 		t.Fatalf("base url = %+v", list[0])
+	}
+}
+
+func TestInstanceRequiresModels(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
+		`{"name":"no-models","api_key":"k",
+		  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v1"}]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "supported model") {
+		t.Fatalf("missing models = %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestModelRejectsAnUndeclaredUpstream(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
+		`{"name":"bad-model","upstream":"not-declared","instances":[{"instance":"test"}]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest ||
+		!strings.Contains(string(body), "does not declare upstream model") {
+		t.Fatalf("undeclared upstream = %d %s", resp.StatusCode, body)
 	}
 }

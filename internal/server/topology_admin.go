@@ -26,6 +26,7 @@ type instanceInput struct {
 	Preset       *string         `json:"preset"`
 	APIKey       *string         `json:"api_key"`
 	Endpoints    []endpointInput `json:"endpoints"`
+	Models       []string        `json:"models"`
 	MaxFails     *int            `json:"max_fails"`
 	CooldownSecs *int            `json:"cooldown_secs"`
 	TimeoutSecs  *int            `json:"timeout_secs"`
@@ -41,10 +42,10 @@ type instanceView struct {
 	DocsURL      string         `json:"docs_url,omitempty"`
 	KeyHint      string         `json:"key_hint"`
 	Endpoints    []endpointView `json:"endpoints"`
+	Models       []string       `json:"models"`
 	MaxFails     int            `json:"max_fails"`
 	CooldownSecs int            `json:"cooldown_secs"`
 	TimeoutSecs  int            `json:"timeout_secs"`
-	Models       []string       `json:"models"`
 	CreatedAt    string         `json:"created_at"`
 	UpdatedAt    string         `json:"updated_at"`
 }
@@ -150,29 +151,24 @@ func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	models, err := s.store.ListModelRecords()
-	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	views := make([]instanceView, 0, len(records))
 	for _, rec := range records {
-		views = append(views, s.instanceView(rec, models))
+		views = append(views, s.instanceView(rec))
 	}
 	writeJSON(w, http.StatusOK, views)
 }
 
-func (s *Server) instanceView(rec store.InstanceRecord, models []store.ModelRecord) instanceView {
+func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
 	view := instanceView{
 		ID:           rec.ID,
 		Name:         rec.Name,
 		Preset:       rec.Preset,
 		Source:       "custom",
 		KeyHint:      s.keyHint(rec.EncryptedKey),
+		Models:       append([]string{}, rec.Models...),
 		MaxFails:     rec.MaxFails,
 		CooldownSecs: rec.CooldownSecs,
 		TimeoutSecs:  rec.TimeoutSecs,
-		Models:       []string{},
 		CreatedAt:    rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:    rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
@@ -181,14 +177,6 @@ func (s *Server) instanceView(rec store.InstanceRecord, models []store.ModelReco
 	}
 	if view.Endpoints == nil {
 		view.Endpoints = []endpointView{}
-	}
-	for _, m := range models {
-		for _, mi := range m.Instances {
-			if mi.Instance == rec.Name {
-				view.Models = append(view.Models, m.Name)
-				break
-			}
-		}
 	}
 	if rec.Preset != "" {
 		view.Source = "builtin"
@@ -248,6 +236,7 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		Preset:       instance.Preset,
 		EncryptedKey: encrypted,
 		Endpoints:    instance.Endpoints,
+		Models:       instance.Models,
 		MaxFails:     instance.MaxFails,
 		CooldownSecs: instance.CooldownSecs,
 		TimeoutSecs:  instance.TimeoutSecs,
@@ -262,12 +251,7 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "instance.create", instance.Name, "success")
-	modelRecords, err := s.store.ListModelRecords()
-	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, s.instanceView(*rec, modelRecords))
+	writeJSON(w, http.StatusCreated, s.instanceView(*rec))
 }
 
 func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
@@ -341,6 +325,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		Preset:       instance.Preset,
 		EncryptedKey: encrypted,
 		Endpoints:    instance.Endpoints,
+		Models:       instance.Models,
 		MaxFails:     instance.MaxFails,
 		CooldownSecs: instance.CooldownSecs,
 		TimeoutSecs:  instance.TimeoutSecs,
@@ -365,13 +350,14 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 			Preset:       instance.Preset,
 			EncryptedKey: encrypted,
 			Endpoints:    instance.Endpoints,
+			Models:       instance.Models,
 			MaxFails:     instance.MaxFails,
 			CooldownSecs: instance.CooldownSecs,
 			TimeoutSecs:  instance.TimeoutSecs,
 		},
 		CreatedAt: existing.CreatedAt,
 		UpdatedAt: time.Now().UTC(),
-	}, nil))
+	}))
 }
 
 func (s *Server) deleteInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
@@ -610,6 +596,9 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 			Protocol: strings.TrimSpace(ep.Protocol),
 			BaseURL:  strings.TrimSpace(ep.BaseURL),
 		})
+	}
+	for _, name := range in.Models {
+		instance.Models = append(instance.Models, strings.TrimSpace(name))
 	}
 	if in.MaxFails != nil {
 		instance.MaxFails = *in.MaxFails

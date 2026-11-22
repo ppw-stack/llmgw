@@ -51,6 +51,7 @@ func newMultiForwarder(t *testing.T, upstreams []string, timeout time.Duration) 
 			Name:      name,
 			APIKey:    upstreamTestKey(),
 			Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: upstream}},
+			Models:    []string{"upstream-m"},
 		})
 		candidates = append(candidates, config.ModelInstance{Name: name, Priority: i})
 	}

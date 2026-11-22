@@ -1,0 +1,406 @@
+package server
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pw/llmgw/internal/auth"
+	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/keypool"
+	"github.com/pw/llmgw/internal/router"
+	"github.com/pw/llmgw/internal/store"
+	"github.com/pw/llmgw/internal/transport"
+)
+
+type reqInfo struct {
+	Path          string
+	Authorization string
+	APIKey        string
+	Version       string
+	Body          string
+}
+
+type capture struct {
+	mu   sync.Mutex
+	reqs []reqInfo
+}
+
+func (c *capture) add(r reqInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reqs = append(c.reqs, r)
+}
+
+func (c *capture) all() []reqInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]reqInfo(nil), c.reqs...)
+}
+
+func record(c *capture, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	c.add(reqInfo{
+		Path:          r.URL.Path,
+		Authorization: r.Header.Get("Authorization"),
+		APIKey:        r.Header.Get("x-api-key"),
+		Version:       r.Header.Get("anthropic-version"),
+		Body:          string(body),
+	})
+}
+
+func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string) (*httptest.Server, *store.Store, string) {
+	t.Helper()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cap != nil {
+			record(cap, r)
+		} else {
+			_, _ = io.Copy(io.Discard, r.Body)
+		}
+		upstreamHandler(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := &config.Config{
+		Providers: []config.Provider{{
+			Name:    "test",
+			Keys:    keys,
+			Timeout: config.Duration(5 * time.Second),
+			Endpoints: []config.Endpoint{
+				{Name: "openai", Protocol: config.ProtocolOpenAI, BaseURL: upstream.URL,
+					Models: map[string]string{"gpt-test": "gpt-upstream"}},
+				{Name: "anthropic", Protocol: config.ProtocolAnthropic, BaseURL: upstream.URL,
+					Version: "2023-06-01", Models: map[string]string{"claude-test": "claude-upstream"}},
+			},
+		}},
+		Pricing: map[string]config.Price{
+			"gpt-test":    {InputPerMTok: 1, OutputPerMTok: 2},
+			"claude-test": {InputPerMTok: 3, OutputPerMTok: 15},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), logger)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rt := router.New()
+	if err := rt.Reload(cfg); err != nil {
+		t.Fatalf("reload router: %v", err)
+	}
+	fw := transport.New(rt, st, keypool.NewManager(), logger)
+	srv := New(Options{
+		Router:     rt,
+		Forwarder:  fw,
+		Store:      st,
+		AdminToken: "admin-test",
+		MaxBody:    1 << 20,
+		Log:        logger,
+	})
+	gw := httptest.NewServer(srv.Handler())
+	t.Cleanup(gw.Close)
+
+	plain, hash, prefix, err := auth.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateKey("test", hash, prefix); err != nil {
+		t.Fatal(err)
+	}
+	return gw, st, plain
+}
+
+func post(t *testing.T, url, key, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func readAll(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func waitLog(t *testing.T, st *store.Store) store.LogRow {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := st.Logs(store.LogFilter{Limit: 10})
+		if err == nil && len(rows) > 0 {
+			return rows[0]
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("no request log written")
+	return store.LogRow{}
+}
+
+func TestOpenAINonStream(t *testing.T) {
+	cap := &capture{}
+	gw, st, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("unexpected upstream path %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}, []string{"up-1"})
+
+	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
+		`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"total_tokens":15`) {
+		t.Fatalf("response not passed through: %s", body)
+	}
+
+	reqs := cap.all()
+	if len(reqs) != 1 {
+		t.Fatalf("upstream calls = %d", len(reqs))
+	}
+	if reqs[0].Authorization != "Bearer up-1" {
+		t.Fatalf("upstream auth = %q", reqs[0].Authorization)
+	}
+	if !strings.Contains(reqs[0].Body, `"model":"gpt-upstream"`) {
+		t.Fatalf("model not rewritten: %s", reqs[0].Body)
+	}
+	if !strings.Contains(reqs[0].Body, `"messages"`) {
+		t.Fatalf("body lost fields: %s", reqs[0].Body)
+	}
+
+	row := waitLog(t, st)
+	if row.Model != "gpt-test" || row.UpstreamModel != "gpt-upstream" {
+		t.Fatalf("log row: %+v", row)
+	}
+	if row.PromptTokens != 10 || row.CompletionTokens != 5 {
+		t.Fatalf("usage: %+v", row)
+	}
+	if row.CostUSD <= 0 {
+		t.Fatalf("expected cost, got %v", row.CostUSD)
+	}
+}
+
+func TestOpenAIStreamInjectsUsageOption(t *testing.T) {
+	cap := &capture{}
+	gw, st, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, []string{"up-1"})
+
+	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
+		`{"model":"gpt-test","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"content":"he"`) || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("stream not passed through: %s", body)
+	}
+
+	reqs := cap.all()
+	if !strings.Contains(reqs[0].Body, `"include_usage":true`) {
+		t.Fatalf("stream_options not injected: %s", reqs[0].Body)
+	}
+
+	row := waitLog(t, st)
+	if row.PromptTokens != 7 || row.CompletionTokens != 3 {
+		t.Fatalf("usage from stream: %+v", row)
+	}
+	if row.UsageEstimated {
+		t.Fatal("usage should not be estimated")
+	}
+}
+
+func TestAnthropicStream(t *testing.T) {
+	cap := &capture{}
+	gw, st, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		flusher.Flush()
+	}, []string{"up-1"})
+
+	resp := post(t, gw.URL+"/anthropic/v1/messages", key,
+		`{"model":"claude-test","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "message_stop") {
+		t.Fatalf("stream not passed through: %s", body)
+	}
+
+	reqs := cap.all()
+	if len(reqs) != 1 || reqs[0].Path != "/v1/messages" {
+		t.Fatalf("upstream path: %+v", reqs)
+	}
+	if reqs[0].APIKey != "up-1" {
+		t.Fatalf("x-api-key = %q", reqs[0].APIKey)
+	}
+	if reqs[0].Version != "2023-06-01" {
+		t.Fatalf("anthropic-version = %q", reqs[0].Version)
+	}
+	if reqs[0].Authorization != "" {
+		t.Fatalf("client authorization leaked upstream: %q", reqs[0].Authorization)
+	}
+	if !strings.Contains(reqs[0].Body, `"model":"claude-upstream"`) {
+		t.Fatalf("model not rewritten: %s", reqs[0].Body)
+	}
+
+	row := waitLog(t, st)
+	if row.PromptTokens != 11 || row.CompletionTokens != 9 {
+		t.Fatalf("anthropic usage: %+v", row)
+	}
+}
+
+func TestCrossProtocolRejected(t *testing.T) {
+	cap := &capture{}
+	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be called")
+	}, []string{"up-1"})
+
+	// claude-test only exists on the Anthropic endpoint.
+	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
+		`{"model":"claude-test","messages":[{"role":"user","content":"hi"}]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "available via") {
+		t.Fatalf("expected hint: %s", body)
+	}
+	if n := len(cap.all()); n != 0 {
+		t.Fatalf("upstream called %d times", n)
+	}
+}
+
+func TestUnknownModel(t *testing.T) {
+	cap := &capture{}
+	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {}, []string{"up-1"})
+	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
+		`{"model":"nope","messages":[]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "not_found_error") {
+		t.Fatalf("unexpected error body: %s", body)
+	}
+}
+
+func TestAuthFailures(t *testing.T) {
+	cap := &capture{}
+	gw, st, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {}, []string{"up-1"})
+
+	resp := post(t, gw.URL+"/openai/v1/chat/completions", "sk-gw-wrong",
+		`{"model":"gpt-test","messages":[]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != 401 || !strings.Contains(body, "invalid gateway key") {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+
+	keys, err := st.ListKeys()
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("list keys: %v", err)
+	}
+	if err := st.SetKeyEnabled(keys[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	resp = post(t, gw.URL+"/openai/v1/chat/completions", key,
+		`{"model":"gpt-test","messages":[]}`)
+	body = readAll(t, resp)
+	if resp.StatusCode != 401 || !strings.Contains(body, "disabled") {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestUpstream401RotatesKey(t *testing.T) {
+	cap := &capture{}
+	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer bad" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"bad key"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}, []string{"good", "bad"})
+
+	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
+		`{"model":"gpt-test","messages":[]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	reqs := cap.all()
+	if len(reqs) != 2 {
+		t.Fatalf("expected 2 upstream attempts, got %d", len(reqs))
+	}
+	if reqs[1].Authorization != "Bearer good" {
+		t.Fatalf("second attempt auth = %q", reqs[1].Authorization)
+	}
+}
+
+func TestPathNormalizationAndModels(t *testing.T) {
+	cap := &capture{}
+	gw, _, key := setup(t, cap, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}, []string{"up-1"})
+
+	// Missing /v1 on the Anthropic path must still work.
+	resp := post(t, gw.URL+"/anthropic/messages", key,
+		`{"model":"claude-test","max_tokens":8,"messages":[]}`)
+	if body := readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/openai/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	mresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readAll(t, mresp)
+	if !strings.Contains(body, "gpt-test") || strings.Contains(body, "claude-test") {
+		t.Fatalf("models endpoint leaked protocols: %s", body)
+	}
+}

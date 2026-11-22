@@ -1,0 +1,52 @@
+server:
+  addr: ":8080"
+  # admin_token: set this in production, or leave empty to auto-generate on
+  # first start (written to admin-token.txt next to the database file).
+  admin_token: ""
+  read_header_timeout: 10s
+  shutdown_timeout: 30s
+  max_body_bytes: 33554432
+
+database:
+  path: "./data/llmgw.db"
+
+log:
+  level: info
+  format: json
+
+providers:
+  - name: glm
+    keys:
+      - "${GLM_KEY_1}"
+      - "${GLM_KEY_2}"
+    timeout: 120s
+    endpoints:
+      - name: openai
+        protocol: openai
+        base_url: https://open.bigmodel.cn/api/paas/v4
+        models:
+          glm-4.6: glm-4.6
+      - name: anthropic
+        protocol: anthropic
+        base_url: https://open.bigmodel.cn/api/anthropic
+        version: "2023-06-01"
+        models:
+          glm-4.6: glm-4.6
+
+  - name: deepseek
+    keys: ["${DEEPSEEK_KEY}"]
+    endpoints:
+      - name: openai
+        protocol: openai
+        base_url: https://api.deepseek.com/v1
+        models:
+          deepseek-chat: deepseek-chat
+
+# Optional. USD per million tokens, used only for cost estimates.
+pricing:
+  glm-4.6:
+    input_per_mtok: 0.6
+    output_per_mtok: 2.2
+  deepseek-chat:
+    input_per_mtok: 0.27
+    output_per_mtok: 1.1

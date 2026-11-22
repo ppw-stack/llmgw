@@ -1,0 +1,60 @@
+package ingress
+
+import "testing"
+
+func TestNormalize(t *testing.T) {
+	cases := map[string]string{
+		"/anthropic/v1/messages":         PathAnthropicMsgs,
+		"/anthropic/messages":            PathAnthropicMsgs,
+		"/anthropic/v1/v1/messages":      PathAnthropicMsgs,
+		"/openai/v1/chat/completions":    PathOpenAIChat,
+		"/openai/chat/completions":       PathOpenAIChat,
+		"/openai/v1/v1/chat/completions": PathOpenAIChat,
+		"/openai/v1/models":              PathOpenAIModels,
+		"/metrics":                       "/metrics",
+		"/":                              "/",
+	}
+	for in, want := range cases {
+		if got := Normalize(in); got != want {
+			t.Errorf("Normalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProtocolOf(t *testing.T) {
+	if p, ok := ProtocolOf(PathAnthropicMsgs); !ok || p != "anthropic" {
+		t.Fatalf("anthropic path -> %q %v", p, ok)
+	}
+	if p, ok := ProtocolOf(PathOpenAIChat); !ok || p != "openai" {
+		t.Fatalf("openai path -> %q %v", p, ok)
+	}
+	if _, ok := ProtocolOf("/nope"); ok {
+		t.Fatal("unexpected protocol")
+	}
+}
+
+func TestParseOpenAI(t *testing.T) {
+	m, err := ParseOpenAI([]byte(`{"model":"glm-4.6","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Model != "glm-4.6" || !m.Stream {
+		t.Fatalf("unexpected meta: %+v", m)
+	}
+	if _, err := ParseOpenAI([]byte(`{"messages":[]}`)); err == nil {
+		t.Fatal("expected missing model error")
+	}
+	if _, err := ParseOpenAI([]byte(`not json`)); err == nil {
+		t.Fatal("expected invalid json error")
+	}
+}
+
+func TestParseAnthropic(t *testing.T) {
+	m, err := ParseAnthropic([]byte(`{"model":"claude-x","stream":false,"max_tokens":8}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Model != "claude-x" || m.Stream {
+		t.Fatalf("unexpected meta: %+v", m)
+	}
+}

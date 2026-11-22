@@ -26,9 +26,9 @@ log:
 
 providers:
   # 内置端点：只需选 preset + 填 API Key。
-  # 两个 base URL 与默认模型由程序内置，随版本升级自动更新。
-  - name: minimax
-    preset: minimax-mplan-global
+  # 国内套餐用 minimax-mplan-cn（api.minimax.cn），国际套餐用 minimax-mplan-global。
+  - name: minimax-cn
+    preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
     # 可选：覆盖内置默认模型（默认 MiniMax-M3.1-Flash）
     # models:

@@ -43,6 +43,8 @@ curl -b /tmp/llmgw-cookies -H 'Content-Type: application/json' \
 
 现在可以直接在控制台配置：打开 http://localhost:8080 → 「供应商」→ 新增/编辑。
 
+「内置端点」下拉里可选 MiniMax 编码套餐（国内 `api.minimax.cn` / 国际 `api.minimax.io`），只需填 API Key；两边 Key 不通用。也可以选「自定义端点」手填 base URL。
+
 首次启动会把 `test-config.yaml` 里的 `mock` 供应商导入数据库（Key 加密），之后以页面为准。`database.path` 指向 `/data/llmgw.db`，主密钥自动生成在 `/data/master.key`。
 
 > 删除数据卷会同时丢失数据库、上游 Key 与主密钥。

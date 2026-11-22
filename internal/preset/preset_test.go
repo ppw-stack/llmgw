@@ -27,6 +27,27 @@ func TestCatalogIsConsistent(t *testing.T) {
 	}
 }
 
+func TestMiniMaxVariants(t *testing.T) {
+	global, ok := Lookup("minimax-mplan-global")
+	if !ok || global.OpenAIBaseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("global preset = %+v", global)
+	}
+	cn, ok := Lookup("minimax-mplan-cn")
+	if !ok {
+		t.Fatal("missing minimax-mplan-cn preset")
+	}
+	if cn.OpenAIBaseURL != "https://api.minimax.cn/v1" ||
+		cn.AnthropicBaseURL != "https://api.minimax.cn/anthropic" {
+		t.Fatalf("cn preset urls = %+v", cn)
+	}
+	if cn.DefaultName != "minimax-cn" || cn.VariantName != "国内" {
+		t.Fatalf("cn preset = %+v", cn)
+	}
+	if len(cn.Models) == 0 || cn.Models[0] != "MiniMax-M3.1-Flash" {
+		t.Fatalf("cn preset models = %v", cn.Models)
+	}
+}
+
 func TestLookupReturnsCopy(t *testing.T) {
 	p, ok := Lookup("minimax-mplan-global")
 	if !ok {

@@ -13,7 +13,7 @@
 |---|---|
 | OpenAI / Anthropic 双入口，同协议直通 | 跨协议转换 |
 | 按 `(协议, 模型)` 查表路由 | 规则引擎、权重、优先级、fallback、熔断 |
-| 内置端点（首发 MiniMax 编码套餐）/ 自定义供应商 | RPM/TPM/预算、模型白名单 |
+| 内置端点（MiniMax 编码套餐国内 / 国际）/ 自定义供应商 | RPM/TPM/预算、模型白名单 |
 | 上游 401/403 原样透传 | 自动重试、自动降级 |
 | 请求日志、token 与成本统计 | 多租户、计费、在线支付 |
 | 配置热更新 | MCP、RAG、护栏 |
@@ -72,9 +72,11 @@ curl localhost:8080/openai/v1/chat/completions \
 ```yaml
 providers:
   # 内置端点：两个 base URL 与默认模型由程序内置
-  - name: minimax
-    preset: minimax-mplan-global
+  - name: minimax-cn
+    preset: minimax-mplan-cn          # 国内：api.minimax.cn
     api_key: "${MINIMAX_KEY}"
+  # - name: minimax
+  #   preset: minimax-mplan-global    # 国际：api.minimax.io
 
   # 自定义端点：一个 Key + 两个 base URL + 模型列表
   - name: glm
@@ -92,7 +94,7 @@ providers:
 - 模型只在另一个协议存在时，请求会得到 `400` 并提示改用哪个 base_url。
 - 改配置后 1 秒内自动生效，在途流式请求不受影响。
 - 超时固定 120s；代理使用进程的 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
-- 内置端点的文档：MiniMax 编码套餐见 <https://platform.minimax.io/docs/m-plan/other-tools>。
+- 内置端点的文档：MiniMax 编码套餐国内 <https://platform.minimaxi.com/docs/m-plan/other-tools>、国际 <https://platform.minimax.io/docs/m-plan/other-tools>。两边 Key 不通用，按套餐归属选择 `minimax-mplan-cn` / `minimax-mplan-global`。
 
 ## 管理 API
 

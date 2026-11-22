@@ -35,8 +35,9 @@ log:
 
 providers:
   # 内置端点：只需 preset + API Key
-  - name: minimax
-    preset: minimax-mplan-global
+  # 国内用 minimax-mplan-cn，国际用 minimax-mplan-global（两者 Key 不通用）
+  - name: minimax-cn
+    preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
 
   # 自定义端点：一个 Key + 最多两个 base URL + 模型

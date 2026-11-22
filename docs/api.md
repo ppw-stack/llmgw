@@ -135,6 +135,8 @@ GET /admin/api/provider-presets
 }]
 ```
 
+目录同时提供 `minimax-mplan-cn`（`https://api.minimax.cn/v1` 与 `https://api.minimax.cn/anthropic`），默认名称 `minimax-cn`。国内与国际套餐的 Key 不通用。
+
 ### 列表
 
 ```

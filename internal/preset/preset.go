@@ -29,6 +29,17 @@ var all = []Preset{
 		AnthropicBaseURL: "https://api.minimax.io/anthropic",
 		Models:           []string{"MiniMax-M3.1-Flash"},
 	},
+	{
+		ID:               "minimax-mplan-cn",
+		Family:           "minimax-mplan",
+		FamilyName:       "MiniMax 编码套餐",
+		VariantName:      "国内",
+		DefaultName:      "minimax-cn",
+		DocsURL:          "https://platform.minimaxi.com/docs/m-plan/other-tools",
+		OpenAIBaseURL:    "https://api.minimax.cn/v1",
+		AnthropicBaseURL: "https://api.minimax.cn/anthropic",
+		Models:           []string{"MiniMax-M3.1-Flash"},
+	},
 }
 
 // All returns a copy of the preset catalog.

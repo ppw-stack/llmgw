@@ -59,6 +59,26 @@ jobs:
         run: npm ci
         working-directory: web
 
+      - name: ESLint
+        run: npm run lint
+        working-directory: web
+
+      - name: Prettier
+        run: npm run format:check
+        working-directory: web
+
+      - name: Type check
+        run: npm run type-check
+        working-directory: web
+
       - name: Build
         run: npm run build
         working-directory: web
+
+      - name: Verify embedded console is in sync
+        run: |
+          if [ -n "$(git status --porcelain -- internal/webui/dist)" ]; then
+            echo "internal/webui/dist 与 web/ 源码不一致，请执行 cd web && npm run build 后提交产物："
+            git status --porcelain -- internal/webui/dist
+            exit 1
+          fi

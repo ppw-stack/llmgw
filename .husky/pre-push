@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# 推送前执行全量质量检查：ESLint + Prettier + 类型检查
+cd web && npm run check

@@ -1,78 +1,94 @@
-<script setup>
-import { onMounted, ref } from 'vue'
-import { api } from './api'
-import Login from './views/Login.vue'
-import PasswordDialog from './views/PasswordDialog.vue'
-import Overview from './views/Overview.vue'
-import Providers from './views/Providers.vue'
-import Keys from './views/Keys.vue'
-import Logs from './views/Logs.vue'
-import Access from './views/Access.vue'
+<script setup lang="ts">
+import { onMounted, onUnmounted, ref, type Component } from 'vue';
+import { api } from './api';
+import type { Me } from './types';
+import LoginView from './views/LoginView.vue';
+import PasswordDialog from './views/PasswordDialog.vue';
+import OverviewView from './views/OverviewView.vue';
+import ProvidersView from './views/ProvidersView.vue';
+import KeysView from './views/KeysView.vue';
+import LogsView from './views/LogsView.vue';
+import AccessView from './views/AccessView.vue';
 
-const tabs = [
-  { id: 'overview', label: '概览', component: Overview },
-  { id: 'providers', label: '供应商', component: Providers },
-  { id: 'keys', label: '网关 Key', component: Keys },
-  { id: 'logs', label: '请求日志', component: Logs },
-  { id: 'access', label: '接入说明', component: Access },
-]
-
-const checking = ref(true)
-const authed = ref(false)
-const username = ref('')
-const showPassword = ref(false)
-const tab = ref('overview')
-const current = ref(tabs[0].component)
-
-function resolve(id) {
-  const found = tabs.find((t) => t.id === id) || tabs[0]
-  tab.value = found.id
-  current.value = found.component
+interface Tab {
+  id: string;
+  label: string;
+  component: Component;
 }
 
-resolve(location.hash.replace('#', '') || 'overview')
+const tabs = [
+  { id: 'overview', label: '概览', component: OverviewView },
+  { id: 'providers', label: '供应商', component: ProvidersView },
+  { id: 'keys', label: '网关 Key', component: KeysView },
+  { id: 'logs', label: '请求日志', component: LogsView },
+  { id: 'access', label: '接入说明', component: AccessView },
+] as const satisfies readonly Tab[];
 
-function go(id) {
-  location.hash = id
-  resolve(id)
+const checking = ref(true);
+const authed = ref(false);
+const username = ref('');
+const showPassword = ref(false);
+const tab = ref('overview');
+const current = ref<Component>(tabs[0].component);
+
+function resolve(id: string) {
+  const found = tabs.find((t) => t.id === id) ?? tabs[0];
+  tab.value = found.id;
+  current.value = found.component;
+}
+
+resolve(location.hash.replace('#', '') || 'overview');
+
+function go(id: string) {
+  location.hash = id;
+  resolve(id);
 }
 
 async function check() {
-  checking.value = true
+  checking.value = true;
   try {
-    const me = await api('/me')
-    username.value = me.username
-    authed.value = true
+    const me = await api<Me>('/me');
+    username.value = me.username;
+    authed.value = true;
   } catch {
-    authed.value = false
+    authed.value = false;
   } finally {
-    checking.value = false
+    checking.value = false;
   }
 }
 
 async function logout() {
   try {
-    await api('/logout', { method: 'POST' })
+    await api<null>('/logout', { method: 'POST' });
   } catch {
-    /* session may already be gone */
+    /* 会话可能已经失效 */
   }
-  authed.value = false
+  authed.value = false;
 }
 
 function onPasswordChanged() {
-  showPassword.value = false
-  authed.value = false
+  showPassword.value = false;
+  authed.value = false;
+}
+
+function onUnauthorized() {
+  authed.value = false;
+}
+
+function onHashChange() {
+  resolve(location.hash.replace('#', '') || 'overview');
 }
 
 onMounted(() => {
-  check()
-  window.addEventListener('llmgw-unauthorized', () => {
-    authed.value = false
-  })
-  window.addEventListener('hashchange', () => {
-    resolve(location.hash.replace('#', '') || 'overview')
-  })
-})
+  void check();
+  window.addEventListener('llmgw-unauthorized', onUnauthorized);
+  window.addEventListener('hashchange', onHashChange);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('llmgw-unauthorized', onUnauthorized);
+  window.removeEventListener('hashchange', onHashChange);
+});
 </script>
 
 <template>
@@ -80,22 +96,17 @@ onMounted(() => {
     <p class="muted">加载中…</p>
   </div>
 
-  <Login v-else-if="!authed" @done="check" />
+  <LoginView v-else-if="!authed" @done="check" />
 
   <div v-else class="layout">
     <header class="topbar">
       <div class="brand">
-        <span class="dot"></span>
+        <span class="dot" />
         <strong>llmgw</strong>
         <span class="muted">控制台</span>
       </div>
       <nav class="nav">
-        <button
-          v-for="t in tabs"
-          :key="t.id"
-          :class="{ active: tab === t.id }"
-          @click="go(t.id)"
-        >
+        <button v-for="t in tabs" :key="t.id" :class="{ active: tab === t.id }" @click="go(t.id)">
           {{ t.label }}
         </button>
       </nav>

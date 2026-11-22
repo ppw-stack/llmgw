@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# 只检查本次暂存的文件：ESLint 自动修复 + Prettier 格式化
+cd web && npx lint-staged

@@ -1,18 +1,18 @@
-<script setup>
-import { computed, ref } from 'vue'
+<script setup lang="ts">
+import { computed, ref } from 'vue';
 
-const origin = location.origin
-const openaiBase = computed(() => origin + '/openai/v1')
-const anthropicBase = computed(() => origin + '/anthropic')
+const origin = location.origin;
+const openaiBase = computed(() => origin + '/openai/v1');
+const anthropicBase = computed(() => origin + '/anthropic');
 
-const copied = ref('')
-async function copy(text, label) {
+const copied = ref('');
+async function copy(text: string, label: string) {
   try {
-    await navigator.clipboard.writeText(text)
-    copied.value = label
-    setTimeout(() => (copied.value = ''), 1500)
+    await navigator.clipboard.writeText(text);
+    copied.value = label;
+    setTimeout(() => (copied.value = ''), 1500);
   } catch {
-    /* clipboard unavailable */
+    /* 剪贴板不可用 */
   }
 }
 
@@ -22,7 +22,7 @@ const clients = [
   { name: 'Anthropic SDK', base: 'anthropic' },
   { name: 'Claude Code（ANTHROPIC_BASE_URL）', base: 'anthropic' },
   { name: 'Cline（Anthropic 模式）', base: 'anthropic' },
-]
+];
 </script>
 
 <template>
@@ -38,7 +38,9 @@ const clients = [
             {{ copied === 'openai' ? '已复制' : '复制' }}
           </button>
         </div>
-        <p class="muted">base_url 必须带 <code>/v1</code>，SDK 会在其后拼接 <code>/chat/completions</code>。</p>
+        <p class="muted">
+          base_url 必须带 <code>/v1</code>，SDK 会在其后拼接 <code>/chat/completions</code>。
+        </p>
       </div>
 
       <div class="card">
@@ -56,11 +58,18 @@ const clients = [
     <div class="card">
       <h3>客户端对应关系</h3>
       <table>
-        <thead><tr><th>客户端</th><th>使用入口</th></tr></thead>
+        <thead>
+          <tr>
+            <th>客户端</th>
+            <th>使用入口</th>
+          </tr>
+        </thead>
         <tbody>
           <tr v-for="c in clients" :key="c.name">
             <td>{{ c.name }}</td>
-            <td><code>{{ c.base === 'openai' ? openaiBase : anthropicBase }}</code></td>
+            <td>
+              <code>{{ c.base === 'openai' ? openaiBase : anthropicBase }}</code>
+            </td>
           </tr>
         </tbody>
       </table>

@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/pw/llmgw/internal/config"
 )
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
@@ -365,6 +368,140 @@ func TestInstanceRequiresModels(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "supported model") {
 		t.Fatalf("missing models = %d %s", resp.StatusCode, body)
+	}
+}
+
+// usePresetModelsServer points the discovery handler at a local stub.
+func usePresetModelsServer(t *testing.T, status int, payload string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Errorf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, payload)
+	}))
+	oldClient, oldEndpoint := presetModelsClient, presetModelsEndpoint
+	presetModelsClient = srv.Client()
+	presetModelsEndpoint = func(string) (string, string, error) {
+		return srv.URL + "/models", config.ProtocolOpenAI, nil
+	}
+	t.Cleanup(func() {
+		presetModelsClient = oldClient
+		presetModelsEndpoint = oldEndpoint
+		srv.Close()
+	})
+}
+
+func TestPresetModelsValidation(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+
+	req, err := http.NewRequest(http.MethodPost, gw.URL+"/admin/api/preset-models",
+		strings.NewReader(`{"preset":"opencode-go","api_key":"k"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated = %d", resp.StatusCode)
+	}
+
+	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/preset-models",
+		`{"preset":"nope","api_key":"k"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown preset = %d", resp.StatusCode)
+	}
+
+	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/preset-models",
+		`{"preset":"opencode-go"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing key = %d", resp.StatusCode)
+	}
+
+	resp = adminRequest(t, http.MethodGet, gw.URL+"/admin/api/preset-models", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET = %d", resp.StatusCode)
+	}
+}
+
+func TestPresetModelsQuery(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	usePresetModelsServer(t, http.StatusOK, `{"data":[
+		{"id":"glm-5.3","api":{"chat-completions":{}}},
+		{"id":"gpt-6-luna","api":{"responses":{}}}
+	]}`)
+
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/preset-models",
+		`{"preset":"opencode-go","api_key":"sk-test"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var view presetModelsView
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Models) != 1 || view.Models[0].ID != "glm-5.3" {
+		t.Fatalf("models = %+v", view.Models)
+	}
+	if len(view.Models[0].Protocols) != 1 || view.Models[0].Protocols[0] != config.ProtocolOpenAI {
+		t.Fatalf("protocols = %+v", view.Models[0].Protocols)
+	}
+	if len(view.Suggested) == 0 {
+		t.Fatal("missing suggested models")
+	}
+	if view.Warning != "" {
+		t.Fatalf("warning = %q", view.Warning)
+	}
+}
+
+func TestPresetModelsWarnsAboutPlanScope(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	usePresetModelsServer(t, http.StatusOK,
+		`{"data":[{"id":"doubao-seed-2-1-pro-260915","api_supported":{"chat/completions":true}}]}`)
+
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/preset-models",
+		`{"preset":"ark-coding-plan-cn","api_key":"sk-test"}`)
+	defer resp.Body.Close()
+	var view presetModelsView
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(view.Warning, "Coding Plan") {
+		t.Fatalf("warning = %q", view.Warning)
+	}
+}
+
+func TestPresetModelsFailureFallsBack(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	usePresetModelsServer(t, http.StatusUnauthorized, `{"error":"invalid key"}`)
+
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/preset-models",
+		`{"preset":"opencode-go","api_key":"sk-test"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var view presetModelsView
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Models) != 0 {
+		t.Fatalf("models = %+v", view.Models)
+	}
+	if len(view.Suggested) == 0 {
+		t.Fatal("missing fallback suggestions")
+	}
+	if !strings.Contains(view.Warning, "查询失败") {
+		t.Fatalf("warning = %q", view.Warning)
 	}
 }
 

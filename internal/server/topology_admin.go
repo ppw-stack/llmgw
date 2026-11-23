@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/discovery"
 	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
@@ -188,6 +190,107 @@ func (s *Server) adminInstancePresets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, preset.All())
+}
+
+// presetModelsTimeout bounds one model-list query made from the console.
+const presetModelsTimeout = 10 * time.Second
+
+var (
+	presetModelsClient = &http.Client{Timeout: presetModelsTimeout}
+	// presetModelsEndpoint is a variable so tests can point the handler at a
+	// local server without reaching a real provider.
+	presetModelsEndpoint = config.PresetModelsEndpoint
+)
+
+type presetModelsInput struct {
+	Preset string `json:"preset"`
+	APIKey string `json:"api_key"`
+}
+
+type presetModelsView struct {
+	Models    []discovery.Candidate `json:"models"`
+	Suggested []string              `json:"suggested"`
+	Warning   string                `json:"warning,omitempty"`
+}
+
+// adminPresetModels queries the model list of a built-in preset with the
+// submitted key. The key is only used for this request; nothing is stored.
+func (s *Server) adminPresetModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var in presetModelsInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	pr, ok := preset.Lookup(strings.TrimSpace(in.Preset))
+	if !ok {
+		writeAdminError(w, http.StatusBadRequest, "unknown preset")
+		return
+	}
+	apiKey := strings.TrimSpace(in.APIKey)
+	if apiKey == "" {
+		writeAdminError(w, http.StatusBadRequest, "an upstream API key is required")
+		return
+	}
+
+	suggested, err := config.PresetModels(pr.ID)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	endpoint, protocol, err := presetModelsEndpoint(pr.ID)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	view := presetModelsView{
+		Models:    []discovery.Candidate{},
+		Suggested: suggested,
+		Warning:   presetModelsWarning(pr),
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), presetModelsTimeout)
+	defer cancel()
+	models, err := discovery.Fetch(ctx, presetModelsClient, endpoint, protocol, apiKey)
+	if err != nil {
+		s.log.Warn("query preset model list", "preset", pr.ID, "err", err)
+		view.Warning = joinWarnings(view.Warning, "上游模型列表查询失败，已回退到预设建议")
+		writeJSON(w, http.StatusOK, view)
+		return
+	}
+	if len(models) == 0 {
+		view.Warning = joinWarnings(view.Warning, "上游未返回可用的聊天模型，已回退到预设建议")
+	} else {
+		view.Models = models
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// presetModelsWarning explains why an upstream model list is not authoritative
+// for the subscription the preset represents.
+func presetModelsWarning(pr preset.Preset) string {
+	switch pr.Family {
+	case "minimax-mplan":
+		return "上游模型列表可能包含已下线模型；请以实际调用为准"
+	case "ark":
+		return "上游返回的是账号可见模型，不保证在 Coding Plan 套餐内；请以实际调用为准"
+	default:
+		return ""
+	}
+}
+
+func joinWarnings(existing, extra string) string {
+	if existing == "" {
+		return extra
+	}
+	if extra == "" {
+		return existing
+	}
+	return existing + "；" + extra
 }
 
 // ---- instances ----

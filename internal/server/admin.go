@@ -55,6 +55,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminModels(w, r, id, strings.TrimPrefix(path, "/models/"))
 	case path == "/provider-presets", path == "/instance-presets":
 		s.adminInstancePresets(w, r)
+	case path == "/preset-models":
+		s.adminPresetModels(w, r)
 	case path == "/logs":
 		s.adminLogs(w, r)
 	case path == "/usage":

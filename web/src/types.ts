@@ -59,6 +59,22 @@ export interface InstancePayload {
   timeout_secs?: number;
 }
 
+/** POST /admin/api/preset-models 返回的一个上游模型候选 */
+export interface PresetModelCandidate {
+  id: string;
+  /** 上游声明的可用协议；为空表示上游没有提供该信息 */
+  protocols?: ('openai' | 'anthropic')[];
+}
+
+/** POST /admin/api/preset-models 的响应 */
+export interface PresetModelCandidates {
+  models: PresetModelCandidate[];
+  /** 预设自带的建议模型，查询失败时作为兜底 */
+  suggested: string[];
+  /** 上游列表的适用范围说明，或查询失败提示 */
+  warning?: string;
+}
+
 /** GET /admin/api/provider-presets 中的内置端点预设 */
 export interface InstancePreset {
   id: string;

@@ -147,6 +147,23 @@ func presetEndpoints(pr preset.Preset) []Endpoint {
 	return out
 }
 
+// PresetModelsEndpoint returns the model-list endpoint of a built-in preset.
+// The OpenAI-compatible base is preferred because every supported provider
+// exposes the list there; the Anthropic base is the fallback.
+func PresetModelsEndpoint(id string) (string, string, error) {
+	pr, ok := preset.Lookup(id)
+	if !ok {
+		return "", "", fmt.Errorf("unknown preset %q", id)
+	}
+	if pr.OpenAIBaseURL != "" {
+		return strings.TrimRight(pr.OpenAIBaseURL, "/") + "/models", ProtocolOpenAI, nil
+	}
+	if pr.AnthropicBaseURL != "" {
+		return strings.TrimRight(pr.AnthropicBaseURL, "/") + "/v1/models", ProtocolAnthropic, nil
+	}
+	return "", "", fmt.Errorf("preset %q has no endpoint to query models from", id)
+}
+
 // PresetModels returns the upstream model names a built-in preset declares.
 func PresetModels(id string) ([]string, error) {
 	pr, ok := preset.Lookup(id)

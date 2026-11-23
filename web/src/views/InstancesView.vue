@@ -7,6 +7,8 @@ import type {
   InstancePayload,
   InstancePreset,
   Model,
+  PresetModelCandidate,
+  PresetModelCandidates,
   QuotaReport,
   QuotaReports,
   QuotaWindow,
@@ -51,6 +53,10 @@ const loading = ref(true);
 const error = ref('');
 const editing = ref<InstanceForm | null>(null);
 const saving = ref(false);
+const candidates = ref<PresetModelCandidate[]>([]);
+const candidatesLoading = ref(false);
+const candidatesWarning = ref('');
+const candidatesError = ref('');
 
 /** 上游套餐额度：按接入点 id 索引。 */
 const quotaReports = ref<QuotaReport[]>([]);
@@ -186,6 +192,7 @@ function applyPreset(form: InstanceForm, id: string, overwriteModels: boolean) {
 function choosePreset(id: string) {
   const form = editing.value;
   if (!form) return;
+  resetCandidates();
   applyPreset(form, id, true);
 }
 
@@ -199,6 +206,7 @@ function setMode(mode: InstanceMode) {
   const form = editing.value;
   if (!form) return;
   form.mode = mode;
+  resetCandidates();
   if (mode === 'builtin') {
     applyPreset(form, form.preset || presets.value[0]?.id || '', true);
   }
@@ -219,6 +227,76 @@ function modelLines(text: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+/** 清空上一次查询留下的候选模型。 */
+function resetCandidates() {
+  candidates.value = [];
+  candidatesLoading.value = false;
+  candidatesWarning.value = '';
+  candidatesError.value = '';
+}
+
+/** 查询内置端点上游的模型列表，作为待选建议。 */
+async function queryCandidates() {
+  const form = editing.value;
+  if (form?.mode !== 'builtin' || form.id !== null) return;
+
+  const apiKey = form.apiKey.trim();
+  if (!apiKey) {
+    candidatesError.value = '请先填写上游 API Key';
+    return;
+  }
+
+  candidatesLoading.value = true;
+  candidatesWarning.value = '';
+  candidatesError.value = '';
+  try {
+    const result = await api<PresetModelCandidates>('/preset-models', {
+      method: 'POST',
+      body: JSON.stringify({ preset: form.preset, api_key: apiKey }),
+    });
+    candidates.value = result.models;
+    candidatesWarning.value = result.warning ?? '';
+    if (!result.models.length && !result.warning) {
+      candidatesError.value = '上游没有返回可用的聊天模型';
+    }
+  } catch (e) {
+    candidates.value = [];
+    candidatesError.value = errorMessage(e);
+  } finally {
+    candidatesLoading.value = false;
+  }
+}
+
+/** 判断一个候选是否已经写进模型文本框。 */
+function candidateAdded(id: string): boolean {
+  const form = editing.value;
+  if (!form) return false;
+  return modelLines(form.modelsText).includes(id);
+}
+
+/** 点击候选时在模型文本框里添加或移除该模型。 */
+function toggleCandidate(id: string) {
+  const form = editing.value;
+  if (!form) return;
+  const current = modelLines(form.modelsText);
+  const next = current.includes(id) ? current.filter((name) => name !== id) : [...current, id];
+  form.modelsText = next.join('\n');
+}
+
+/** 把当前查询结果里尚未添加的模型一次性写入文本框。 */
+function addAllCandidates() {
+  const form = editing.value;
+  if (!form) return;
+  const next = modelLines(form.modelsText);
+  const seen = new Set(next);
+  for (const candidate of candidates.value) {
+    if (seen.has(candidate.id)) continue;
+    seen.add(candidate.id);
+    next.push(candidate.id);
+  }
+  form.modelsText = next.join('\n');
 }
 
 /** 解析表单里的非负整数，非法时返回 null。 */
@@ -292,11 +370,13 @@ async function load() {
 
 function openCreate() {
   error.value = '';
+  resetCandidates();
   editing.value = newForm();
 }
 
 function openEdit(inst: Instance) {
   error.value = '';
+  resetCandidates();
   editing.value = {
     id: inst.id,
     mode: inst.source === 'builtin' ? 'builtin' : 'custom',
@@ -388,6 +468,7 @@ async function save() {
       });
     }
     editing.value = null;
+    resetCandidates();
     await load();
   } catch (e) {
     error.value = errorMessage(e);
@@ -688,6 +769,50 @@ onUnmounted(() => {
             <p class="muted small">
               模型页把模型挂到这个接入点前，会校验模型的上游名是否在此列表内。
             </p>
+          </div>
+
+          <div v-if="editing.mode === 'builtin' && editing.id === null" class="field span-2">
+            <span class="field-caption">上游可用模型</span>
+            <div class="row">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="candidatesLoading || !editing.apiKey.trim()"
+                @click="queryCandidates"
+              >
+                {{ candidatesLoading ? '查询中…' : '查询上游可用模型' }}
+              </button>
+              <button
+                v-if="candidates.length"
+                type="button"
+                class="ghost"
+                @click="addAllCandidates"
+              >
+                全部添加
+              </button>
+              <span v-if="!editing.apiKey.trim()" class="muted small">请先填写上方 API Key</span>
+            </div>
+            <p v-if="candidatesWarning" class="muted small">{{ candidatesWarning }}</p>
+            <p v-if="candidatesError" class="error">{{ candidatesError }}</p>
+            <div v-if="candidates.length" class="candidate-list">
+              <button
+                v-for="candidate in candidates"
+                :key="candidate.id"
+                type="button"
+                class="candidate"
+                :class="{ added: candidateAdded(candidate.id) }"
+                @click="toggleCandidate(candidate.id)"
+              >
+                <span class="candidate-id">{{ candidate.id }}</span>
+                <span
+                  v-for="protocol in candidate.protocols ?? []"
+                  :key="protocol"
+                  class="badge"
+                  :class="protocol"
+                  >{{ protocol }}</span
+                >
+              </button>
+            </div>
           </div>
 
           <div class="field">

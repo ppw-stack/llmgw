@@ -5,12 +5,27 @@ Serves both protocols on the same port:
   POST /chat/completions   OpenAI
   POST /v1/messages        Anthropic
 GET /health returns 200.
+
+The gateway sends the instance's api_key as the Authorization bearer (or
+x-api-key on the Anthropic protocol), so the key doubles as a behaviour
+switch and the test config can mirror the production topology:
+
+  mock-upstream-key      normal deterministic response
+  mock-quota             always 402, standing in for an exhausted plan window
+  mock-session-required  demands x-opencode-session, standing in for
+                         OpenCode Go's 400 MissingSessionID
+
+Anything else behaves like a normal key.
 """
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OPENAI_TEXT = "hello from mock"
 ANTHROPIC_TEXT = "hello from mock (anthropic)"
+
+KEY_NORMAL = "mock-upstream-key"
+KEY_QUOTA = "mock-quota"
+KEY_SESSION = "mock-session-required"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -38,12 +53,52 @@ class Handler(BaseHTTPRequestHandler):
         stream = bool(req.get("stream"))
         model = req.get("model", "unknown")
 
+        key = self.api_key()
+        # Print the session header so a local run can confirm the gateway
+        # derived (or passed through) a stable value.
+        session = (self.headers.get("x-opencode-session") or "").strip()
+        print(
+            f"mock: model={model} key={key} session={session[:16] or '(none)'}",
+            flush=True,
+        )
+        if key == KEY_QUOTA:
+            # MiniMax reports an exhausted plan window as 402 Payment Required.
+            return self.json_response(
+                {
+                    "error": {
+                        "type": "insufficient_balance_error",
+                        "message": "当前已达到 Token Plan 用量上限",
+                        "http_code": "402",
+                    }
+                },
+                status=402,
+            )
+        if key == KEY_SESSION and not self.headers.get("x-opencode-session"):
+            # OpenCode Go refuses sessionless requests before they reach a model.
+            return self.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "MissingSessionID",
+                        "message": "Request is missing x-opencode-session",
+                    },
+                },
+                status=400,
+            )
+
         if self.path.endswith("/v1/messages"):
             self.anthropic(model, stream)
         elif self.path.endswith("/chat/completions"):
             self.openai(model, stream)
         else:
             self.send_error(404)
+
+    def api_key(self):
+        """Return the key the gateway sent, whichever header carried it."""
+        auth = (self.headers.get("authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return (self.headers.get("x-api-key") or "").strip()
 
     # ---- OpenAI ----
 
@@ -120,9 +175,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- helpers ----
 
-    def json_response(self, payload):
+    def json_response(self, payload, status=200):
         body = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

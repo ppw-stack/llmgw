@@ -272,6 +272,50 @@ func TestInstanceTimeoutAndBreakerParamsReachTheTarget(t *testing.T) {
 	}
 }
 
+func TestCandidatesSendTheirOwnUpstreamName(t *testing.T) {
+	cfg := &config.Config{
+		Instances: []config.Instance{
+			{
+				Name:      "direct",
+				APIKey:    "k1",
+				Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://direct.example/v1"}},
+				Models:    []string{"glm-5.3-flash"},
+			},
+			{
+				Name:      "workbuddy",
+				APIKey:    "k2",
+				Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://wb.example/v1"}},
+				Models:    []string{"glm-5.3-flash=workbuddy/glm-5.3-flash"},
+			},
+		},
+		Models: []config.Model{{
+			Name:     "glm-5.3-flash",
+			Upstream: "glm-5.3-flash",
+			Instances: []config.ModelInstance{
+				{Name: "direct"},
+				{Name: "workbuddy", Priority: 1},
+			},
+		}},
+	}
+	r := New()
+	if err := r.Reload(cfg); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := r.Resolve(config.ProtocolOpenAI, "glm-5.3-flash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	if targets[0].UpstreamModel != "glm-5.3-flash" {
+		t.Fatalf("direct upstream = %q", targets[0].UpstreamModel)
+	}
+	if targets[1].UpstreamModel != "workbuddy/glm-5.3-flash" {
+		t.Fatalf("workbuddy upstream = %q", targets[1].UpstreamModel)
+	}
+}
+
 func TestModelRejectsAnInstanceThatDoesNotDeclareTheUpstream(t *testing.T) {
 	cfg := testConfig()
 	cfg.Instances[1].Models = []string{"something-else"}

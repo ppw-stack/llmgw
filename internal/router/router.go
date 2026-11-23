@@ -40,6 +40,16 @@ type Target struct {
 	AllowPrivate bool
 }
 
+// candidateUpstream picks the name sent to one upstream: the instance's own
+// mapping when it declared one ("name=upstream"), otherwise the model's
+// upstream name.
+func candidateUpstream(mapped, fallback string) string {
+	if mapped != "" {
+		return mapped
+	}
+	return fallback
+}
+
 // Snapshot is an immutable routing table swapped atomically on reload.
 type Snapshot struct {
 	Version          uint64
@@ -118,7 +128,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					Protocol:      ep.Protocol,
 					BaseURL:       ep.BaseURL,
 					Version:       version,
-					UpstreamModel: m.Upstream,
+					UpstreamModel: candidateUpstream(cand.Upstream, m.Upstream),
 					Key:           inst.APIKey,
 					Timeout:       timeout,
 					MaxFails:      inst.MaxFails,

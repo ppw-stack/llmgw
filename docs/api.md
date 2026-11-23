@@ -218,7 +218,15 @@ GET /admin/api/instances
 }]
 ```
 
-上游 Key 只返回末四位掩码，永不返回明文。`timeout_secs` 为 `0` 表示使用全局 `upstream_timeout`。`models` 是该接入点**声明支持的上游模型名**（必填），不是"当前被哪些模型引用"——后者由客户端从 `GET /admin/api/models` 自行 join。
+上游 Key 只返回末四位掩码，永不返回明文。`timeout_secs` 为 `0` 表示使用全局 `upstream_timeout`。`models` 是该接入点**声明支持的模型**（必填），不是"当前被哪些模型引用"——后者由客户端从 `GET /admin/api/models` 自行 join。
+
+`models` 的每一项是 `引用名` 或 `引用名=上游名`：
+
+- 等号左边是模型页 `upstream` 引用的名字（逻辑名）；
+- 等号右边是真正发给上游的模型名；
+- 不写等号时两者相同。中转类上游给模型加前缀时只需在这一侧声明，
+  例如 `"glm-5.3-flash=workbuddy/glm-5.3-flash"`，模型层仍统一引用 `glm-5.3-flash`。
+  同一引用名声明两次且上游名不同会返回 `400`。
 
 #### 创建
 
@@ -354,12 +362,15 @@ PUT  /admin/api/models/1   → 200 <model view>
 DELETE /admin/api/models/1 → 204
 ```
 
-- `upstream` 省略时与 `name` 相同，这就是别名机制：对外叫 `claude-sonnet-4-5`，上游仍是 `glm-4.6`。
+- `upstream` 省略时与 `name` 相同。它是模型在接入点侧的引用名：接入点未做映射时，
+  它就是真正发给上游的名字；这就是别名机制：对外叫 `claude-sonnet-4-5`，上游仍是 `glm-4.6`。
 - `instances` 至少一项，且引用的接入点必须存在，否则 `400`。
 - 同一个模型不能重复引用同一个接入点。
 - 模型名重复返回 `409`。
 - `strategy` 目前只接受 `failover`。
-- 模型的 `upstream` 必须出现在**每个**候选接入点的 `models` 声明里，否则返回 `400`（报出是哪个接入点缺哪一项）。
+- 模型的 `upstream` 必须出现在**每个**候选接入点的 `models` 声明里（等号左边的引用名），
+  否则返回 `400`（报出是哪个接入点缺哪一项）。接入点可以把该引用名映射成不同的真实上游名，
+  见上面对接入点 `models` 的说明。
 
 #### 时间窗口
 

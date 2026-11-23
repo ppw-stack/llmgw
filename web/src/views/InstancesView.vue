@@ -238,6 +238,25 @@ function modelLines(text: string): string[] {
     .filter(Boolean);
 }
 
+/** 把「引用名=上游名」的声明展示成更易读的形式。 */
+function modelTag(entry: string): string {
+  const i = entry.indexOf('=');
+  if (i < 0) return entry;
+  return `${entry.slice(0, i).trim()} → ${entry.slice(i + 1).trim()}`;
+}
+
+/** 校验模型声明的「引用名=上游名」格式，返回第一处错误；没有错误返回空串。 */
+function modelDeclError(lines: string[]): string {
+  for (const line of lines) {
+    const i = line.indexOf('=');
+    if (i < 0) continue;
+    if (!line.slice(0, i).trim() || !line.slice(i + 1).trim()) {
+      return `模型声明「${line}」格式不对：应写成 引用名=上游名`;
+    }
+  }
+  return '';
+}
+
 /** 清空上一次查询留下的候选模型。 */
 function resetCandidates() {
   candidates.value = [];
@@ -425,7 +444,12 @@ async function save() {
 
   const supported = modelLines(f.modelsText);
   if (!supported.length) {
-    error.value = '请填写该接入点支持的上游模型名（每行一个）';
+    error.value = '请填写该接入点支持的模型（每行一个）';
+    return;
+  }
+  const declError = modelDeclError(supported);
+  if (declError) {
+    error.value = declError;
     return;
   }
 
@@ -616,7 +640,9 @@ onUnmounted(() => {
 
       <div class="models">
         <span v-if="!inst.models.length" class="muted small">未声明支持的模型</span>
-        <span v-for="model in inst.models" :key="model" class="tag">{{ model }}</span>
+        <span v-for="model in inst.models" :key="model" class="tag" :title="model">
+          {{ modelTag(model) }}
+        </span>
       </div>
 
       <div v-if="quotaWindows(inst).length || quotaMessage(inst)" class="quota">
@@ -809,15 +835,17 @@ onUnmounted(() => {
           </div>
 
           <div class="field span-2">
-            <label for="instance-models">支持的模型（每行一个上游模型名，必填）</label>
+            <label for="instance-models">支持的模型（每行一个，必填）</label>
             <textarea
               id="instance-models"
               v-model="editing.modelsText"
               rows="3"
-              placeholder="MiniMax-M3.1-Flash"
+              placeholder="MiniMax-M3.1-Flash&#10;glm-5.3-flash=workbuddy/glm-5.3-flash"
             ></textarea>
             <p class="muted small">
-              模型页把模型挂到这个接入点前，会校验模型的上游名是否在此列表内。
+              每行写模型在模型页使用的引用名。若这个接入点对它的叫法不同，写成
+              <code>引用名=上游名</code>，网关会在转发时改写成后者。
+              模型页把模型挂到这个接入点前，会校验引用名是否在此列表内。
             </p>
           </div>
 

@@ -130,6 +130,9 @@ type EffectiveModel struct {
 // EffectiveModelInstance is one candidate of a model.
 type EffectiveModelInstance struct {
 	Instance string
+	// Upstream is the name this candidate's upstream receives. It is the
+	// right-hand side of the instance's "name=upstream" declaration.
+	Upstream string
 	Priority int
 	Weight   int
 	// Windows are the compiled time windows of the candidate.
@@ -289,27 +292,55 @@ func NormalizeInstance(in *Instance) error {
 	return nil
 }
 
-// normalizeModelNames trims, de-duplicates and sorts the upstream model names
-// one instance declares. An instance must declare at least one, otherwise it
+// normalizeModelNames trims, de-duplicates and sorts the model names one
+// instance declares. An entry is "name" or "name=upstream": the left side is
+// the name the model layer refers to, the right side is the name this upstream
+// actually receives. An instance must declare at least one model, otherwise it
 // can never serve anything.
 func normalizeModelNames(owner string, raw []string) ([]string, error) {
-	seen := make(map[string]bool, len(raw))
+	seen := make(map[string]string, len(raw))
 	out := make([]string, 0, len(raw))
 	for _, item := range raw {
-		name := strings.TrimSpace(item)
-		if name == "" {
+		line := strings.TrimSpace(item)
+		if line == "" {
 			return nil, fmt.Errorf("instance %q: models must not contain an empty name", owner)
 		}
-		if seen[name] {
+		name, upstream, err := ParseModelEntry(line)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: %w", owner, err)
+		}
+		if prev, dup := seen[name]; dup {
+			if prev != upstream {
+				return nil, fmt.Errorf(
+					"instance %q: model %q is declared twice with different upstream names", owner, name)
+			}
 			continue
 		}
-		seen[name] = true
-		out = append(out, name)
+		seen[name] = upstream
+		if name == upstream {
+			out = append(out, name)
+		} else {
+			out = append(out, name+"="+upstream)
+		}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("instance %q: at least one supported model is required in models", owner)
 	}
 	sort.Strings(out)
+	return out, nil
+}
+
+// modelNames parses one instance's already-normalized models list into the
+// mapping the model layer uses: the declared name to the name sent upstream.
+func modelNames(owner string, raw []string) (map[string]string, error) {
+	out := make(map[string]string, len(raw))
+	for _, item := range raw {
+		name, upstream, err := ParseModelEntry(item)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: %w", owner, err)
+		}
+		out[name] = upstream
+	}
 	return out, nil
 }
 
@@ -369,7 +400,9 @@ func NormalizeModel(in *Model) error {
 func (c *Config) Effective() (Effective, error) {
 	out := Effective{}
 	known := make(map[string]bool, len(c.Instances))
-	supports := make(map[string]map[string]bool, len(c.Instances))
+	// supports maps an instance to the models it declares: declared name to
+	// the name the upstream receives.
+	supports := make(map[string]map[string]string, len(c.Instances))
 	for i := range c.Instances {
 		inst := &c.Instances[i]
 		if inst.Name == "" {
@@ -397,9 +430,9 @@ func (c *Config) Effective() (Effective, error) {
 		if inst.TimeoutSecs > 0 {
 			eff.Timeout = time.Duration(inst.TimeoutSecs) * time.Second
 		}
-		names := make(map[string]bool, len(inst.Models))
-		for _, name := range inst.Models {
-			names[name] = true
+		names, err := modelNames(inst.Name, inst.Models)
+		if err != nil {
+			return Effective{}, err
 		}
 		supports[inst.Name] = names
 		endpoints := inst.Endpoints
@@ -447,9 +480,11 @@ func (c *Config) Effective() (Effective, error) {
 			if !known[mi.Name] {
 				return Effective{}, fmt.Errorf("model %q: instance %q does not exist", m.Name, mi.Name)
 			}
-			// Every candidate must declare the upstream name: putting an
-			// instance in the chain means it is expected to serve it.
-			if !supports[mi.Name][upstream] {
+			// Every candidate must declare the model: putting an instance in
+			// the chain means it is expected to serve it. The declared name
+			// may map to a different upstream name on that instance.
+			wireName, ok := supports[mi.Name][upstream]
+			if !ok {
 				return Effective{}, fmt.Errorf(
 					"model %q: instance %q does not declare upstream model %q in its models list",
 					m.Name, mi.Name, upstream)
@@ -465,6 +500,7 @@ func (c *Config) Effective() (Effective, error) {
 			}
 			eff.Instances = append(eff.Instances, EffectiveModelInstance{
 				Instance: mi.Name,
+				Upstream: wireName,
 				Priority: mi.Priority,
 				Weight:   weight,
 				Windows:  windows,

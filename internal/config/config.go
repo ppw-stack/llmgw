@@ -181,13 +181,9 @@ func ParseModels(items []string) (Models, error) {
 		if line == "" {
 			continue
 		}
-		publicName, upstream := line, line
-		if i := strings.Index(line, "="); i >= 0 {
-			publicName = strings.TrimSpace(line[:i])
-			upstream = strings.TrimSpace(line[i+1:])
-		}
-		if publicName == "" || upstream == "" {
-			return nil, fmt.Errorf("model %q: both the public name and upstream name are required", line)
+		publicName, upstream, err := ParseModelEntry(line)
+		if err != nil {
+			return nil, err
 		}
 		if prev, dup := out[publicName]; dup && prev != upstream {
 			return nil, fmt.Errorf("model %q is declared twice with different upstream names", publicName)
@@ -198,6 +194,25 @@ func ParseModels(items []string) (Models, error) {
 		return nil, fmt.Errorf("models must not be empty")
 	}
 	return out, nil
+}
+
+// ParseModelEntry parses one "name" / "name=upstream" model line. The left
+// side is the name the rest of the topology refers to; the right side is the
+// name the upstream actually receives. Without "=" both are the same.
+func ParseModelEntry(line string) (name, upstream string, err error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", "", fmt.Errorf("model name must not be empty")
+	}
+	name, upstream = line, line
+	if i := strings.Index(line, "="); i >= 0 {
+		name = strings.TrimSpace(line[:i])
+		upstream = strings.TrimSpace(line[i+1:])
+	}
+	if name == "" || upstream == "" {
+		return "", "", fmt.Errorf("model %q: both the name and upstream name are required", line)
+	}
+	return name, upstream, nil
 }
 
 // List renders models as sorted "name" / "name=upstream" lines.

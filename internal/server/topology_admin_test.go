@@ -264,6 +264,47 @@ func TestModelCRUD(t *testing.T) {
 	}
 }
 
+func TestInstanceModelUpstreamMapping(t *testing.T) {
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	apiKey := testAPIKey("TEST_MAPPING_API_KEY", "5678")
+
+	body := `{"name":"workbuddy","api_key":"` + apiKey + `",
+	  "allow_private_upstream":true,
+	  "models":["gpt-upstream=workbuddy/gpt-upstream"],
+	  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v1"}]}`
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances", body)
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create instance = %d %s", resp.StatusCode, data)
+	}
+	created := decodeInstance(t, resp)
+	if len(created.Models) != 1 || created.Models[0] != "gpt-upstream=workbuddy/gpt-upstream" {
+		t.Fatalf("models = %v", created.Models)
+	}
+
+	// The model layer refers to the declared name, not the wire name.
+	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
+		`{"name":"mapped-model","upstream":"gpt-upstream",
+		  "instances":[{"instance":"workbuddy"}]}`)
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create model = %d %s", resp.StatusCode, data)
+	}
+	resp.Body.Close()
+
+	// Pointing the model at the wire name is a declaration error.
+	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
+		`{"name":"wrong-upstream","upstream":"workbuddy/gpt-upstream",
+		  "instances":[{"instance":"workbuddy"}]}`)
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(data), "does not declare upstream model") {
+		t.Fatalf("wire name accepted as a declaration: %d %s", resp.StatusCode, data)
+	}
+}
+
 func TestDuplicateModelNameIsRejected(t *testing.T) {
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",

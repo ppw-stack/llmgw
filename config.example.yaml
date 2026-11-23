@@ -60,7 +60,9 @@ instances:
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
-    # 必填：这个账号能服务哪些上游模型名。模型引用它时必须在此列表内。
+    # 必填：这个账号能服务哪些模型。每项是 "引用名" 或 "引用名=上游名"：
+    # 左边是模型层 models[].upstream 引用的名字，右边是真正发给上游的名字。
+    # 同一账号对某个模型的叫法不同时用它映射，例如 workbuddy/glm-5.3-flash。
     models: [MiniMax-M3.1-Flash]
     # 熔断：连续失败 max_fails 次后跳过该实例 cooldown_secs 秒
     max_fails: 3
@@ -115,6 +117,15 @@ instances:
         base_url: https://open.bigmodel.cn/api/anthropic
     models: [glm-4.6]
 
+  # 中转/代理类上游常给模型加前缀：模型层统一用 glm-5.3-flash 引用，
+  # 这个接入点声明自己的真实名字，转发时由网关改写成 workbuddy/glm-5.3-flash。
+  #   - name: workbuddy
+  #     api_key: "${WORKBUDDY_KEY}"
+  #     endpoints:
+  #       - protocol: openai
+  #         base_url: http://magpie:3425/v1
+  #     models: [glm-5.3-flash=workbuddy/glm-5.3-flash]
+
   # 支持错峰计费的厂商：谷时价格更低，用时间窗口让它在谷时插队。
   - name: deepseek
     api_key: "${DEEPSEEK_KEY}"
@@ -132,6 +143,8 @@ instances:
     models: [deepseek-chat]
 
 # 模型（逻辑层）：对外模型名 + 候选实例链 + 分流策略。
+# upstream 是模型在接入点侧的引用名：接入点没有映射时它就是真正发给上游的名字；
+# 接入点写了 "引用名=上游名" 时，由该接入点决定真实上游名。
 models:
   # 单实例
   - name: MiniMax-M3.1-Flash

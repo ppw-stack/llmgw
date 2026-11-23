@@ -376,6 +376,73 @@ instances:
 	}
 }
 
+func TestInstanceModelsMapToUpstreamNames(t *testing.T) {
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: workbuddy
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://example.com/v1"}
+    models: [glm-5.3-flash=workbuddy/glm-5.3-flash]
+  - name: direct
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://example.com/v2"}
+    models: [glm-5.3-flash]
+models:
+  - name: glm-5.3-flash
+    upstream: glm-5.3-flash
+    instances:
+      - {name: direct}
+      - {name: workbuddy, priority: 1}
+`
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Instances[0].Models
+	if len(got) != 1 || got[0] != "glm-5.3-flash=workbuddy/glm-5.3-flash" {
+		t.Fatalf("models = %v", got)
+	}
+
+	eff, err := cfg.Effective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mapped string
+	for _, cand := range eff.Models[0].Instances {
+		if cand.Instance == "workbuddy" {
+			mapped = cand.Upstream
+		}
+	}
+	if mapped != "workbuddy/glm-5.3-flash" {
+		t.Fatalf("workbuddy upstream = %q", mapped)
+	}
+}
+
+func TestInstanceModelsRejectConflictingMapping(t *testing.T) {
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: workbuddy
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://example.com/v1"}
+    models: [glm-5.3-flash=workbuddy/glm-5.3-flash, glm-5.3-flash=other]
+`
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "different upstream names") {
+		t.Fatalf("expected mapping conflict error, got %v", err)
+	}
+}
+
 func TestModelUpstreamMustBeDeclaredByEveryCandidate(t *testing.T) {
 	body := strings.Replace(topologyConfig, "    models: [MiniMax-M3.1-Flash]\nmodels:",
 		"    models: [other-model]\nmodels:", 1)

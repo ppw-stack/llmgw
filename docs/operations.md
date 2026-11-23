@@ -60,6 +60,8 @@ instances:
         base_url: https://open.bigmodel.cn/api/coding/paas/v4
       - protocol: anthropic
         base_url: https://open.bigmodel.cn/api/anthropic
+    # 每项可写 "引用名" 或 "引用名=上游名"；中转上游给模型加前缀时用后者，
+    # 模型层仍用引用名挂载，转发时改写成真实上游名。
     models: [glm-4.6]
 
   - name: deepseek

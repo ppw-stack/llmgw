@@ -44,9 +44,18 @@ const currentUpstream = computed<string>(() => {
   return form.upstream.trim() || form.name.trim();
 });
 
-/** 接入点是否声明支持该上游模型名。未填上游名时不限制。 */
+/**
+ * 接入点声明的一行模型：等号左边是模型层引用的逻辑名，右边是真正发给上游的名字。
+ * 没有等号时两者相同。
+ */
+function declaredModelName(entry: string): string {
+  const i = entry.indexOf('=');
+  return (i >= 0 ? entry.slice(0, i) : entry).trim();
+}
+
+/** 接入点是否声明支持该逻辑模型名。未填上游名时不限制。 */
 function supports(inst: Instance, upstream: string): boolean {
-  return upstream === '' || inst.models.includes(upstream);
+  return upstream === '' || inst.models.some((entry) => declaredModelName(entry) === upstream);
 }
 
 /**
@@ -57,7 +66,7 @@ const missingSupport = computed<boolean>(() => {
   if (!instances.value.length) return true;
   const upstream = currentUpstream.value;
   if (!upstream) return false;
-  return !instances.value.some((inst) => inst.models.includes(upstream));
+  return !instances.value.some((inst) => supports(inst, upstream));
 });
 
 function instanceByName(name: string): Instance | null {
@@ -75,13 +84,33 @@ function candidateUnsupported(name: string): boolean {
 function modelCandidateUnsupported(m: Model, instanceName: string): boolean {
   const inst = instanceByName(instanceName);
   if (!inst) return true;
-  return !inst.models.includes(m.upstream);
+  return !supports(inst, m.upstream);
+}
+
+/** 把「逻辑名=上游名」的声明展示成更易读的形式。 */
+function modelEntryLabel(entry: string): string {
+  const i = entry.indexOf('=');
+  if (i < 0) return entry;
+  return `${entry.slice(0, i).trim()} → ${entry.slice(i + 1).trim()}`;
+}
+
+/** 该候选实际发给上游的模型名：接入点映射优先，否则就是模型的上游名。 */
+function candidateWireName(instanceName: string, upstream: string): string {
+  const inst = instanceByName(instanceName);
+  if (!inst) return upstream;
+  for (const entry of inst.models) {
+    const i = entry.indexOf('=');
+    if (i >= 0 && entry.slice(0, i).trim() === upstream) {
+      return entry.slice(i + 1).trim();
+    }
+  }
+  return upstream;
 }
 
 /** 下拉框里的接入点标签，顺带展示它声明的模型。 */
 function optionLabel(inst: Instance): string {
   if (!inst.models.length) return `${inst.name}（未声明模型）`;
-  return `${inst.name}（支持：${inst.models.join('、')}）`;
+  return `${inst.name}（支持：${inst.models.map(modelEntryLabel).join('、')}）`;
 }
 
 /** 按优先级排序的候选链，排在最前面的是主接入点。 */
@@ -390,6 +419,9 @@ onUnmounted(() => {
           </span>
           <code class="base">{{ c.instance }}</code>
           <span class="muted small">优先级 {{ c.priority }} · 权重 {{ c.weight }}</span>
+          <span v-if="candidateWireName(c.instance, m.upstream) !== m.upstream" class="muted small">
+            → 上游名 {{ candidateWireName(c.instance, m.upstream) }}
+          </span>
           <span v-if="windowSummary(c)" class="muted small"> 时段：{{ windowSummary(c) }} </span>
           <span v-if="modelCandidateUnsupported(m, c.instance)" class="badge off">
             未声明支持 {{ m.upstream }}
@@ -418,7 +450,9 @@ onUnmounted(() => {
               placeholder="留空则与对外模型名相同"
             />
             <p class="muted small">
-              这里填的是真正发给上游的模型名，候选接入点的「支持的模型」必须包含它。
+              这是模型在接入点侧的引用名。候选接入点必须声明它（写在等号左边）；
+              若某个接入点的真实上游名不同，在该接入点写「引用名=上游名」即可， 例如
+              <code>glm-5.3-flash=workbuddy/glm-5.3-flash</code>。
             </p>
           </div>
 

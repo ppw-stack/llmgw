@@ -41,14 +41,34 @@ for _, m := range models {
                 Instance: inst.Name,
                 BaseURL:  ep.BaseURL,
                 Key:      inst.APIKey,
-                UpstreamModel: m.Upstream,
+                UpstreamModel: cand.Upstream, // 实例映射后的真实上游名
             })
         }
     }
 }
 ```
 
-**硬约束**：模型名全局唯一；模型的 `upstream` 必须出现在每个候选实例的 `models` 声明里。任一不满足都拒绝加载，报出具体位置。这样路由结果永远可预测。
+**硬约束**：模型名全局唯一；模型的 `upstream` 必须出现在每个候选实例的 `models` 声明里（等号左边的引用名）。任一不满足都拒绝加载，报出具体位置。这样路由结果永远可预测。
+
+实例的 `models` 每项写作 `引用名` 或 `引用名=上游名`。等号右边才是真正发往该上游的模型名，
+所以同一个模型可以挂到叫法不同的接入点上：
+
+```yaml
+instances:
+  - name: direct
+    models: [glm-5.3-flash]
+  - name: workbuddy
+    models: [glm-5.3-flash=workbuddy/glm-5.3-flash]
+models:
+  - name: glm-5.3-flash
+    upstream: glm-5.3-flash
+    instances:
+      - name: direct
+      - name: workbuddy
+        priority: 1
+```
+
+`direct` 收到 `glm-5.3-flash`，`workbuddy` 收到 `workbuddy/glm-5.3-flash`，候选链与故障转移不受影响。
 
 候选链的顺序由 `priority` 决定（数字越小越优先），同优先级按配置顺序。
 

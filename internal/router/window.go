@@ -19,10 +19,11 @@ type candidateState struct {
 	Hit bool
 }
 
-// evaluate applies the time windows of one candidate to the given minute of
-// the day. A window that is active may lower the priority; a window marked
+// evaluate applies the time windows of one candidate to the given local
+// moment. A window that is active may lower the priority; a window marked
 // only restricts the candidate to it.
-func evaluate(target Target, minute int) candidateState {
+func evaluate(target Target, local time.Time) candidateState {
+	minute := local.Hour()*60 + local.Minute()
 	state := candidateState{Priority: target.Priority, Active: true}
 	restricted := false
 	inside := false
@@ -80,14 +81,13 @@ func orderCandidates(candidates []Target, loc *time.Location, now time.Time) []T
 		loc = time.UTC
 	}
 	local := now.In(loc)
-	minute := local.Hour()*60 + local.Minute()
 	type ranked struct {
 		target Target
 		state  candidateState
 	}
 	rankedList := make([]ranked, 0, len(candidates))
 	for _, target := range candidates {
-		state := evaluate(target, minute)
+		state := evaluate(target, local)
 		if !state.Active {
 			continue
 		}
@@ -134,10 +134,9 @@ func (s *Snapshot) PreviewModel(model string, now time.Time) []Preview {
 		loc = time.UTC
 	}
 	local := now.In(loc)
-	minute := local.Hour()*60 + local.Minute()
 	out := make([]Preview, 0, len(targets))
 	for _, target := range targets {
-		state := evaluate(target, minute)
+		state := evaluate(target, local)
 		item := Preview{
 			Instance:     target.Instance,
 			BasePriority: target.Priority,

@@ -191,6 +191,11 @@ GET /metrics    Prometheus
 - **同时备份 `master.key`**（或配置里的 `server.master_key`）。丢失它，数据库中已加密的上游 Key 将无法恢复。
 - 升级：替换二进制后重启。配置为热加载，但二进制升级需要重启。
 - 回滚：保留上一个二进制与 `config.yaml`。
+- **自动迁移**：新版本打开旧库时会执行 `ALTER TABLE ... ADD COLUMN`（如 `model_instances.windows_json`，`TEXT NOT NULL DEFAULT '[]'`）。
+  SQLite 加列只改表结构、不重写行数据，持锁时间与表规模无关（毫秒级），大库也不会长时间阻塞写请求；但升级前仍建议先 `.backup` 留一份快照。
+  迁移失败时网关启动即报错退出，不会带病运行。
+- **迁移后的回退路径**：旧二进制不认识新列，但 SQLite 会忽略未使用的列，旧版本可以直接打开迁移后的库继续工作（只是不再使用窗口数据）。
+  要彻底还原，用升级前的快照覆盖 `data/llmgw.db`（并保留 `master.key`），再换回旧二进制即可。
 
 ## 7. 常见故障
 

@@ -1,11 +1,23 @@
 package router
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
 )
+
+// windowTestKey returns the upstream key used by the window tests. Set
+// TEST_WINDOW_API_KEY to inject a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func windowTestKey(suffix string) string {
+	if v := strings.TrimSpace(os.Getenv("TEST_WINDOW_API_KEY")); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-" + suffix
+}
 
 // windowConfig builds a topology with one model and two candidates. The first
 // candidate carries the given time windows, the second one is the plain
@@ -21,13 +33,13 @@ func windowConfig(t *testing.T, tz string, basePriority int, windows []config.Ti
 		Instances: []config.Instance{
 			{
 				Name:      "cheap",
-				APIKey:    "k1",
+				APIKey:    windowTestKey("cheap"),
 				Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://cheap/v1"}},
 				Models:    []string{"m"},
 			},
 			{
 				Name:      "plain",
-				APIKey:    "k2",
+				APIKey:    windowTestKey("plain"),
 				Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://plain/v1"}},
 				Models:    []string{"m"},
 			},
@@ -56,6 +68,7 @@ func instanceNames(targets []Target) []string {
 }
 
 func TestResolveAtAppliesWindowPriority(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "UTC", 10, []config.TimeWindow{
 		{Start: "00:00", End: "08:00", Priority: intPtr(0)},
@@ -82,6 +95,7 @@ func TestResolveAtAppliesWindowPriority(t *testing.T) {
 }
 
 func TestResolveAtUsesTheScheduleTimezone(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "Asia/Shanghai", 10, []config.TimeWindow{
 		{Start: "00:00", End: "08:00", Priority: intPtr(0)},
@@ -112,6 +126,7 @@ func TestResolveAtUsesTheScheduleTimezone(t *testing.T) {
 }
 
 func TestResolveAtDropsCandidatesOutsideTheirOnlyWindow(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "UTC", 10, []config.TimeWindow{
 		{Start: "00:00", End: "08:00", Only: true},
@@ -138,6 +153,7 @@ func TestResolveAtDropsCandidatesOutsideTheirOnlyWindow(t *testing.T) {
 }
 
 func TestResolveAtReportsNoAvailableCandidate(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "UTC", 10, []config.TimeWindow{
 		{Start: "00:00", End: "08:00", Only: true},
@@ -165,6 +181,7 @@ func TestResolveAtReportsNoAvailableCandidate(t *testing.T) {
 }
 
 func TestResolveAtHandlesWindowsAroundMidnight(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "UTC", 10, []config.TimeWindow{
 		{Start: "22:00", End: "06:00", Priority: intPtr(0)},
@@ -196,6 +213,7 @@ func TestResolveAtHandlesWindowsAroundMidnight(t *testing.T) {
 }
 
 func TestResolveKeepsTheConfiguredOrderWithoutWindows(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "UTC", 0, nil)
 	if err := r.Reload(cfg); err != nil {
@@ -212,6 +230,7 @@ func TestResolveKeepsTheConfiguredOrderWithoutWindows(t *testing.T) {
 }
 
 func TestPreviewModelReportsTheCurrentState(t *testing.T) {
+	t.Parallel()
 	r := New()
 	cfg := windowConfig(t, "UTC", 10, []config.TimeWindow{
 		{Start: "00:00", End: "08:00", Priority: intPtr(0)},

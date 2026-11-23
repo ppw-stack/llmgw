@@ -300,7 +300,7 @@ func (c *Config) normalize() error {
 	// load time instead of silently shifting every time window.
 	loc, err := resolveLocation(c.Schedule.Timezone)
 	if err != nil {
-		return err
+		return fmt.Errorf("schedule.timezone: %w", err)
 	}
 	c.Schedule.Location = loc
 	if len(c.Instances) == 0 && len(c.Models) == 0 && len(c.Providers) == 0 {

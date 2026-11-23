@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +15,18 @@ import (
 	"github.com/pw/llmgw/internal/secret"
 )
 
+// topologyTestKey returns the upstream key used by the topology tests. Set
+// TEST_TOPOLOGY_API_KEY to inject a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func topologyTestKey() string {
+	if v := strings.TrimSpace(os.Getenv("TEST_TOPOLOGY_API_KEY")); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-topology"
+}
+
 func TestModelWindowsRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 
 	if _, err := st.CreateInstance(InstanceSpec{
@@ -68,6 +81,7 @@ func TestModelWindowsRoundTrip(t *testing.T) {
 }
 
 func TestTopologyKeepsWindows(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 	if _, err := st.CreateInstance(InstanceSpec{
 		Name:      "a",
@@ -105,6 +119,7 @@ func TestTopologyKeepsWindows(t *testing.T) {
 }
 
 func TestImportTopologyKeepsWindows(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 	box, err := secret.New(make([]byte, 32))
 	if err != nil {
@@ -113,7 +128,7 @@ func TestImportTopologyKeepsWindows(t *testing.T) {
 	low := 0
 	instances := []config.Instance{{
 		Name:      "a",
-		APIKey:    "k",
+		APIKey:    topologyTestKey(),
 		Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://a/v1"}},
 		Models:    []string{"u"},
 	}}
@@ -149,6 +164,7 @@ func TestImportTopologyKeepsWindows(t *testing.T) {
 }
 
 func TestMigrateModelInstanceWindows(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {

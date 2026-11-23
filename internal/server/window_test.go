@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -10,15 +9,22 @@ import (
 	"github.com/pw/llmgw/internal/config"
 )
 
+// upstreamKey returns the upstream key used by the window tests. The
+// environment variable injects a real key; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func upstreamKey() string {
+	return testAPIKey("TEST_WINDOW_UPSTREAM_KEY", "0001")
+}
+
 func TestModelWindowsInAdminAPI(t *testing.T) {
-	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	t.Parallel()
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{upstreamKey()})
 	apiKey := testAPIKey("TEST_WINDOW_API_KEY", "9999")
 
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
 		instanceBody("cheap", apiKey))
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		body := readAll(t, resp)
 		t.Fatalf("create instance = %d %s", resp.StatusCode, body)
 	}
 	resp.Body.Close()
@@ -28,8 +34,7 @@ func TestModelWindowsInAdminAPI(t *testing.T) {
 		  "instances":[{"instance":"cheap","priority":5,
 		    "windows":[{"start":"00:00","end":"08:00","priority":0}]}]}`)
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		body := readAll(t, resp)
 		t.Fatalf("create model = %d %s", resp.StatusCode, body)
 	}
 	created := decodeModel(t, resp)
@@ -59,7 +64,8 @@ func TestModelWindowsInAdminAPI(t *testing.T) {
 }
 
 func TestModelWindowsAreValidated(t *testing.T) {
-	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	t.Parallel()
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{upstreamKey()})
 	apiKey := testAPIKey("TEST_WINDOW_API_KEY", "9999")
 
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
@@ -89,8 +95,7 @@ func TestModelWindowsAreValidated(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models", tc.body)
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			body := readAll(t, resp)
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d %s", resp.StatusCode, body)
 			}
@@ -99,12 +104,13 @@ func TestModelWindowsAreValidated(t *testing.T) {
 }
 
 func TestModelWindowTakesOverNow(t *testing.T) {
+	t.Parallel()
 	loc, err := time.LoadLocation("UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
 	gw, _, _ := setupConfig(t, nil, func(w http.ResponseWriter, r *http.Request) {},
-		[]string{"k"}, func(c *config.Config) {
+		[]string{upstreamKey()}, func(c *config.Config) {
 			c.Schedule = config.Schedule{Timezone: "UTC", Location: loc}
 		})
 
@@ -119,8 +125,7 @@ func TestModelWindowTakesOverNow(t *testing.T) {
 
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models", body)
 	if resp.StatusCode != http.StatusCreated {
-		payload, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		payload := readAll(t, resp)
 		t.Fatalf("create model = %d %s", resp.StatusCode, payload)
 	}
 	created := decodeModel(t, resp)
@@ -144,12 +149,13 @@ func TestModelWindowTakesOverNow(t *testing.T) {
 }
 
 func TestModelOutsideItsWindowIsUnavailable(t *testing.T) {
+	t.Parallel()
 	loc, err := time.LoadLocation("UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
 	gw, _, key := setupConfig(t, nil, func(w http.ResponseWriter, r *http.Request) {},
-		[]string{"k"}, func(c *config.Config) {
+		[]string{upstreamKey()}, func(c *config.Config) {
 			c.Schedule = config.Schedule{Timezone: "UTC", Location: loc}
 		})
 
@@ -164,8 +170,7 @@ func TestModelOutsideItsWindowIsUnavailable(t *testing.T) {
 
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models", body)
 	if resp.StatusCode != http.StatusCreated {
-		payload, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		payload := readAll(t, resp)
 		t.Fatalf("create model = %d %s", resp.StatusCode, payload)
 	}
 	resp.Body.Close()

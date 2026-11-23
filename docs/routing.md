@@ -124,6 +124,13 @@ models:
             priority: 0
       - name: glm
         priority: 1
+      # only: true：这个候选只在窗口内参与路由，窗口外直接跳过
+      - name: limited-quota
+        priority: 2
+        windows:
+          - start: "00:00"
+            end: "08:00"
+            only: true
 ```
 
 ### 8.1 判定规则

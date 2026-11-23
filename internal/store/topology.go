@@ -328,14 +328,14 @@ func replaceModelInstances(tx *sql.Tx, modelID int64, instances []ModelInstanceS
 		}
 		windowsJSON, err := json.Marshal(mi.Windows)
 		if err != nil {
-			return err
+			return fmt.Errorf("instance %q: marshal windows: %w", mi.Instance, err)
 		}
 		if mi.Windows == nil {
 			windowsJSON = []byte("[]")
 		}
 		if _, err := tx.Exec(`INSERT INTO model_instances(model_id, instance_id, priority, weight, windows_json)
 			VALUES(?,?,?,?,?)`, modelID, instanceID, mi.Priority, mi.Weight, string(windowsJSON)); err != nil {
-			return err
+			return fmt.Errorf("instance %q: store candidate: %w", mi.Instance, err)
 		}
 	}
 	return nil

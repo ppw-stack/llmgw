@@ -144,12 +144,8 @@ models:
       # 平时用另一个厂商
       - name: moonshot
         priority: 1
-        # only: true 表示这个候选只在窗口内参与路由，窗口外直接跳过。
-        # 例如某个账号只在谷时才有额度：
-        # windows:
-        #   - start: "00:00"
-        #     end: "08:00"
-        #     only: true
+        # only: true 表示这个候选只在窗口内参与路由，窗口外直接跳过；
+        # 完整示例见 docs/routing.md 的「按时段调度候选」一节。
 
 # 可选。USD per million tokens，仅用于成本估算。
 pricing:

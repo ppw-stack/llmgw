@@ -97,8 +97,8 @@ func resolveLocation(name string) (*time.Location, error) {
 	}
 	loc, err := time.LoadLocation(raw)
 	if err != nil {
-		return nil, fmt.Errorf("unknown timezone %q: use \"UTC\", an IANA name such as %q or an offset such as \"+08:00\"",
-			name, DefaultTimezone)
+		return nil, fmt.Errorf("unknown timezone %q: %w; use \"UTC\", an IANA name such as %q or an offset such as \"+08:00\"",
+			name, err, DefaultTimezone)
 	}
 	return loc, nil
 }

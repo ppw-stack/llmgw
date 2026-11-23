@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS instances (
     quota_cred_enc  TEXT    NOT NULL DEFAULT '',
     endpoints_json  TEXT    NOT NULL DEFAULT '[]',
     models_json     TEXT    NOT NULL DEFAULT '[]',
+    allow_private   INTEGER NOT NULL DEFAULT 0,
     max_fails       INTEGER NOT NULL DEFAULT 3,
     cooldown_secs   INTEGER NOT NULL DEFAULT 30,
     timeout_secs    INTEGER NOT NULL DEFAULT 0,
@@ -227,9 +228,17 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate instance quota credential: %w", err)
 	}
+	if err := migrateInstanceAllowPrivate(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance allow_private: %w", err)
+	}
 	if err := migrateModelInstanceWindows(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate model instance windows: %w", err)
+	}
+	restrictFile(path)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		restrictFile(path + suffix)
 	}
 	s := &Store{
 		db:   db,
@@ -246,7 +255,17 @@ func ensureDir(path string) error {
 	if dir == "" || dir == "." {
 		return nil
 	}
-	return os.MkdirAll(dir, 0o755)
+	// The directory holds the database (session hashes, audit log, encrypted
+	// upstream keys) and the master key, so it is not world readable.
+	return os.MkdirAll(dir, 0o700)
+}
+
+// restrictFile trims a file to owner-only permissions. It is best effort: the
+// database may live on a filesystem that does not support POSIX modes.
+func restrictFile(path string) {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return
+	}
 }
 
 // migrateProviders converts the legacy providers table into the instance and
@@ -465,6 +484,27 @@ func migrateInstanceQuotaCredential(ctx context.Context, db *sql.DB, log *slog.L
 		return fmt.Errorf("add instances quota credential column: %w", err)
 	}
 	log.Info("added the quota credential column to instances")
+	return nil
+}
+
+// migrateInstanceAllowPrivate adds the column that lets an instance opt into
+// loopback or private endpoints. Existing rows keep the secure default: 0.
+func migrateInstanceAllowPrivate(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
+	if err != nil {
+		return fmt.Errorf("read instances table columns: %w", err)
+	}
+	if len(cols) == 0 || cols["allow_private"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE instances ADD COLUMN allow_private INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add instances allow_private column: %w", err)
+	}
+	log.Info("added the allow_private column to instances")
 	return nil
 }
 
@@ -968,6 +1008,98 @@ func (s *Store) writeBatch(batch []LogEntry) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// PruneResult reports how many rows each retention pass removed.
+type PruneResult struct {
+	RequestLogs int64
+	AuditLogs   int64
+	UsageDays   int64
+}
+
+// pruneBatchSize bounds how many rows a single DELETE removes.
+//
+// A DELETE without a limit is one implicit transaction: it holds the write
+// lock of the database until it commits. The store talks to SQLite over a
+// single connection, so such a transaction blocks every other database
+// operation - the asynchronous request log writer above all - for as long as
+// it runs. On a public gateway with a 30 day retention the request log reaches
+// millions of rows, so the rows go away in batches instead.
+const pruneBatchSize = 5000
+
+// pruneBatchPause is the pause between two prune batches. The write lock is
+// free during the pause, so the log writer can take it before the next batch
+// starts.
+const pruneBatchPause = 50 * time.Millisecond
+
+// Prune deletes request logs, audit entries and daily usage rows older than the
+// cutoff. Without it the tables grow for the lifetime of the deployment, which
+// on a public gateway ends in a full disk.
+//
+// The rows go away in batches of pruneBatchSize rows: every batch is its own
+// transaction, so the write lock is released between the batches and the
+// request log writer is not blocked for the whole table.
+func (s *Store) Prune(cutoff time.Time) (PruneResult, error) {
+	return s.prune(cutoff, pruneBatchSize)
+}
+
+// prune is Prune with a configurable batch size, so that the tests can
+// exercise the batching without inserting thousands of rows.
+func (s *Store) prune(cutoff time.Time, batchSize int) (PruneResult, error) {
+	if batchSize <= 0 {
+		batchSize = pruneBatchSize
+	}
+	var out PruneResult
+	stamp := cutoff.UTC().Format(time.RFC3339Nano)
+
+	n, err := s.deleteInBatches(
+		`DELETE FROM request_logs WHERE id IN (SELECT id FROM request_logs WHERE ts < ? ORDER BY id LIMIT ?)`,
+		stamp, batchSize)
+	if err != nil {
+		return out, fmt.Errorf("prune request logs: %w", err)
+	}
+	out.RequestLogs = n
+
+	n, err = s.deleteInBatches(
+		`DELETE FROM audit_logs WHERE id IN (SELECT id FROM audit_logs WHERE ts < ? ORDER BY id LIMIT ?)`,
+		stamp, batchSize)
+	if err != nil {
+		return out, fmt.Errorf("prune audit logs: %w", err)
+	}
+	out.AuditLogs = n
+
+	n, err = s.deleteInBatches(
+		`DELETE FROM usage_daily WHERE rowid IN (SELECT rowid FROM usage_daily WHERE day < ? LIMIT ?)`,
+		cutoff.UTC().Format("2006-01-02"), batchSize)
+	if err != nil {
+		return out, fmt.Errorf("prune daily usage: %w", err)
+	}
+	out.UsageDays = n
+
+	return out, nil
+}
+
+// deleteInBatches runs one DELETE statement over and over until it removes
+// fewer rows than the batch size. Every statement is its own transaction, so
+// the write lock is held for a single batch only.
+func (s *Store) deleteInBatches(stmt, arg string, batchSize int) (int64, error) {
+	var total int64
+	for {
+		res, err := s.db.Exec(stmt, arg, batchSize)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < int64(batchSize) {
+			return total, nil
+		}
+		// The lock is free again: let the writers in before the next batch.
+		time.Sleep(pruneBatchPause)
+	}
 }
 
 // ---- queries ----

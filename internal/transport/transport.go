@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
@@ -43,7 +46,21 @@ type Forwarder struct {
 	client  *http.Client
 	timeout time.Duration
 	breaker *health.Breaker
+
+	// blockPrivate refuses to dial loopback and private addresses, so a
+	// mistyped or attacker-supplied upstream URL cannot reach the internal
+	// network or a cloud metadata service. An instance marked
+	// allow_private_upstream is exempt.
+	blockPrivate atomic.Bool
 }
+
+// SetBlockPrivate turns the private-address guard on. Instances that opted in
+// with allow_private_upstream still reach their local mock.
+func (f *Forwarder) SetBlockPrivate(block bool) { f.blockPrivate.Store(block) }
+
+// allowPrivateKey marks one outgoing request as allowed to reach a private
+// address. It is set only for targets whose instance opted in.
+type allowPrivateKey struct{}
 
 // New builds a Forwarder with the default upstream timeout.
 func New(r *router.Router, st *store.Store, log *slog.Logger) *Forwarder {
@@ -56,6 +73,13 @@ func NewWithTimeout(r *router.Router, st *store.Store, log *slog.Logger, timeout
 	if timeout <= 0 {
 		timeout = upstreamTimeout
 	}
+	fwd := &Forwarder{
+		router:  r,
+		store:   st,
+		log:     log,
+		timeout: timeout,
+		breaker: health.NewBreaker(),
+	}
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          256,
@@ -64,19 +88,48 @@ func NewWithTimeout(r *router.Router, st *store.Store, log *slog.Logger, timeout
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,
 		ResponseHeaderTimeout: timeout,
+		DialContext:           fwd.dialContext,
 	}
-	return &Forwarder{
-		router:  r,
-		store:   st,
-		log:     log,
-		client:  &http.Client{Transport: tr},
-		timeout: timeout,
-		breaker: health.NewBreaker(),
+	fwd.client = &http.Client{
+		Transport: tr,
+		// An upstream redirect is never part of an API call; following one
+		// would replay the request (and the upstream key) somewhere else.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
+	return fwd
 }
 
 // Request is one inbound request together with the candidates that may serve
 // it. The first candidate is the primary upstream, the rest are fallbacks.
+// dialContext resolves the upstream host and refuses private addresses unless
+// the request belongs to an instance that opted in. Resolving here (instead of
+// only validating the URL when it is saved) also covers a hostname that later
+// starts pointing somewhere internal.
+func (f *Forwarder) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	if !f.blockPrivate.Load() {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	allowPrivate, _ := ctx.Value(allowPrivateKey{}).(bool)
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if !allowPrivate && config.BlockedAddress(ip) {
+			continue
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	return nil, fmt.Errorf("upstream host %q resolves only to private or reserved addresses", host)
+}
+
 type Request struct {
 	Protocol  string
 	Meta      ingress.Meta
@@ -164,6 +217,9 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		timeout = f.timeout
 	}
 	ctx := r.Context()
+	if target.AllowPrivate {
+		ctx = context.WithValue(ctx, allowPrivateKey{}, true)
+	}
 	if !in.Meta.Stream {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -301,7 +357,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 	// another upstream would deliver two streams to the same client.
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("X-Request-Id", in.RequestID)
 	w.WriteHeader(resp.StatusCode)
@@ -442,6 +498,8 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte, requestID
 // writeRawParts forwards an upstream answer to the client untouched.
 func writeRawParts(w http.ResponseWriter, header http.Header, status int, body []byte, requestID string) {
 	copyResponseHeaders(w.Header(), header)
+	// Prompts and completions are sensitive; keep them out of shared caches.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Request-Id", requestID)
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
@@ -459,11 +517,55 @@ var hopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
+// hopHeaders and blockedRequestHeaders are never forwarded upstream.
+//
+// The gateway and the admin console share one origin, so a browser sends the
+// admin session cookie with every API call it makes. Forwarding Cookie would
+// hand a valid console session to a third-party model vendor; the forwarded
+// client IP headers would leak the caller's address and, worse, let a client
+// rewrite the address the upstream sees. Everything else (vendor-specific
+// session headers such as x-opencode-session, anthropic-beta, SDK telemetry)
+// still passes through.
+var blockedRequestHeaders = map[string]bool{
+	"cookie":            true,
+	"cookie2":           true,
+	"set-cookie":        true,
+	"authorization":     true,
+	"x-api-key":         true,
+	"anthropic-version": true,
+	"x-forwarded-for":   true,
+	"x-forwarded-host":  true,
+	"x-forwarded-proto": true,
+	"x-forwarded-port":  true,
+	"x-real-ip":         true,
+	"forwarded":         true,
+	"x-request-id":      true,
+	"content-length":    true,
+	"host":              true,
+	"accept-encoding":   true,
+}
+
+// blockedResponseHeaders are dropped from the upstream answer so an upstream
+// cannot plant cookies on the gateway origin or weaken the gateway's own
+// security headers.
+var blockedResponseHeaders = map[string]bool{
+	"set-cookie":                          true,
+	"set-cookie2":                         true,
+	"strict-transport-security":           true,
+	"content-security-policy":             true,
+	"content-security-policy-report-only": true,
+	"x-frame-options":                     true,
+	"x-content-type-options":              true,
+	"referrer-policy":                     true,
+}
+
 func copyRequestHeaders(dst, src http.Header) {
 	for k, vs := range src {
-		// Accept-Encoding is dropped so the transport negotiates gzip itself
-		// and hands us a decoded body we can inspect for usage.
-		if hopHeaders[k] || k == "Content-Length" || k == "Host" || k == "Accept-Encoding" {
+		if hopHeaders[k] {
+			continue
+		}
+		lower := strings.ToLower(k)
+		if blockedRequestHeaders[lower] {
 			continue
 		}
 		for _, v := range vs {
@@ -474,7 +576,11 @@ func copyRequestHeaders(dst, src http.Header) {
 
 func copyResponseHeaders(dst, src http.Header) {
 	for k, vs := range src {
-		if hopHeaders[k] || k == "Content-Length" {
+		if hopHeaders[k] {
+			continue
+		}
+		lower := strings.ToLower(k)
+		if lower == "content-length" || blockedResponseHeaders[lower] {
 			continue
 		}
 		for _, v := range vs {

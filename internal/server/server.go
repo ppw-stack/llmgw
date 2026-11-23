@@ -13,9 +13,11 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pw/llmgw/internal/auth"
+	"github.com/pw/llmgw/internal/clientip"
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/ingress"
 	"github.com/pw/llmgw/internal/quota"
@@ -35,9 +37,17 @@ type Options struct {
 	SessionTTL     time.Duration
 	SecureCookie   bool
 	TrustedProxies []netip.Prefix
-	MaxBody        int64
-	Log            *slog.Logger
-	UI             http.Handler
+	// AdminPrefixes restricts the admin surface when non-empty.
+	AdminPrefixes []netip.Prefix
+	// AdminEnabled opens or closes the management surface. Nil means open,
+	// so an embedder that does not care keeps the previous behaviour.
+	AdminEnabled *bool
+	// KeyRPM and KeyMaxConcurrent bound one gateway key. Zero disables.
+	KeyRPM           int
+	KeyMaxConcurrent int
+	MaxBody          int64
+	Log              *slog.Logger
+	UI               http.Handler
 	// Quota asks the built-in providers about their subscription quota.
 	// Tests replace it to point at a local server.
 	Quota *quota.Service
@@ -56,10 +66,17 @@ type Server struct {
 	sessionTTL     time.Duration
 	secureCookie   bool
 	trustedProxies []netip.Prefix
-	limiter        *loginLimiter
-	keys           *keyCache
-	loginSem       chan struct{}
-	quota          *quota.Service
+	// adminPrefixes is the admin network whitelist. It is a pointer so the
+	// config watcher can swap it while requests are in flight.
+	adminPrefixes atomic.Pointer[[]netip.Prefix]
+	// adminEnabled gates the management surface. It is atomic because the
+	// config watcher flips it while requests are in flight.
+	adminEnabled atomic.Bool
+	limiter      *loginLimiter
+	keys         *keyCache
+	keyLimiter   *keyLimiter
+	loginSem     chan struct{}
+	quota        *quota.Service
 }
 
 func New(o Options) (*Server, error) {
@@ -91,7 +108,7 @@ func New(o Options) (*Server, error) {
 	if quotaService == nil {
 		quotaService = quota.NewService()
 	}
-	return &Server{
+	s := &Server{
 		router:         o.Router,
 		forwarder:      o.Forwarder,
 		store:          o.Store,
@@ -106,9 +123,53 @@ func New(o Options) (*Server, error) {
 		trustedProxies: o.TrustedProxies,
 		limiter:        newLoginLimiter(5*time.Minute, 10, 10000),
 		keys:           cache,
+		keyLimiter:     newKeyLimiter(o.KeyRPM, o.KeyMaxConcurrent),
 		loginSem:       make(chan struct{}, 4),
 		quota:          quotaService,
-	}, nil
+	}
+	// A nil AdminEnabled means the management surface stays open.
+	s.adminEnabled.Store(o.AdminEnabled == nil || *o.AdminEnabled)
+	s.SetAdminPrefixes(o.AdminPrefixes)
+	return s, nil
+}
+
+// SetAdminEnabled opens or closes the management surface. The config watcher
+// calls it on every reload, so the console can be shut down without a
+// restart. It reports whether the state actually changed.
+func (s *Server) SetAdminEnabled(enabled bool) bool {
+	if s.adminEnabled.Swap(enabled) == enabled {
+		return false
+	}
+	if enabled {
+		s.log.Info("management console enabled")
+	} else {
+		s.log.Warn("management console disabled by configuration")
+	}
+	return true
+}
+
+// SetAdminPrefixes replaces the admin network whitelist. An empty list means
+// every source that can reach the listener is allowed, which is only safe
+// behind a network boundary.
+//
+// The list is copied: the caller owns the slice it passes in and may reuse
+// or change it afterwards, while the whitelist is read by every request that
+// reaches the management surface.
+func (s *Server) SetAdminPrefixes(prefixes []netip.Prefix) {
+	cp := make([]netip.Prefix, len(prefixes))
+	copy(cp, prefixes)
+	s.adminPrefixes.Store(&cp)
+}
+
+// SetKeyLimits updates the per-key request budget. Zero disables a
+// dimension.
+func (s *Server) SetKeyLimits(rpm, maxConcurrent int) {
+	s.keyLimiter.setLimits(rpm, maxConcurrent)
+}
+
+// adminSurfaceOpen reports whether the management surface is reachable.
+func (s *Server) adminSurfaceOpen() bool {
+	return s.adminEnabled.Load()
 }
 
 func (s *Server) Handler() http.Handler {
@@ -126,31 +187,87 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.Handle("/metrics", s.metricsHandler())
-	mux.HandleFunc("/admin/api/", s.handleAdmin)
+	mux.Handle("/admin/api/", s.adminGuard(http.HandlerFunc(s.handleAdmin)))
 	mux.HandleFunc("/", s.handleRoot)
-	return securityHeaders(s.recoverer(s.withRequestID(normalizePath(mux))))
+	return s.securityHeaders(s.recoverer(s.withRequestID(normalizePath(mux))))
 }
 
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; " +
 	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; " +
 	"connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 
-func securityHeaders(next http.Handler) http.Handler {
+// adminDisabledMessage is returned while the management surface is closed.
+const adminDisabledMessage = "the management console is disabled by configuration"
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
-		if isHTTPS(r) {
+		if s.isHTTPS(r) {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func isHTTPS(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+// isHTTPS reports whether the request reached the gateway over TLS. A forwarded
+// proto header is only believed when the immediate peer is a configured proxy:
+// otherwise any client could claim to be on HTTPS.
+func (s *Server) isHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if !clientip.IsTrustedPeer(r, s.trustedProxies) {
+		return false
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// adminGuard rejects admin requests from outside the configured networks.
+// An empty list keeps the historical behaviour, because the operator may rely
+// on a network boundary in front of the gateway.
+//
+// A closed management surface short-circuits the whole check: no credential,
+// not even the static admin token, opens it while it is shut.
+func (s *Server) adminGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.adminSurfaceOpen() {
+			writeAdminError(w, http.StatusForbidden, adminDisabledMessage)
+			return
+		}
+		allowed := s.adminPrefixes.Load()
+		if allowed == nil || len(*allowed) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The immediate peer is the trustworthy part; the resolved client
+		// address additionally lets the policy work behind a reverse proxy,
+		// provided that proxy is listed in trusted_proxies and overwrites or
+		// appends X-Forwarded-For itself.
+		peer, peerOK := clientip.PeerAddr(r)
+		resolved, err := netip.ParseAddr(s.clientIP(r))
+		ok := (peerOK && prefixContains(*allowed, peer)) ||
+			(err == nil && prefixContains(*allowed, resolved))
+		if !ok {
+			s.log.Warn("admin request rejected by admin_allowed_cidrs",
+				"request_id", requestID(r), "ip", s.clientIP(r), "path", r.URL.Path)
+			writeAdminError(w, http.StatusForbidden, "admin access is restricted by network policy")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func prefixContains(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizePath(next http.Handler) http.Handler {
@@ -223,10 +340,24 @@ func protocolOfPath(path string) string {
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if isDataPlanePath(r.URL.Path) {
+		// The console is shut down: say so instead of pretending the path
+		// does not exist. The data plane keeps its own error shape.
+		if !s.adminSurfaceOpen() && strings.HasPrefix(r.URL.Path, "/admin") {
+			writeAdminError(w, http.StatusForbidden, adminDisabledMessage)
+			return
+		}
 		protocol := protocolOfPath(r.URL.Path)
 		ingress.WriteError(w, protocol, http.StatusNotFound, "invalid_request_error",
 			"unknown path "+r.URL.Path+". OpenAI base_url must be <gateway>/openai/v1; "+
 				"Anthropic base_url must be <gateway>/anthropic.")
+		return
+	}
+	if !s.adminSurfaceOpen() {
+		// Do not serve the console shell: a page that loads and then fails
+		// every request is harder to diagnose than a plain refusal.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, adminDisabledMessage+"\n")
 		return
 	}
 	if s.ui != nil {
@@ -270,6 +401,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 	if !ok {
 		return
 	}
+	release, ok := s.reserveKey(w, r, key, protocol)
+	if !ok {
+		return
+	}
+	defer release()
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxBody+1))
 	if err != nil {
 		ingress.WriteError(w, protocol, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
@@ -329,9 +465,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		ingress.WriteError(w, config.ProtocolOpenAI, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
-	if _, ok := s.authenticate(w, r, config.ProtocolOpenAI); !ok {
+	key, ok := s.authenticate(w, r, config.ProtocolOpenAI)
+	if !ok {
 		return
 	}
+	release, ok := s.reserveKey(w, r, key, config.ProtocolOpenAI)
+	if !ok {
+		return
+	}
+	defer release()
 	type model struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -368,6 +510,20 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, protocol s
 		return nil, false
 	}
 	return &k, true
+}
+
+// reserveKey applies the per-key budget before any expensive work happens.
+func (s *Server) reserveKey(w http.ResponseWriter, r *http.Request, key *store.APIKey, protocol string) (func(), bool) {
+	release, ok, retry := s.keyLimiter.acquire(key.ID)
+	if !ok {
+		if retry > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		}
+		ingress.WriteError(w, protocol, http.StatusTooManyRequests, "rate_limit_error",
+			"gateway key exceeded its request budget; slow down and retry")
+		return nil, false
+	}
+	return release, true
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -113,20 +114,28 @@ func main() {
 	bootstrapKey(st, logger)
 
 	forwarder := transport.NewWithTimeout(rt, st, logger, cfg.UpstreamTimeout.Value())
+	// Refuse to dial loopback and private addresses unless an instance opted in
+	// with allow_private_upstream. This is what keeps a stolen admin session
+	// from turning the gateway into an internal-network proxy.
+	forwarder.SetBlockPrivate(true)
 
 	srv, err := server.New(server.Options{
-		Router:         rt,
-		Forwarder:      forwarder,
-		Store:          st,
-		Box:            boxCipher,
-		AdminToken:     adminToken,
-		MetricsToken:   cfg.Server.MetricsToken,
-		SessionTTL:     cfg.Server.SessionTTL.Value(),
-		SecureCookie:   cfg.Server.SecureCookie,
-		TrustedProxies: cfg.Server.TrustedPrefixes,
-		MaxBody:        cfg.Server.MaxBodyBytes,
-		Log:            logger,
-		UI:             webui.Handler(),
+		Router:           rt,
+		Forwarder:        forwarder,
+		Store:            st,
+		Box:              boxCipher,
+		AdminToken:       adminToken,
+		MetricsToken:     cfg.Server.MetricsToken,
+		SessionTTL:       cfg.Server.SessionTTL.Value(),
+		SecureCookie:     cfg.Server.SecureCookie,
+		TrustedProxies:   cfg.Server.TrustedPrefixes,
+		AdminPrefixes:    cfg.Server.AdminPrefixes,
+		AdminEnabled:     cfg.Server.AdminEnabled,
+		KeyRPM:           cfg.Server.KeyRPM,
+		KeyMaxConcurrent: cfg.Server.KeyMaxConcurrent,
+		MaxBody:          cfg.Server.MaxBodyBytes,
+		Log:              logger,
+		UI:               webui.Handler(),
 	})
 	if err != nil {
 		logger.Error("initialize server", "err", err)
@@ -146,16 +155,12 @@ func main() {
 		logger.Warn("clean expired sessions", "err", err)
 	}
 	go cleanupSessions(ctx, st, logger)
-	go watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
-		dbInstances, dbModels, err := st.Topology(boxCipher)
-		if err != nil {
-			return err
-		}
-		if len(dbInstances) > 0 {
-			c.Instances = dbInstances
-			c.Models = dbModels
-		}
-		return rt.Reload(c)
+	if days := cfg.Database.RetentionDays; days > 0 {
+		go pruneHistory(ctx, st, logger, days)
+	}
+	warnInsecureDefaults(cfg, logger)
+	watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
+		return reloadConfig(rt, st, boxCipher, srv, c)
 	})
 
 	go func() {
@@ -333,36 +338,188 @@ func cleanupSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 	}
 }
 
-func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(*config.Config) error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return
+// pruneStartupDelay is the pause between the start of the gateway and the
+// first cleanup. Right after the boot the gateway is still warming up, and a
+// large cleanup would take the write lock away from the first requests.
+const pruneStartupDelay = 30 * time.Second
+
+// pruneHistory keeps the request log, the audit log and the daily usage table
+// from growing forever. It runs once shortly after the startup and then daily.
+func pruneHistory(ctx context.Context, st *store.Store, log *slog.Logger, days int) {
+	prune := func() {
+		cutoff := time.Now().UTC().AddDate(0, 0, -days)
+		res, err := st.Prune(cutoff)
+		if err != nil {
+			log.Warn("prune history", "err", err)
+			return
+		}
+		if res.RequestLogs+res.AuditLogs+res.UsageDays > 0 {
+			log.Info("pruned history",
+				"request_logs", res.RequestLogs, "audit_logs", res.AuditLogs,
+				"usage_days", res.UsageDays, "retention_days", days)
+		}
 	}
-	lastMod := info.ModTime()
-	ticker := time.NewTicker(time.Second)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(pruneStartupDelay):
+	}
+	prune()
+	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			info, err := os.Stat(path)
-			if err != nil || !info.ModTime().After(lastMod) {
-				continue
-			}
-			lastMod = info.ModTime()
-			cfg, err := config.Load(path)
-			if err != nil {
-				log.Error("config reload failed; keeping previous config", "err", err)
-				continue
-			}
-			if err := apply(cfg); err != nil {
-				log.Error("config reload rejected; keeping previous config", "err", err)
-				continue
-			}
-			log.Info("config reloaded", "instances", len(cfg.Instances), "models", len(cfg.Models))
+			prune()
 		}
 	}
+}
+
+// warnInsecureDefaults points out the settings that are safe on a laptop and
+// dangerous on the public internet. It never refuses to start: the operator may
+// deliberately run behind a network boundary.
+func warnInsecureDefaults(cfg *config.Config, log *slog.Logger) {
+	if cfg.Server.AdminPassword != "" && len(cfg.Server.AdminPassword) < 12 {
+		log.Warn("server.admin_password is shorter than 12 characters; use a long random password on a reachable host")
+	}
+	if len(cfg.Server.AdminPrefixes) == 0 {
+		log.Warn("server.admin_allowed_cidrs is empty: the admin console is reachable from anywhere the listener is; " +
+			"restrict it by network policy or set admin_allowed_cidrs")
+	}
+	if cfg.Server.MetricsToken == "" {
+		log.Warn("server.metrics_token is empty: /metrics is readable only from localhost and trusted proxies; " +
+			"set a token to scrape it from elsewhere")
+	}
+	if cfg.Server.AdminToken != "" {
+		log.Warn("server.admin_token is configured: it is a static, never-expiring credential with full admin rights")
+	}
+	if cfg.Server.KeyRPM == 0 && cfg.Server.KeyMaxConcurrent == 0 {
+		log.Warn("no per-key limits are configured (key_rpm / key_max_concurrent): one leaked gateway key can spend upstream quota without bound")
+	}
+	if !cfg.Server.SecureCookie {
+		log.Warn("server.secure_cookie is false: the admin session cookie is only marked Secure when the request itself is HTTPS")
+	}
+	for _, inst := range cfg.Instances {
+		for _, ep := range inst.Endpoints {
+			if strings.HasPrefix(strings.ToLower(ep.BaseURL), "http://") {
+				log.Warn("upstream endpoint uses plain HTTP; the upstream key travels in clear text",
+					"instance", inst.Name, "base_url", ep.BaseURL)
+			}
+		}
+	}
+	for _, inst := range cfg.Instances {
+		if inst.AllowPrivateUpstream {
+			log.Warn("instance allows private/loopback upstreams", "instance", inst.Name)
+		}
+	}
+}
+
+// reloadConfig applies a freshly loaded configuration to the running gateway.
+//
+// The routing table is swapped first and only a successful swap moves the
+// management surface, so a configuration the gateway rejects leaves both
+// untouched.
+func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *server.Server,
+	c *config.Config) error {
+	dbInstances, dbModels, err := st.Topology(box)
+	if err != nil {
+		return fmt.Errorf("load topology: %w", err)
+	}
+	if len(dbInstances) > 0 {
+		c.Instances = dbInstances
+		c.Models = dbModels
+	}
+	if err := rt.Reload(c); err != nil {
+		return fmt.Errorf("reload routing table: %w", err)
+	}
+	// The runtime policy follows the config: the management surface, its
+	// network whitelist and the per-key budget. Changing them needs no
+	// restart: edit the file and they are in effect within a second.
+	srv.SetAdminEnabled(c.Server.AdminIsEnabled())
+	srv.SetAdminPrefixes(c.Server.AdminPrefixes)
+	srv.SetKeyLimits(c.Server.KeyRPM, c.Server.KeyMaxConcurrent)
+	return nil
+}
+
+// watchConfig watches the config file and applies it whenever its content
+// changes. It returns at once; the watcher stops when ctx is done.
+//
+// The baseline is taken here, in the caller's goroutine, and only the polling
+// loop runs in a goroutine of its own. Taking the baseline inside the
+// watcher would leave a blind spot: a file edited between the call and the
+// first poll would be compared against itself, so the edit would never be
+// applied.
+//
+// The content is fingerprinted instead of the modification time being
+// compared, because a filesystem with a coarse timestamp resolution can report
+// the same modification time for two different contents. A hot switch that
+// silently does nothing is worse than a reload that is one second late.
+//
+// A file that cannot be read is not the same thing as a file that did not
+// change. The first case is written to the log, once per outage, so a
+// deleted or unreadable config file does not stall the hot reload silently.
+func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(*config.Config) error) {
+	sum, err := configFingerprint(path)
+	if err != nil {
+		log.Warn("config fingerprint failed; the config file is not watched",
+			"path", path, "err", err)
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		// unreadable tells whether the last poll failed to read the file. A
+		// file that cannot be read is not "the config did not change": the
+		// difference has to be visible in the log, otherwise the hot reload
+		// stalls without a trace. The warning is written once per outage, so
+		// a missing file does not fill the log with one line per second.
+		unreadable := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cur, err := configFingerprint(path)
+				if err != nil {
+					if !unreadable {
+						log.Warn("config fingerprint failed; skipping this poll",
+							"path", path, "err", err)
+						unreadable = true
+					}
+					continue
+				}
+				if unreadable {
+					log.Info("config file is readable again", "path", path)
+					unreadable = false
+				}
+				if cur == sum {
+					continue
+				}
+				sum = cur
+				cfg, err := config.Load(path)
+				if err != nil {
+					log.Error("config reload failed; keeping previous config", "err", err)
+					continue
+				}
+				if err := apply(cfg); err != nil {
+					log.Error("config reload rejected; keeping previous config", "err", err)
+					continue
+				}
+				log.Info("config reloaded", "instances", len(cfg.Instances), "models", len(cfg.Models))
+			}
+		}
+	}()
+}
+
+// configFingerprint is the fingerprint of the config file content.
+func configFingerprint(path string) ([sha256.Size]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(data), nil
 }
 
 func hostPort(addr string) string {

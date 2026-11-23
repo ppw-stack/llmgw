@@ -135,9 +135,16 @@ fsnotify 或 1s mtime 轮询
 构建 Snapshot（索引、内置端点解析）
       ↓
 atomic.Pointer.Store(new)
+      ↓
+运行时策略项就地更新（管理面开关、白名单、Key 预算）
 ```
 
 上游拓扑配置来自数据库；内置端点的端点地址在构建时从代码目录解析，升级即生效。
+
+运行期策略项（`server.admin_enabled`、`server.admin_allowed_cidrs`、`server.key_rpm`、
+`server.key_max_concurrent`）随同一次重载就地生效：管理面开关与白名单存在 `Server` 的
+`atomic` 字段里，Key 预算在限速器的锁内更新，因此在途请求不受影响。其余配置项只在启动时
+读取，改动需要重启。
 
 ## 7. 数据库
 

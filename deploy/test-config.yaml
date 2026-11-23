@@ -7,11 +7,27 @@ server:
   admin_password: "test-admin-password"
   metrics_token: "test-metrics-token"
   session_ttl: 2h
+  # compose 里没有反代，只有容器内自访会命中 127.0.0.1。外部来源的
+  # X-Forwarded-For 一律不采信。
   trusted_proxies: ["127.0.0.1/32"]
   secure_cookie: false
 
+  # 管理面开关：改成 false 就能在 1 秒内热加载关掉控制台（应急拉闸）。
+  admin_enabled: true
+
+  # 管理面白名单。192.168.222.1 是 compose 网络的网关，也就是宿主机访问
+  # 发布端口时容器看到的来源地址（网段在 docker-compose.test.yml 里固定）。
+  # 127.0.0.1/32 覆盖容器内自访。白名单外的来源访问 /admin/api/* 返回 403。
+  admin_allowed_cidrs: ["192.168.222.1/32", "127.0.0.1/32", "::1/128"]
+
+  # 单把网关 Key 的预算。测试环境留得宽松，但仍然开启，方便验证 429 行为。
+  key_rpm: 600
+  key_max_concurrent: 32
+
 database:
   path: "/data/llmgw.db"
+  # 请求日志、审计日志与按日用量保留 7 天。
+  retention_days: 7
 
 log:
   level: debug
@@ -24,6 +40,7 @@ schedule:
 instances:
   - name: mock
     api_key: "mock-upstream-key"
+    allow_private_upstream: true
     endpoints:
       - protocol: openai
         base_url: http://mock:8000
@@ -34,6 +51,7 @@ instances:
   # 它接管 gpt-windowed，其他时段由 mock 接管。
   - name: mock-night
     api_key: "mock-upstream-key"
+    allow_private_upstream: true
     endpoints:
       - protocol: openai
         base_url: http://mock:8000

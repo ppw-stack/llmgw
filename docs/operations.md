@@ -180,7 +180,8 @@ GET /metrics    Prometheus
 | `gw_upstream_errors_total{instance}` | 上游错误（按上游接入点） |
 | `gw_log_dropped_total` | 日志队列溢出丢条数 |
 
-`/metrics` 默认公开。公网部署时设置 `server.metrics_token`，之后需以
+未设置 `server.metrics_token` 时，`/metrics` 只对本机与 `trusted_proxies` 可读，
+其他来源返回 `403`。要从别的机器抓取请设置令牌，之后以
 `Authorization: Bearer <token>` 或 `?token=<token>` 访问；也可在反代层限制来源 IP。
 
 日志为 JSON，一行一条，`request_id` 可与响应头 `X-Request-Id` 对应。
@@ -191,11 +192,52 @@ GET /metrics    Prometheus
 - **同时备份 `master.key`**（或配置里的 `server.master_key`）。丢失它，数据库中已加密的上游 Key 将无法恢复。
 - 升级：替换二进制后重启。配置为热加载，但二进制升级需要重启。
 - 回滚：保留上一个二进制与 `config.yaml`。
-- **自动迁移**：新版本打开旧库时会执行 `ALTER TABLE ... ADD COLUMN`（如 `model_instances.windows_json`，`TEXT NOT NULL DEFAULT '[]'`）。
+- **自动迁移**：新版本打开旧库时会执行 `ALTER TABLE ... ADD COLUMN`（如 `model_instances.windows_json`，`TEXT NOT NULL DEFAULT '[]'`；以及 `instances.allow_private`，`INTEGER NOT NULL DEFAULT 0`）。
   SQLite 加列只改表结构、不重写行数据，持锁时间与表规模无关（毫秒级），大库也不会长时间阻塞写请求；但升级前仍建议先 `.backup` 留一份快照。
   迁移失败时网关启动即报错退出，不会带病运行。
 - **迁移后的回退路径**：旧二进制不认识新列，但 SQLite 会忽略未使用的列，旧版本可以直接打开迁移后的库继续工作（只是不再使用窗口数据）。
   要彻底还原，用升级前的快照覆盖 `data/llmgw.db`（并保留 `master.key`），再换回旧二进制即可。
+- **删掉 `instances.allow_private` 列**（要彻底回退这一列时，先停机并备份数据库）：
+  - SQLite 3.35 及以上直接删列：
+
+    ```sql
+    ALTER TABLE instances DROP COLUMN allow_private;
+    ```
+
+  - 更老的 SQLite 没有 `DROP COLUMN`，重建表（行与 id 原样保留）：
+
+    ```sql
+    BEGIN;
+    CREATE TABLE instances_new (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT    NOT NULL UNIQUE,
+        preset          TEXT    NOT NULL DEFAULT '',
+        key_enc         TEXT    NOT NULL DEFAULT '',
+        quota_cred_enc  TEXT    NOT NULL DEFAULT '',
+        endpoints_json  TEXT    NOT NULL DEFAULT '[]',
+        models_json     TEXT    NOT NULL DEFAULT '[]',
+        max_fails       INTEGER NOT NULL DEFAULT 3,
+        cooldown_secs   INTEGER NOT NULL DEFAULT 30,
+        timeout_secs    INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT    NOT NULL,
+        updated_at      TEXT    NOT NULL
+    );
+    INSERT INTO instances_new
+        SELECT id, name, preset, key_enc, quota_cred_enc, endpoints_json,
+               models_json, max_fails, cooldown_secs, timeout_secs,
+               created_at, updated_at
+        FROM instances;
+    DROP TABLE instances;
+    ALTER TABLE instances_new RENAME TO instances;
+    COMMIT;
+    ```
+
+  删列后旧二进制照常工作；新二进制会在下次启动时把这一列重新加回来（存量行默认 0），
+  所以要真正停用这个特性，还要把实例配置里的 `allow_private_upstream` 一并去掉。
+- **保留清理不可逆**：超过 `database.retention_days` 的请求日志、审计日志与按日用量会被直接删除，没有回收站。
+  打开这个选项前先备份数据库（`sqlite3 data/llmgw.db ".backup backup.db"`，备份文件权限收紧到 0600），
+  并核对天数符合预期；第一次清理在启动约 30 秒后执行。误删后只能用备份恢复
+  （`sqlite3 data/llmgw.db ".restore backup.db"` 或覆盖 `data/llmgw.db`），网关本身无法撤销。
 
 ## 7. 常见故障
 
@@ -268,9 +310,13 @@ server {
 ```yaml
 server:
   trusted_proxies: ["127.0.0.1/32"]   # 反代地址；只有它传来的 XFF 才会被信任
+  secure_cookie: true                 # 反代没传 X-Forwarded-Proto 时也能锁死 Cookie
 ```
 
-`X-Forwarded-Proto: https` 会让会话 Cookie 自动带上 `Secure`，并触发 HSTS 响应头。
+只有来自 `trusted_proxies` 的 `X-Forwarded-Proto: https` 才会被采信，它会让会话 Cookie
+带上 `Secure` 并触发 HSTS 响应头；客户端自己伪造这个头不会生效。
+反代务必用 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 追加真实地址，
+否则登录限速与审计里的来源 IP 不可信。
 
 ### 9.3 其他
 
@@ -278,7 +324,22 @@ server:
 - 网关 Key 在进程内缓存，创建/停用/删除立即生效；启动时从数据库加载。
 - 上游 Key 来自环境变量或控制台，AES-256-GCM 加密后写入数据库，不出现在任何 API 响应中（仅返回末四位掩码）。
 - 加密主密钥来自 `server.master_key` 或数据库目录的 `master.key`（0600）。请与数据库一起备份，并限制文件权限。
-- `/metrics` 未内置鉴权；公网暴露时请在反代层限制来源 IP 或加 Basic Auth。
+- `/metrics` 在未配置令牌时只允许本机与 `trusted_proxies` 读取；公网抓取请设 `server.metrics_token`。
+- 管理面可用 `server.admin_allowed_cidrs` 限制到运维网段，控制台 API 与登录接口一并生效。
+- 怀疑控制台被拿下时，把 `server.admin_enabled` 改成 `false`：1 秒内热加载生效，
+  控制台 API、登录接口与控制台页面全部返回 `403`，数据面与 `/metrics` 不受影响。
+  改回 `true` 立即恢复，已登录的会话继续有效。这是应急拉闸手段，不要当常规开关用。
+- 数据面按 Key 限速：`server.key_rpm`（每分钟请求数）与 `server.key_max_concurrent`（并发上限），
+  默认示例值 600 / 32；两者都为 0 表示不限制，公网部署不建议留空。
+- 转发到上游的请求头会剥离 `Cookie`、`Authorization`、`X-Forwarded-*`、`X-Real-IP` 等敏感头
+  （控制台与数据面同源，浏览器会把管理会话 Cookie 带到 API 请求上）；其余厂商需要的头照常透传。
+  上游响应里的 `Set-Cookie`、CSP、HSTS 等头会被丢弃，避免上游覆盖网关自身的安全头。
+- 上游地址默认禁止 loopback、内网与云元数据网段，防止控制台被拿下后成为内网代理；
+  本地 mock 需在实例上设置 `allow_private_upstream: true`。
+- 请求日志、审计日志与按日用量可用 `database.retention_days` 自动清理（0 表示永久保留）。
+  清理分批进行（每批 5000 行），批与批之间释放写锁，不会长时间阻塞异步日志写入；
+  启动后约 30 秒执行第一次清理，之后每 24 小时一次。
+  清理不可逆：打开这个选项前先按第 6 节备份数据库，确认天数无误再开。
 - 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - 建议定期轮换管理员密码（控制台“修改密码”）与上游 Key。
 

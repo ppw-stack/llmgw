@@ -57,3 +57,26 @@ func isTrusted(addr netip.Addr, trusted []netip.Prefix) bool {
 	}
 	return false
 }
+
+// PeerAddr parses the immediate peer address of a request.
+func PeerAddr(r *http.Request) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// IsTrustedPeer reports whether the immediate peer is one of the configured
+// proxies. Header-based client information is only trusted for those peers.
+func IsTrustedPeer(r *http.Request, trusted []netip.Prefix) bool {
+	addr, ok := PeerAddr(r)
+	if !ok {
+		return false
+	}
+	return isTrusted(addr, trusted)
+}

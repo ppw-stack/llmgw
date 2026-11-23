@@ -35,6 +35,7 @@ func expectedKeyHint(key string) string {
 
 func instanceBody(name, apiKey string) string {
 	return `{"name":"` + name + `","api_key":"` + apiKey + `",
+	  "allow_private_upstream":true,
 	  "models":["gpt-upstream"],
 	  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v1"}]}`
 }
@@ -60,6 +61,7 @@ func decodeModel(t *testing.T, resp *http.Response) modelView {
 }
 
 func TestInstanceCRUD(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	apiKey := testAPIKey("TEST_INSTANCE_API_KEY", "1234")
 
@@ -101,6 +103,7 @@ func TestInstanceCRUD(t *testing.T) {
 
 	// Update without api_key preserves the stored key.
 	update := `{"name":"ui-instance",
+	  "allow_private_upstream":true,
 	  "models":["gpt-upstream"],
 	  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v2"}],
 	  "max_fails":5,"cooldown_secs":15}`
@@ -360,9 +363,11 @@ func TestProviderCompatView(t *testing.T) {
 }
 
 func TestInstanceRequiresModels(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
 		`{"name":"no-models","api_key":"k",
+		  "allow_private_upstream":true,
 		  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v1"}]}`)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()

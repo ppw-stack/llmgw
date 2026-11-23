@@ -12,14 +12,19 @@ services:
     image: llmgw:test
     container_name: llmgw-test
     restart: unless-stopped
+    command: ["-config", "/etc/llmgw/test-config.yaml"]
     ports:
       - "8080:8080"
     volumes:
-      - ./test-config.yaml:/etc/llmgw/config.yaml:ro
+      # 挂目录而不是挂单个文件：单文件绑定会钉住 inode，编辑器改写文件
+      # （sed -i、另存为）换了 inode 之后，容器里就看不到新内容，热加载会失效。
+      - ./:/etc/llmgw:ro
       - llmgw-test-data:/data
     depends_on:
       mock:
         condition: service_healthy
+    networks:
+      - llmgw-test
     healthcheck:
       test: ["CMD", "llmgw", "-healthcheck"]
       interval: 10s
@@ -35,12 +40,24 @@ services:
       - ./mock_upstream.py:/app/mock_upstream.py:ro
     expose:
       - "8000"
+    networks:
+      - llmgw-test
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
       interval: 5s
       timeout: 2s
       retries: 10
       start_period: 2s
+
+networks:
+  # 固定网段，让容器看到的来源 IP 可复现。compose 默认网络每次 Docker
+  # Desktop 重启都会换网段（192.168.x.1），那样 server.admin_allowed_cidrs
+  # 的白名单就没法写死在配置里。
+  llmgw-test:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.222.0/24
 
 volumes:
   llmgw-test-data:

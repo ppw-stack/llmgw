@@ -81,11 +81,50 @@ type Server struct {
 	ShutdownTimeout   Duration `yaml:"shutdown_timeout"`
 	MaxBodyBytes      int64    `yaml:"max_body_bytes"`
 
+	// AdminAllowedCIDRs restricts the whole admin surface (console API and
+	// login). Empty means "everyone the listener can reach", which is only
+	// acceptable behind a network boundary.
+	AdminAllowedCIDRs []string `yaml:"admin_allowed_cidrs"`
+
+	// AdminEnabled opens or closes the whole management surface. It is a
+	// pointer so that "not configured" (open) can be told apart from an
+	// explicit false. Changing it takes effect on the next config reload,
+	// which is the emergency lever when the console is suspected to be
+	// compromised.
+	AdminEnabled *bool `yaml:"admin_enabled"`
+
+	// KeyRPM is the per-gateway-key request budget per minute. Zero disables
+	// the limiter.
+	KeyRPM int `yaml:"key_rpm"`
+
+	// KeyMaxConcurrent caps the number of in-flight requests of one key.
+	// Zero disables the cap.
+	KeyMaxConcurrent int `yaml:"key_max_concurrent"`
+
 	TrustedPrefixes []netip.Prefix `yaml:"-"`
+
+	// AdminPrefixes holds the parsed admin_allowed_cidrs entries. The admin
+	// surface only answers requests whose source address is inside one of
+	// them; an empty list means "everybody the listener can reach".
+	AdminPrefixes []netip.Prefix `yaml:"-"`
 }
+
+// AdminIsEnabled reports whether the management surface is open. An unset
+// admin_enabled means open, so a config file that predates the option keeps
+// the previous behaviour.
+func (s *Server) AdminIsEnabled() bool {
+	return s.AdminEnabled == nil || *s.AdminEnabled
+}
+
+// boolPtr returns a pointer to v. It exists for the optional booleans in the
+// config, where "not set" and "set to false" mean different things.
+func boolPtr(v bool) *bool { return &v }
 
 type Database struct {
 	Path string `yaml:"path"`
+	// RetentionDays prunes request logs, audit logs and daily usage rows
+	// older than this many days. Zero keeps everything forever.
+	RetentionDays int `yaml:"retention_days"`
 }
 
 type Log struct {
@@ -185,6 +224,7 @@ func defaults() *Config {
 	c := &Config{}
 	c.Server.Addr = ":8080"
 	c.Server.AdminUsername = "admin"
+	c.Server.AdminEnabled = boolPtr(true)
 	c.Server.SessionTTL = Duration(12 * time.Hour)
 	c.Server.ReadHeaderTimeout = Duration(10 * time.Second)
 	c.Server.ShutdownTimeout = Duration(30 * time.Second)
@@ -261,6 +301,9 @@ func (c *Config) normalize() error {
 	if c.Server.AdminUsername == "" {
 		c.Server.AdminUsername = "admin"
 	}
+	if c.Server.AdminEnabled == nil {
+		c.Server.AdminEnabled = boolPtr(true)
+	}
 	if c.Server.SessionTTL == 0 {
 		c.Server.SessionTTL = Duration(12 * time.Hour)
 	}
@@ -290,8 +333,37 @@ func (c *Config) normalize() error {
 	if c.Server.MaxBodyBytes <= 0 {
 		c.Server.MaxBodyBytes = 32 << 20
 	}
+	if c.Server.KeyRPM < 0 {
+		return fmt.Errorf("server.key_rpm must not be negative")
+	}
+	if c.Server.KeyMaxConcurrent < 0 {
+		return fmt.Errorf("server.key_max_concurrent must not be negative")
+	}
+	for _, raw := range c.Server.AdminAllowedCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			addr, err := netip.ParseAddr(raw)
+			if err != nil {
+				return fmt.Errorf("server.admin_allowed_cidrs: invalid address %q", raw)
+			}
+			c.Server.AdminPrefixes = append(c.Server.AdminPrefixes,
+				netip.PrefixFrom(addr, addr.BitLen()))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("server.admin_allowed_cidrs: invalid CIDR %q", raw)
+		}
+		c.Server.AdminPrefixes = append(c.Server.AdminPrefixes, prefix.Masked())
+	}
 	if c.Database.Path == "" {
 		return fmt.Errorf("database.path is required")
+	}
+	if c.Database.RetentionDays < 0 {
+		return fmt.Errorf("database.retention_days must not be negative")
 	}
 	if c.UpstreamTimeout <= 0 {
 		c.UpstreamTimeout = Duration(DefaultTimeout)
@@ -383,7 +455,7 @@ func (c *Config) expandLegacyProviders() error {
 	return nil
 }
 
-func normalizeBaseURL(owner, field, raw string) (string, error) {
+func normalizeBaseURL(owner, field, raw string, allowPrivate bool) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
@@ -391,6 +463,9 @@ func normalizeBaseURL(owner, field, raw string) (string, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", fmt.Errorf("%s: %s must be an absolute http(s) URL, got %q",
 			owner, field, raw)
+	}
+	if err := CheckUpstreamHost(owner, field, raw, allowPrivate); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(raw, "/"), nil
 }

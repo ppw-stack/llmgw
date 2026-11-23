@@ -202,8 +202,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (*adminIde
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, value string, expires time.Time) {
-	secure := s.secureCookie || r.TLS != nil ||
-		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	secure := s.secureCookie || s.isHTTPS(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    value,

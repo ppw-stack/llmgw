@@ -20,6 +20,10 @@ curl -b cookies.txt https://gw.example.com/admin/api/keys
 
 ## 认证
 
+> 整个管理面（`/admin/api/*`，含登录接口）可以被关掉：配置 `server.admin_enabled: false`
+> 后，这些接口与控制台页面一律返回 `403 the management console is disabled by configuration`，
+> 数据面不受影响。该开关支持热加载，改配置 1 秒内生效。
+
 ### 登录
 
 ```
@@ -208,6 +212,7 @@ GET /admin/api/instances
   "max_fails": 3,
   "cooldown_secs": 30,
   "timeout_secs": 0,
+  "allow_private_upstream": false,
   "created_at": "2026-11-22T10:00:00Z",
   "updated_at": "2026-11-22T10:00:00Z"
 }]
@@ -249,6 +254,20 @@ POST /admin/api/instances
 ```
 
 `models` 必填，至少一项；熔断参数可省略，默认 `max_fails=3`、`cooldown_secs=30`。
+
+`endpoints[].base_url` 默认只接受公网地址：loopback、RFC 1918、link-local（含云元数据 `169.254.169.254`）与 `*.internal` 等特殊域名会返回 `400`。本地 mock 或内网自建上游必须显式放行：
+
+```
+{
+  "name": "local-mock",
+  "api_key": "sk-test",
+  "allow_private_upstream": true,
+  "endpoints": [{"protocol": "openai", "base_url": "http://127.0.0.1:9000"}],
+  "models": ["mock-model"]
+}
+```
+
+即使放行了，运行期也会在拨号前再校验一次解析结果；域名后来解析到内网同样会被拒绝。
 
 校验失败返回 `400`；名称重复返回 `409`。内置端点不允许再传 `endpoints`。
 

@@ -28,6 +28,12 @@ log:
 # 单个实例可以用 timeout_secs 调低（不能调高）。
 upstream_timeout: 120s
 
+# 调度相关的全局设置。
+# timezone 是所有时间窗口的判定时区：默认 Asia/Shanghai，
+# 也支持 "UTC"、IANA 名称（如 "America/New_York"）或固定偏移（如 "+08:00"）。
+schedule:
+  timezone: "Asia/Shanghai"
+
 # 上游接入点（物理层）：一个账号 + 它提供的协议入口。
 # 这里不写分流策略——策略属于下面的模型层。
 instances:
@@ -79,6 +85,22 @@ instances:
         base_url: https://open.bigmodel.cn/api/anthropic
     models: [glm-4.6]
 
+  # 支持错峰计费的厂商：谷时价格更低，用时间窗口让它在谷时插队。
+  - name: deepseek
+    api_key: "${DEEPSEEK_KEY}"
+    endpoints:
+      - protocol: openai
+        base_url: https://api.deepseek.com/v1
+    models: [deepseek-chat]
+
+  # 同一个对外模型的另一个上游，平时用它，谷时让 deepseek 插队。
+  - name: moonshot
+    api_key: "${MOONSHOT_KEY}"
+    endpoints:
+      - protocol: openai
+        base_url: https://api.moonshot.cn/v1
+    models: [deepseek-chat]
+
 # 模型（逻辑层）：对外模型名 + 候选实例链 + 分流策略。
 models:
   # 单实例
@@ -104,6 +126,30 @@ models:
     strategy: failover
     instances:
       - name: glm
+
+  # 时间窗口（峰谷计费）：厂商在特定时段打折时，让便宜的候选在那段时间插队。
+  # 时间按上面的 schedule.timezone 判定，窗口是左闭右开 [start, end)，
+  # 起晚于止视为跨天（如 "22:00" - "06:00"）。
+  - name: deepseek-chat
+    upstream: deepseek-chat
+    strategy: failover
+    instances:
+      # 谷时折扣时段内生效优先级降到 0，抢到最前面
+      - name: deepseek
+        priority: 10
+        windows:
+          - start: "00:00"
+            end: "08:00"
+            priority: 0
+      # 平时用另一个厂商
+      - name: moonshot
+        priority: 1
+        # only: true 表示这个候选只在窗口内参与路由，窗口外直接跳过。
+        # 例如某个账号只在谷时才有额度：
+        # windows:
+        #   - start: "00:00"
+        #     end: "08:00"
+        #     only: true
 
 # 可选。USD per million tokens，仅用于成本估算。
 pricing:

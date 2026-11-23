@@ -56,6 +56,7 @@ type Config struct {
 	Server    Server           `yaml:"server"`
 	Database  Database         `yaml:"database"`
 	Log       Log              `yaml:"log"`
+	Schedule  Schedule         `yaml:"schedule"`
 	Instances []Instance       `yaml:"instances"`
 	Models    []Model          `yaml:"models"`
 	Providers []Provider       `yaml:"providers"`
@@ -191,6 +192,7 @@ func defaults() *Config {
 	c.Database.Path = "./data/llmgw.db"
 	c.Log.Level = "info"
 	c.Log.Format = "json"
+	c.Schedule.Timezone = DefaultTimezone
 	c.UpstreamTimeout = Duration(DefaultTimeout)
 	return c
 }
@@ -294,6 +296,13 @@ func (c *Config) normalize() error {
 	if c.UpstreamTimeout <= 0 {
 		c.UpstreamTimeout = Duration(DefaultTimeout)
 	}
+	// The schedule timezone is resolved once here so that a typo fails at
+	// load time instead of silently shifting every time window.
+	loc, err := resolveLocation(c.Schedule.Timezone)
+	if err != nil {
+		return err
+	}
+	c.Schedule.Location = loc
 	if len(c.Instances) == 0 && len(c.Models) == 0 && len(c.Providers) == 0 {
 		return fmt.Errorf("at least one instance is required")
 	}

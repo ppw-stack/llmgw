@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/pw/llmgw/internal/config"
 )
@@ -15,8 +16,14 @@ import (
 // maxResponseBytes bounds the model list a provider may return.
 const maxResponseBytes = 1 << 20
 
+// requestTimeout bounds one model-list request even when the caller passes a
+// context without a deadline.
+const requestTimeout = 10 * time.Second
+
 // Candidate is one model an upstream reports as available.
 type Candidate struct {
+	// ID is the model name the upstream reports, used as the candidate's
+	// identity when the console lists it.
 	ID string `json:"id"`
 	// Protocols lists the ingress protocols the upstream says the model
 	// supports. It is empty when the provider does not expose that metadata.
@@ -26,6 +33,9 @@ type Candidate struct {
 // Fetch asks a provider for its model list. protocol selects the auth header
 // so the request matches the way the gateway calls chat completions.
 func Fetch(ctx context.Context, client *http.Client, endpoint, protocol, apiKey string) ([]Candidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build model list request: %w", err)

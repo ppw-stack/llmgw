@@ -239,12 +239,16 @@ func (s *Server) adminPresetModels(w http.ResponseWriter, r *http.Request) {
 
 	suggested, err := config.PresetModels(pr.ID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		s.log.Error("load preset suggested models", "method", r.Method, "path", r.URL.Path,
+			"request_id", requestID(r), "preset", pr.ID, "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "failed to load preset models")
 		return
 	}
 	endpoint, protocol, err := presetModelsEndpoint(pr.ID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		s.log.Error("resolve preset model list endpoint", "method", r.Method, "path", r.URL.Path,
+			"request_id", requestID(r), "preset", pr.ID, "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "failed to load preset models")
 		return
 	}
 
@@ -257,7 +261,8 @@ func (s *Server) adminPresetModels(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	models, err := discovery.Fetch(ctx, presetModelsClient, endpoint, protocol, apiKey)
 	if err != nil {
-		s.log.Warn("query preset model list", "preset", pr.ID, "err", err)
+		s.log.Warn("query preset model list", "method", r.Method, "path", r.URL.Path,
+			"request_id", requestID(r), "preset", pr.ID, "err", err)
 		view.Warning = joinWarnings(view.Warning, "上游模型列表查询失败，已回退到预设建议")
 		writeJSON(w, http.StatusOK, view)
 		return

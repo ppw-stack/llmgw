@@ -37,10 +37,13 @@ type InstanceRecord struct {
 	UpdatedAt time.Time
 }
 
-// ModelInstanceSpec binds a model to one instance. The instance is referenced
-// by name because that is how the configuration and the admin API speak.
+// ModelInstanceSpec binds a model to one concrete upstream model of one
+// instance. The instance is referenced by name because that is how the
+// configuration and the admin API speak.
 type ModelInstanceSpec struct {
 	Instance string
+	// Upstream is the model name this candidate sends to the instance.
+	Upstream string
 	Priority int
 	// Windows are the time ranges in which this candidate takes over
 	// another priority or is the only candidate allowed to serve the model.
@@ -50,7 +53,6 @@ type ModelInstanceSpec struct {
 // ModelSpec is the write form of a model.
 type ModelSpec struct {
 	Name      string
-	Upstream  string
 	Strategy  string
 	Instances []ModelInstanceSpec
 }
@@ -201,8 +203,8 @@ func (s *Store) CountModels() (int, error) {
 }
 
 func (s *Store) ListModelRecords() ([]ModelRecord, error) {
-	rows, err := s.db.Query(`SELECT m.id, m.name, m.upstream, m.strategy, m.created_at, m.updated_at,
-		i.name, mi.priority, mi.windows_json
+	rows, err := s.db.Query(`SELECT m.id, m.name, m.strategy, m.created_at, m.updated_at,
+		i.name, mi.upstream, mi.priority, mi.windows_json
 		FROM models m
 		LEFT JOIN model_instances mi ON mi.model_id = m.id
 		LEFT JOIN instances i ON i.id = mi.instance_id
@@ -218,11 +220,12 @@ func (s *Store) ListModelRecords() ([]ModelRecord, error) {
 			created  string
 			updated  string
 			instName sql.NullString
+			upstream sql.NullString
 			priority sql.NullInt64
 			windows  sql.NullString
 		)
-		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Upstream, &rec.Strategy, &created, &updated,
-			&instName, &priority, &windows); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Strategy, &created, &updated,
+			&instName, &upstream, &priority, &windows); err != nil {
 			return nil, err
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -230,6 +233,7 @@ func (s *Store) ListModelRecords() ([]ModelRecord, error) {
 		if instName.Valid {
 			spec := ModelInstanceSpec{
 				Instance: instName.String,
+				Upstream: upstream.String,
 				Priority: int(priority.Int64),
 			}
 			if windows.Valid && windows.String != "" {
@@ -262,8 +266,8 @@ func (s *Store) CreateModel(spec ModelSpec) (*ModelRecord, error) {
 	}
 	defer tx.Rollback()
 	now := nowStamp()
-	res, err := tx.Exec(`INSERT INTO models(name, upstream, strategy, created_at, updated_at)
-		VALUES(?,?,?,?,?)`, spec.Name, spec.Upstream, spec.Strategy, now, now)
+	res, err := tx.Exec(`INSERT INTO models(name, strategy, created_at, updated_at)
+		VALUES(?,?,?,?)`, spec.Name, spec.Strategy, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -285,8 +289,8 @@ func (s *Store) UpdateModel(id int64, spec ModelSpec) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE models SET name=?, upstream=?, strategy=?, updated_at=? WHERE id=?`,
-		spec.Name, spec.Upstream, spec.Strategy, nowStamp(), id)
+	res, err := tx.Exec(`UPDATE models SET name=?, strategy=?, updated_at=? WHERE id=?`,
+		spec.Name, spec.Strategy, nowStamp(), id)
 	if err != nil {
 		return err
 	}
@@ -340,8 +344,8 @@ func replaceModelInstances(tx *sql.Tx, modelID int64, instances []ModelInstanceS
 		if mi.Windows == nil {
 			windowsJSON = []byte("[]")
 		}
-		if _, err := tx.Exec(`INSERT INTO model_instances(model_id, instance_id, priority, windows_json)
-			VALUES(?,?,?,?)`, modelID, instanceID, mi.Priority, string(windowsJSON)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO model_instances(model_id, instance_id, upstream, priority, windows_json)
+			VALUES(?,?,?,?,?)`, modelID, instanceID, mi.Upstream, mi.Priority, string(windowsJSON)); err != nil {
 			return fmt.Errorf("instance %q: store candidate: %w", mi.Instance, err)
 		}
 	}
@@ -390,12 +394,12 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 	for _, rec := range modelRecords {
 		m := config.Model{
 			Name:     rec.Name,
-			Upstream: rec.Upstream,
 			Strategy: rec.Strategy,
 		}
 		for _, mi := range rec.Instances {
 			m.Instances = append(m.Instances, config.ModelInstance{
 				Name:     mi.Instance,
+				Upstream: mi.Upstream,
 				Priority: mi.Priority,
 				Windows:  mi.Windows,
 			})
@@ -442,12 +446,12 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 	for _, m := range models {
 		spec := ModelSpec{
 			Name:     m.Name,
-			Upstream: m.Upstream,
 			Strategy: m.Strategy,
 		}
 		for _, mi := range m.Instances {
 			spec.Instances = append(spec.Instances, ModelInstanceSpec{
 				Instance: mi.Name,
+				Upstream: mi.Upstream,
 				Priority: mi.Priority,
 				Windows:  mi.Windows,
 			})

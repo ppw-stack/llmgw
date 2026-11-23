@@ -205,15 +205,15 @@ func TestModelCRUD(t *testing.T) {
 
 	// A model may list several instances; the order is the priority.
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
-		`{"name":"ui-model","upstream":"gpt-upstream","strategy":"failover",
-		  "instances":[{"instance":"test","priority":0},{"instance":"backup","priority":1}]}`)
+		`{"name":"ui-model","strategy":"failover",
+		  "instances":[{"instance":"test","upstream":"gpt-upstream","priority":0},{"instance":"backup","upstream":"gpt-upstream","priority":1}]}`)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		t.Fatalf("create model = %d %s", resp.StatusCode, body)
 	}
 	created := decodeModel(t, resp)
-	if created.Name != "ui-model" || created.Upstream != "gpt-upstream" {
+	if created.Name != "ui-model" {
 		t.Fatalf("model = %+v", created)
 	}
 	if len(created.Instances) != 2 {
@@ -221,6 +221,9 @@ func TestModelCRUD(t *testing.T) {
 	}
 	if created.Instances[0].Instance != "test" || created.Instances[1].Instance != "backup" {
 		t.Fatalf("candidates not ordered: %+v", created.Instances)
+	}
+	if created.Instances[0].Upstream != "gpt-upstream" {
+		t.Fatalf("candidate upstream = %+v", created.Instances[0])
 	}
 
 	// The model is routed right away: the primary instance stays first.
@@ -236,7 +239,7 @@ func TestModelCRUD(t *testing.T) {
 
 	// A model that references an unknown instance is rejected.
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
-		`{"name":"ghost-model","instances":[{"instance":"ghost"}]}`)
+		`{"name":"ghost-model","instances":[{"instance":"ghost","upstream":"gpt-upstream"}]}`)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -267,7 +270,7 @@ func TestModelCRUD(t *testing.T) {
 func TestDuplicateModelNameIsRejected(t *testing.T) {
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
-		`{"name":"gpt-test","instances":[{"instance":"test"}]}`)
+		`{"name":"gpt-test","instances":[{"instance":"test","upstream":"gpt-upstream"}]}`)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
@@ -563,7 +566,7 @@ func TestPresetModelsFailureFallsBack(t *testing.T) {
 func TestModelRejectsAnUndeclaredUpstream(t *testing.T) {
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
-		`{"name":"bad-model","upstream":"not-declared","instances":[{"instance":"test"}]}`)
+		`{"name":"bad-model","instances":[{"instance":"test","upstream":"not-declared"}]}`)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest ||

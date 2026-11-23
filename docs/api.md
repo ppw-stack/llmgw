@@ -117,7 +117,7 @@ DELETE /admin/api/keys/1    → 204
 分成两层的原因：一个账号常常能提供多个模型，一个模型也常常由多个账号提供 —— 这是多对多关系。因此：
 
 - **上游接入点（instance）** 是物理层：一个账号 + 它提供的协议入口 + 熔断参数。
-- **模型（model）** 是逻辑层：对外模型名、上游模型名、分流策略、候选接入点链。
+- **模型（model）** 是逻辑层：对外模型名、分流策略、候选链（每个候选 = 接入点 + 该接入点中的一个具体模型）。
 
 模型名全局唯一；同一模型可以挂多个接入点，按 `priority` 组成主备链。
 
@@ -313,28 +313,28 @@ GET /admin/api/models
 200 [{
   "id": 1,
   "name": "MiniMax-M3.1-Flash",
-  "upstream": "MiniMax-M3.1-Flash",
   "strategy": "failover",
   "instances": [
-    {"instance": "minimax", "priority": 0, "windows": []},
-    {"instance": "minimax-backup", "priority": 1, "windows": []}
+    {"instance": "minimax", "upstream": "MiniMax-M3.1-Flash", "priority": 0, "windows": []},
+    {"instance": "minimax-backup", "upstream": "MiniMax-M3.1-Flash", "priority": 1, "windows": []}
   ],
   "timezone": "Asia/Shanghai",
   "server_time": "2026-11-22T18:00:00Z",
   "effective_candidates": [
-    {"instance": "minimax", "priority": 0, "base_priority": 0, "active": true},
-    {"instance": "minimax-backup", "priority": 1, "base_priority": 1, "active": true}
+    {"instance": "minimax", "upstream": "MiniMax-M3.1-Flash", "priority": 0, "base_priority": 0, "active": true},
+    {"instance": "minimax-backup", "upstream": "MiniMax-M3.1-Flash", "priority": 1, "base_priority": 1, "active": true}
   ],
   "created_at": "2026-11-22T10:00:00Z",
   "updated_at": "2026-11-22T10:00:00Z"
 }]
 ```
 
-候选按 `priority` 升序返回；数字越小越优先，主实例失败后自动切到下一个。
+候选按 `priority` 升序返回；数字越小越优先，主实例失败后自动切到下一个。每个候选是「接入点 + 该接入点声明的一个具体模型」。
 
 - `timezone` 是时间窗口的判定时区（对应 `config.yaml` 的 `schedule.timezone`）。
 - `server_time` 是计算生效顺序时的服务端时间。
-- `effective_candidates` 是**此刻**的候选顺序：`priority` 是当前生效的优先级，`base_priority` 是配置里的优先级，
+- `effective_candidates` 是**此刻**的候选顺序：`instance` / `upstream` 是候选的接入点和发给它的模型名，
+  `priority` 是当前生效的优先级，`base_priority` 是配置里的优先级，
   `active` 表示该候选此刻是否参与路由，`window` 给出正在命中的时间窗口（如 `"00:00-08:00"`）。
 
 #### 创建 / 更新 / 删除
@@ -343,9 +343,8 @@ GET /admin/api/models
 POST /admin/api/models
 {
   "name": "claude-sonnet-4-5",
-  "upstream": "glm-4.6",
   "strategy": "failover",
-  "instances": [{"instance": "glm", "priority": 0, "windows": []}]
+  "instances": [{"instance": "glm", "upstream": "glm-4.6", "priority": 0, "windows": []}]
 }
 
 201 <model view>
@@ -354,12 +353,13 @@ PUT  /admin/api/models/1   → 200 <model view>
 DELETE /admin/api/models/1 → 204
 ```
 
-- `upstream` 省略时与 `name` 相同，这就是别名机制：对外叫 `claude-sonnet-4-5`，上游仍是 `glm-4.6`。
+- 模型的 `name` 是对外暴露的名字；每个候选的 `upstream` 是真正发给该接入点的模型名，必填。
+- `upstream` 必须出现在对应接入点的 `models` 声明里，否则返回 `400`（报出是哪个模型、哪个接入点缺哪一项）。
+- 同一对外模型的不同候选可以指向不同接入点的不同上游模型，例如 `workbuddy/glm-5.3-flash` → 接入点 A 的 `glm-5.3-flash`。
 - `instances` 至少一项，且引用的接入点必须存在，否则 `400`。
 - 同一个模型不能重复引用同一个接入点。
 - 模型名重复返回 `409`。
 - `strategy` 目前只接受 `failover`。
-- 模型的 `upstream` 必须出现在**每个**候选接入点的 `models` 声明里，否则返回 `400`（报出是哪个接入点缺哪一项）。
 
 #### 时间窗口
 
@@ -370,16 +370,17 @@ DELETE /admin/api/models/1 → 204
 POST /admin/api/models
 {
   "name": "deepseek-chat",
-  "upstream": "deepseek-chat",
   "strategy": "failover",
   "instances": [
     {
       "instance": "deepseek",
+      "upstream": "deepseek-chat",
       "priority": 10,
       "windows": [{"start": "00:00", "end": "08:00", "priority": 0}]
     },
     {
       "instance": "glm",
+      "upstream": "glm-4.6",
       "priority": 1,
       "windows": [{"start": "00:00", "end": "08:00", "only": true}]
     }

@@ -30,8 +30,8 @@ func TestModelWindowsInAdminAPI(t *testing.T) {
 	resp.Body.Close()
 
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
-		`{"name":"window-model","upstream":"gpt-upstream","strategy":"failover",
-		  "instances":[{"instance":"cheap","priority":5,
+		`{"name":"window-model","strategy":"failover",
+		  "instances":[{"instance":"cheap","upstream":"gpt-upstream","priority":5,
 		    "windows":[{"start":"00:00","end":"08:00","priority":0}]}]}`)
 	if resp.StatusCode != http.StatusCreated {
 		body := readAll(t, resp)
@@ -78,18 +78,18 @@ func TestModelWindowsAreValidated(t *testing.T) {
 	}{
 		{
 			name: "broken clock time",
-			body: `{"name":"bad-window","upstream":"gpt-upstream",
-			  "instances":[{"instance":"cheap","windows":[{"start":"25:00","end":"08:00","priority":0}]}]}`,
+			body: `{"name":"bad-window",
+			  "instances":[{"instance":"cheap","upstream":"gpt-upstream","windows":[{"start":"25:00","end":"08:00","priority":0}]}]}`,
 		},
 		{
 			name: "equal start and end",
-			body: `{"name":"bad-window","upstream":"gpt-upstream",
-			  "instances":[{"instance":"cheap","windows":[{"start":"08:00","end":"08:00","priority":0}]}]}`,
+			body: `{"name":"bad-window",
+			  "instances":[{"instance":"cheap","upstream":"gpt-upstream","windows":[{"start":"08:00","end":"08:00","priority":0}]}]}`,
 		},
 		{
 			name: "window without meaning",
-			body: `{"name":"bad-window","upstream":"gpt-upstream",
-			  "instances":[{"instance":"cheap","windows":[{"start":"08:00","end":"09:00"}]}]}`,
+			body: `{"name":"bad-window",
+			  "instances":[{"instance":"cheap","upstream":"gpt-upstream","windows":[{"start":"08:00","end":"09:00"}]}]}`,
 		},
 	}
 	for _, tc := range cases {
@@ -119,8 +119,8 @@ func TestModelWindowTakesOverNow(t *testing.T) {
 	now := time.Now().UTC()
 	start := now.Add(-time.Hour).Format("15:04")
 	end := now.Add(time.Hour).Format("15:04")
-	body := fmt.Sprintf(`{"name":"open-model","upstream":"gpt-upstream","strategy":"failover",
-	  "instances":[{"instance":"test","priority":7,
+	body := fmt.Sprintf(`{"name":"open-model","strategy":"failover",
+	  "instances":[{"instance":"test","upstream":"gpt-upstream","priority":7,
 	    "windows":[{"start":%q,"end":%q,"priority":0}]}]}`, start, end)
 
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models", body)
@@ -164,8 +164,8 @@ func TestModelOutsideItsWindowIsUnavailable(t *testing.T) {
 	now := time.Now().UTC()
 	start := now.Add(-2 * time.Hour).Format("15:04")
 	end := now.Add(-1 * time.Hour).Format("15:04")
-	body := fmt.Sprintf(`{"name":"closed-model","upstream":"gpt-upstream","strategy":"failover",
-	  "instances":[{"instance":"test","priority":0,
+	body := fmt.Sprintf(`{"name":"closed-model","strategy":"failover",
+	  "instances":[{"instance":"test","upstream":"gpt-upstream","priority":0,
 	    "windows":[{"start":%q,"end":%q,"only":true}]}]}`, start, end)
 
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models", body)

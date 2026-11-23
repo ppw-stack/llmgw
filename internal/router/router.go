@@ -116,7 +116,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					Protocol:      ep.Protocol,
 					BaseURL:       ep.BaseURL,
 					Version:       version,
-					UpstreamModel: m.Upstream,
+					UpstreamModel: cand.Upstream,
 					Key:           inst.APIKey,
 					Timeout:       timeout,
 					MaxFails:      inst.MaxFails,

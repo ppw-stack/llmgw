@@ -103,9 +103,10 @@ func TestModelListForms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	var found bool
 	for _, m := range cfg.Models {
-		if m.Name == "claude-sonnet-4-5" && m.Upstream == "glm-4.6" {
+		if m.Name == "claude-sonnet-4-5" && len(m.Instances) == 1 &&
+			m.Instances[0].Upstream == "glm-4.6" {
 			found = true
 		}
 	}
@@ -262,8 +263,8 @@ instances:
 models:
   - name: MiniMax-M3.1-Flash
     instances:
-      - {name: cn-a, priority: 0}
-      - {name: cn-b, priority: 1}
+      - {name: cn-a, upstream: MiniMax-M3.1-Flash, priority: 0}
+      - {name: cn-b, upstream: MiniMax-M3.1-Flash, priority: 1}
 `
 
 func TestTopologyFormLoads(t *testing.T) {
@@ -284,8 +285,8 @@ func TestTopologyFormLoads(t *testing.T) {
 
 func TestModelCandidatesAreSortedByPriority(t *testing.T) {
 	body := strings.Replace(topologyConfig,
-		"      - {name: cn-a, priority: 0}\n      - {name: cn-b, priority: 1}",
-		"      - {name: cn-b, priority: 1}\n      - {name: cn-a, priority: 0}", 1)
+		"      - {name: cn-a, upstream: MiniMax-M3.1-Flash, priority: 0}\n      - {name: cn-b, upstream: MiniMax-M3.1-Flash, priority: 1}",
+		"      - {name: cn-b, upstream: MiniMax-M3.1-Flash, priority: 1}\n      - {name: cn-a, upstream: MiniMax-M3.1-Flash, priority: 0}", 1)
 	cfg, err := Load(writeConfig(t, body))
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +301,7 @@ func TestModelNameMustBeUnique(t *testing.T) {
 	body := topologyConfig + `
   - name: MiniMax-M3.1-Flash
     instances:
-      - {name: cn-a}
+      - {name: cn-a, upstream: MiniMax-M3.1-Flash}
 `
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "duplicate model") {
@@ -309,7 +310,7 @@ func TestModelNameMustBeUnique(t *testing.T) {
 }
 
 func TestModelMustReferenceAnExistingInstance(t *testing.T) {
-	body := strings.Replace(topologyConfig, "{name: cn-b, priority: 1}", "{name: nope, priority: 1}", 1)
+	body := strings.Replace(topologyConfig, "{name: cn-b, upstream: MiniMax-M3.1-Flash, priority: 1}", "{name: nope, upstream: MiniMax-M3.1-Flash, priority: 1}", 1)
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected unknown instance error, got %v", err)
@@ -317,7 +318,7 @@ func TestModelMustReferenceAnExistingInstance(t *testing.T) {
 }
 
 func TestModelCannotListTheSameInstanceTwice(t *testing.T) {
-	body := strings.Replace(topologyConfig, "{name: cn-b, priority: 1}", "{name: cn-a, priority: 1}", 1)
+	body := strings.Replace(topologyConfig, "{name: cn-b, upstream: MiniMax-M3.1-Flash, priority: 1}", "{name: cn-a, upstream: MiniMax-M3.1-Flash, priority: 1}", 1)
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "listed twice") {
 		t.Fatalf("expected duplicate instance error, got %v", err)
@@ -401,9 +402,8 @@ instances:
     models: [glm-4.6]
 models:
   - name: claude-sonnet-4-5
-    upstream: glm-4.6
     instances:
-      - {name: glm}
+      - {name: glm, upstream: glm-4.6}
 `
 	if _, err := Load(writeConfig(t, body)); err != nil {
 		t.Fatalf("upstream alias should match the declaration: %v", err)
@@ -413,6 +413,66 @@ models:
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "does not declare upstream model") {
 		t.Fatalf("public name must not satisfy the declaration: %v", err)
+	}
+}
+
+func TestCandidatesMayUseDifferentUpstreams(t *testing.T) {
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: a
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://a/v1"}
+    models: [glm-4.6]
+  - name: b
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://b/v1"}
+    models: [glm-5.3-flash]
+models:
+  - name: workbuddy/glm-5.3-flash
+    instances:
+      - {name: a, upstream: glm-4.6, priority: 0}
+      - {name: b, upstream: glm-5.3-flash, priority: 1}
+`
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	eff, err := cfg.Effective()
+	if err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	cands := eff.Models[0].Instances
+	if len(cands) != 2 || cands[0].Upstream != "glm-4.6" || cands[1].Upstream != "glm-5.3-flash" {
+		t.Fatalf("candidates = %+v", cands)
+	}
+}
+
+func TestCandidateUpstreamIsRequired(t *testing.T) {
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: a
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: "https://a/v1"}
+    models: [u]
+models:
+  - name: m
+    instances:
+      - {name: a}
+`
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "upstream model is required") {
+		t.Fatalf("expected a required-upstream error, got %v", err)
 	}
 }
 
@@ -439,7 +499,7 @@ instances:
 models:
   - name: MiniMax-M3.1-Flash
     instances:
-      - {name: mm}
+      - {name: mm, upstream: MiniMax-M3.1-Flash}
 `
 	cfg, err := Load(writeConfig(t, body))
 	if err != nil {
@@ -469,7 +529,7 @@ instances:
 models:
   - name: MiniMax-M3.1-Flash
     instances:
-      - {name: mm}
+      - {name: mm, upstream: MiniMax-M3.1-Flash}
 `
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "supplies its own endpoints") {
@@ -516,7 +576,7 @@ func TestLegacyProviderExpandsToInstanceAndModel(t *testing.T) {
 	if len(eff.Instances) != 1 || len(eff.Models) != 1 {
 		t.Fatalf("effective = %+v", eff)
 	}
-	if eff.Models[0].Name != "m" || eff.Models[0].Upstream != "m" {
+	if eff.Models[0].Name != "m" || eff.Models[0].Instances[0].Upstream != "m" {
 		t.Fatalf("model = %+v", eff.Models[0])
 	}
 	if len(eff.Models[0].Instances) != 1 || eff.Models[0].Instances[0].Instance != "p" {
@@ -563,9 +623,9 @@ database:
   path: "/tmp/x.db"
 models:
   - name: m
-    upstream: m
     instances:
       - name: missing
+        upstream: m
 `
 	_, err := Load(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {

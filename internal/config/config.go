@@ -418,9 +418,9 @@ func (c *Config) normalize() error {
 	for mi := range c.Models {
 		m := &c.Models[mi]
 		m.Name = strings.TrimSpace(expandEnv(m.Name))
-		m.Upstream = strings.TrimSpace(expandEnv(m.Upstream))
 		for ii := range m.Instances {
 			m.Instances[ii].Name = strings.TrimSpace(expandEnv(m.Instances[ii].Name))
+			m.Instances[ii].Upstream = strings.TrimSpace(expandEnv(m.Instances[ii].Upstream))
 		}
 		if err := NormalizeModel(m); err != nil {
 			return err

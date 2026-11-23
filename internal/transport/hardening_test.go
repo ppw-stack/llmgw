@@ -191,8 +191,7 @@ func TestDialGuardBlocksPrivateUnlessAllowed(t *testing.T) {
 			}},
 			Models: []config.Model{{
 				Name:      "m",
-				Upstream:  "upstream-m",
-				Instances: []config.ModelInstance{{Name: "local"}},
+				Instances: []config.ModelInstance{{Name: "local", Upstream: "upstream-m"}},
 			}},
 		}
 		rt := router.New()

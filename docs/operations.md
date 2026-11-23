@@ -69,34 +69,35 @@ instances:
         base_url: https://api.deepseek.com/v1
     models: [deepseek-chat]
 
-# 模型（逻辑层）：对外名 + 上游名 + 候选接入点链
+# 模型（逻辑层）：对外名 + 候选链（接入点 + 该接入点中的具体模型）
 models:
-  # 单实例
+  # 单接入点单模型
   - name: MiniMax-M3.1-Flash
-    upstream: MiniMax-M3.1-Flash
     strategy: failover
     instances:
       - name: minimax-cn
+        upstream: MiniMax-M3.1-Flash
 
   # 主备：主实例失败后自动切到备份
   - name: MiniMax-M3.1-Flash[1m]
-    upstream: MiniMax-M3.1-Flash
     strategy: failover
     instances:
       - name: minimax-cn
+        upstream: MiniMax-M3.1-Flash
         priority: 0
       - name: minimax-cn-backup
+        upstream: MiniMax-M3.1-Flash
         priority: 1
 
   - name: glm-4.6
-    upstream: glm-4.6
     instances:
       - name: glm
+        upstream: glm-4.6
 
   - name: deepseek-chat
-    upstream: deepseek-chat
     instances:
       - name: deepseek
+        upstream: deepseek-chat
 
 # 可选：用于成本估算，单位美元 / 百万 token
 pricing:
@@ -114,7 +115,7 @@ pricing:
 - 自定义接入点至少填一个端点；只填一个就只开放对应协议。
 - 内置端点（`preset`）不能再填端点；地址由程序内置目录提供。
 - 模型名全局唯一，重复会**拒绝启动**。
-- 接入点的 `models` 必填；模型的上游名必须被每个候选接入点声明，否则拒绝启动。
+- 接入点的 `models` 必填；每个候选的 `upstream` 必须被该候选接入点声明，否则拒绝启动。
 - `priority` 数字越小越优先；上游返回 5xx / 429 / 超时时自动切到下一个候选，4xx 不切换。
 - 熔断：接入点连续失败 `max_fails`（默认 3）次后跳过 `cooldown_secs`（默认 30 秒）。熔断状态在进程内，配置热重载不会清零。
 - 代理走 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。

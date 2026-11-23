@@ -79,9 +79,11 @@ type endpointView struct {
 	BaseURL  string `json:"base_url"`
 }
 
-// modelInstanceInput binds a model to one instance.
+// modelInstanceInput binds a model to one concrete upstream model of an
+// instance.
 type modelInstanceInput struct {
 	Instance string            `json:"instance"`
+	Upstream string            `json:"upstream"`
 	Priority int               `json:"priority"`
 	Windows  []timeWindowInput `json:"windows"`
 }
@@ -97,7 +99,6 @@ type timeWindowInput struct {
 // modelInput is the write form of a model.
 type modelInput struct {
 	Name      string               `json:"name"`
-	Upstream  string               `json:"upstream"`
 	Strategy  string               `json:"strategy"`
 	Instances []modelInstanceInput `json:"instances"`
 }
@@ -106,7 +107,6 @@ type modelInput struct {
 type modelView struct {
 	ID        int64                `json:"id"`
 	Name      string               `json:"name"`
-	Upstream  string               `json:"upstream"`
 	Strategy  string               `json:"strategy"`
 	Instances []modelInstanceInput `json:"instances"`
 	// Timezone is the timezone the time windows are evaluated in.
@@ -123,6 +123,8 @@ type modelView struct {
 // model view was built.
 type effectiveCandidate struct {
 	Instance string `json:"instance"`
+	// Upstream is the model name the candidate sends to the instance.
+	Upstream string `json:"upstream"`
 	// Priority is the priority that applies right now.
 	Priority int `json:"priority"`
 	// BasePriority is the priority the candidate is configured with.
@@ -589,7 +591,6 @@ func (s *Server) modelViews(records []store.ModelRecord) []modelView {
 		views = append(views, modelView{
 			ID:         rec.ID,
 			Name:       rec.Name,
-			Upstream:   rec.Upstream,
 			Strategy:   rec.Strategy,
 			Instances:  modelInstanceViews(rec.Instances),
 			Timezone:   s.scheduleTimezone(),
@@ -613,6 +614,7 @@ func (s *Server) effectiveCandidates(model string, now time.Time) []effectiveCan
 	for _, p := range previews {
 		out = append(out, effectiveCandidate{
 			Instance:     p.Instance,
+			Upstream:     p.Upstream,
 			Priority:     p.Priority,
 			BasePriority: p.BasePriority,
 			Active:       p.Active,
@@ -636,6 +638,7 @@ func modelInstanceViews(instances []store.ModelInstanceSpec) []modelInstanceInpu
 	for _, mi := range instances {
 		out = append(out, modelInstanceInput{
 			Instance: mi.Instance,
+			Upstream: mi.Upstream,
 			Priority: mi.Priority,
 			Windows:  timeWindowViews(mi.Windows),
 		})
@@ -691,7 +694,6 @@ func (s *Server) createModel(w http.ResponseWriter, r *http.Request, id *adminId
 
 	rec, err := s.store.CreateModel(store.ModelSpec{
 		Name:      model.Name,
-		Upstream:  model.Upstream,
 		Strategy:  model.Strategy,
 		Instances: modelInstanceSpecs(model.Instances),
 	})
@@ -759,7 +761,6 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminId
 
 	if err := s.store.UpdateModel(modelID, store.ModelSpec{
 		Name:      model.Name,
-		Upstream:  model.Upstream,
 		Strategy:  model.Strategy,
 		Instances: modelInstanceSpecs(model.Instances),
 	}); err != nil {
@@ -780,7 +781,6 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminId
 		ID: modelID,
 		ModelSpec: store.ModelSpec{
 			Name:      model.Name,
-			Upstream:  model.Upstream,
 			Strategy:  model.Strategy,
 			Instances: modelInstanceSpecs(model.Instances),
 		},
@@ -863,12 +863,12 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 func (in modelInput) toModel() (config.Model, error) {
 	model := config.Model{
 		Name:     strings.TrimSpace(in.Name),
-		Upstream: strings.TrimSpace(in.Upstream),
 		Strategy: strings.TrimSpace(in.Strategy),
 	}
 	for _, mi := range in.Instances {
 		model.Instances = append(model.Instances, config.ModelInstance{
 			Name:     strings.TrimSpace(mi.Instance),
+			Upstream: strings.TrimSpace(mi.Upstream),
 			Priority: mi.Priority,
 			Windows:  toTimeWindows(mi.Windows),
 		})
@@ -901,6 +901,7 @@ func modelInstanceSpecs(instances []config.ModelInstance) []store.ModelInstanceS
 	for _, mi := range instances {
 		out = append(out, store.ModelInstanceSpec{
 			Instance: mi.Name,
+			Upstream: mi.Upstream,
 			Priority: mi.Priority,
 			Windows:  mi.Windows,
 		})

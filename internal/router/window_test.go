@@ -46,11 +46,10 @@ func windowConfig(t *testing.T, tz string, basePriority int, windows []config.Ti
 		},
 		Models: []config.Model{
 			{
-				Name:     "m",
-				Upstream: "m",
+				Name: "m",
 				Instances: []config.ModelInstance{
-					{Name: "cheap", Priority: basePriority, Windows: windows},
-					{Name: "plain", Priority: 0},
+					{Name: "cheap", Upstream: "m", Priority: basePriority, Windows: windows},
+					{Name: "plain", Upstream: "m", Priority: 0},
 				},
 			},
 		},

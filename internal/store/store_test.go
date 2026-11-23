@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -280,10 +281,9 @@ func TestInstanceAndModelCRUD(t *testing.T) {
 
 	modelRec, err := st.CreateModel(ModelSpec{
 		Name:     "glm-4.6",
-		Upstream: "glm-4.6",
 		Strategy: config.StrategyFailover,
 		Instances: []ModelInstanceSpec{
-			{Instance: "glm", Priority: 0},
+			{Instance: "glm", Upstream: "glm-4.6", Priority: 0},
 		},
 	})
 	if err != nil {
@@ -323,9 +323,8 @@ func TestModelCannotReferenceAnUnknownInstance(t *testing.T) {
 	st := testStore(t)
 	_, err := st.CreateModel(ModelSpec{
 		Name:      "m",
-		Upstream:  "m",
 		Strategy:  config.StrategyFailover,
-		Instances: []ModelInstanceSpec{{Instance: "ghost"}},
+		Instances: []ModelInstanceSpec{{Instance: "ghost", Upstream: "m"}},
 	})
 	if err == nil {
 		t.Fatal("expected an error")
@@ -336,22 +335,21 @@ func TestModelCannotReferenceAnUnknownInstance(t *testing.T) {
 // produces one row per candidate.
 func TestModelWithSeveralInstancesReadsBackAsOneModel(t *testing.T) {
 	st := testStore(t)
-	for _, name := range []string{"a", "b"} {
+	for i, name := range []string{"a", "b"} {
 		if _, err := st.CreateInstance(InstanceSpec{
 			Name:      name,
 			Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://x/v1"}},
-			Models:    []string{"m"},
+			Models:    []string{fmt.Sprintf("m-%d", i)},
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := st.CreateModel(ModelSpec{
 		Name:     "m",
-		Upstream: "m",
 		Strategy: config.StrategyFailover,
 		Instances: []ModelInstanceSpec{
-			{Instance: "a", Priority: 0},
-			{Instance: "b", Priority: 1},
+			{Instance: "a", Upstream: "m-0", Priority: 0},
+			{Instance: "b", Upstream: "m-1", Priority: 1},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -368,6 +366,9 @@ func TestModelWithSeveralInstancesReadsBackAsOneModel(t *testing.T) {
 	}
 	if records[0].Instances[0].Instance != "a" || records[0].Instances[1].Instance != "b" {
 		t.Fatalf("candidates not ordered by priority: %+v", records[0].Instances)
+	}
+	if records[0].Instances[0].Upstream != "m-0" || records[0].Instances[1].Upstream != "m-1" {
+		t.Fatalf("candidate upstreams = %+v", records[0].Instances)
 	}
 }
 
@@ -470,10 +471,10 @@ func TestLegacyProviderTableIsMigrated(t *testing.T) {
 	}
 	names := map[string]string{}
 	for _, m := range models {
-		names[m.Name] = m.Upstream
 		if len(m.Instances) != 1 || m.Instances[0].Instance != "glm" {
 			t.Fatalf("model %q instances = %+v", m.Name, m.Instances)
 		}
+		names[m.Name] = m.Instances[0].Upstream
 	}
 	if names["glm-4.6"] != "glm-4.6" || names["claude-sonnet-4-5"] != "glm-4.6" {
 		t.Fatalf("models = %v", names)
@@ -628,6 +629,26 @@ func TestInstanceModelsAreBackfilled(t *testing.T) {
 	}
 	if len(records[0].Models) != 1 || records[0].Models[0] != "old-upstream" {
 		t.Fatalf("models = %v", records[0].Models)
+	}
+
+	// The old model-level upstream is moved onto the candidate and the
+	// column is dropped from the models table.
+	modelRecords, err := st.ListModelRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(modelRecords) != 1 || len(modelRecords[0].Instances) != 1 {
+		t.Fatalf("model records = %+v", modelRecords)
+	}
+	if got := modelRecords[0].Instances[0].Upstream; got != "old-upstream" {
+		t.Fatalf("candidate upstream = %q", got)
+	}
+	modelCols, err := tableColumns(ctx, st.db, "models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modelCols["upstream"] {
+		t.Fatal("models.upstream column was not dropped")
 	}
 }
 

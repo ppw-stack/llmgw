@@ -40,11 +40,11 @@ func TestModelWindowsRoundTrip(t *testing.T) {
 	low := 0
 	spec := ModelSpec{
 		Name:     "m",
-		Upstream: "u",
 		Strategy: config.StrategyFailover,
 		Instances: []ModelInstanceSpec{
 			{
 				Instance: "a",
+				Upstream: "u",
 				Priority: 5,
 				Windows: []config.TimeWindow{
 					{Start: "00:00", End: "08:00", Priority: &low},
@@ -92,10 +92,10 @@ func TestTopologyKeepsWindows(t *testing.T) {
 	low := 0
 	if _, err := st.CreateModel(ModelSpec{
 		Name:     "m",
-		Upstream: "u",
 		Strategy: config.StrategyFailover,
 		Instances: []ModelInstanceSpec{{
 			Instance: "a",
+			Upstream: "u",
 			Priority: 5,
 			Windows:  []config.TimeWindow{{Start: "00:00", End: "08:00", Priority: &low}},
 		}},
@@ -132,10 +132,10 @@ func TestImportTopologyKeepsWindows(t *testing.T) {
 	}}
 	models := []config.Model{{
 		Name:     "m",
-		Upstream: "u",
 		Strategy: config.StrategyFailover,
 		Instances: []config.ModelInstance{{
 			Name:     "a",
+			Upstream: "u",
 			Priority: 5,
 			Windows:  []config.TimeWindow{{Start: "00:00", End: "08:00", Priority: &low}},
 		}},

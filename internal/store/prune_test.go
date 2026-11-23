@@ -192,8 +192,7 @@ func TestImportTopologyKeepsPrivateOptIn(t *testing.T) {
 	}}
 	models := []config.Model{{
 		Name:      "public",
-		Upstream:  "m",
-		Instances: []config.ModelInstance{{Name: "local"}},
+		Instances: []config.ModelInstance{{Name: "local", Upstream: "m"}},
 	}}
 	if err := st.ImportTopology(instances, models, box); err != nil {
 		t.Fatal(err)

@@ -70,9 +70,9 @@ instances:
     models: [gpt-test]
 models:
   - name: gpt-test
-    upstream: gpt-test
     instances:
       - name: mock
+        upstream: gpt-test
 `, adminEnabled, dbPath, testAPIKey())
 }
 

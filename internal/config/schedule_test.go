@@ -153,10 +153,9 @@ func TestEffectiveWindowActive(t *testing.T) {
 func TestNormalizeModelKeepsWindows(t *testing.T) {
 	low := 0
 	model := Model{
-		Name:     "m",
-		Upstream: "u",
+		Name: "m",
 		Instances: []ModelInstance{
-			{Name: "a", Priority: 5, Windows: []TimeWindow{
+			{Name: "a", Upstream: "u", Priority: 5, Windows: []TimeWindow{
 				{Start: "00:00", End: "08:00", Priority: &low},
 			}},
 		},
@@ -187,10 +186,9 @@ func TestEffectiveCompilesWindows(t *testing.T) {
 		},
 		Models: []Model{
 			{
-				Name:     "m",
-				Upstream: "u",
+				Name: "m",
 				Instances: []ModelInstance{
-					{Name: "a", Priority: 5, Windows: []TimeWindow{
+					{Name: "a", Upstream: "u", Priority: 5, Windows: []TimeWindow{
 						{Start: "00:00", End: "08:00", Priority: &low},
 					}},
 				},
@@ -220,9 +218,9 @@ instances:
     models: [u]
 models:
   - name: m
-    upstream: u
     instances:
       - name: a
+        upstream: u
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown timezone should fail the load")
@@ -242,9 +240,9 @@ instances:
     models: [u]
 models:
   - name: m
-    upstream: u
     instances:
       - name: a
+        upstream: u
         priority: 5
         windows:
           - start: "00:00"

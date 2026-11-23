@@ -54,11 +54,10 @@ func newMultiForwarder(t *testing.T, upstreams []string, timeout time.Duration) 
 			Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: upstream}},
 			Models:    []string{"upstream-m"},
 		})
-		candidates = append(candidates, config.ModelInstance{Name: name, Priority: i})
+		candidates = append(candidates, config.ModelInstance{Name: name, Upstream: "upstream-m", Priority: i})
 	}
 	cfg.Models = append(cfg.Models, config.Model{
 		Name:      "m",
-		Upstream:  "upstream-m",
 		Instances: candidates,
 	})
 	rt := router.New()

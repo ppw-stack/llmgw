@@ -115,30 +115,32 @@ instances:
     models: [glm-4.6]
 
 models:
-  # 单实例
+  # 单接入点单模型
   - name: MiniMax-M3.1-Flash
-    upstream: MiniMax-M3.1-Flash
     instances:
       - name: minimax-cn
+        upstream: MiniMax-M3.1-Flash
 
   # 主备：主实例失败后自动切到备份
   - name: MiniMax-M3.1-Flash[1m]
-    upstream: MiniMax-M3.1-Flash
     instances:
       - name: minimax-cn
+        upstream: MiniMax-M3.1-Flash
         priority: 0
       - name: minimax-cn-backup
+        upstream: MiniMax-M3.1-Flash
         priority: 1
 
-  # 别名：对外叫 claude-sonnet-4-5，上游仍是 glm-4.6
+  # 别名：对外叫 claude-sonnet-4-5，发给 glm 的是 glm-4.6
   - name: claude-sonnet-4-5
-    upstream: glm-4.6
     instances:
       - name: glm
+        upstream: glm-4.6
 ```
 
-- 模型名全局唯一；`upstream` 省略时与 `name` 相同，这就是别名机制。
-- 接入点的 `models` 必填；模型的上游名必须被每个候选接入点声明，否则拒绝保存/启动。
+- 模型名全局唯一；每个候选的 `upstream` 必填，必须被该候选接入点声明，否则拒绝保存/启动。
+- 同一个对外模型的不同候选可以指向不同接入点的不同上游模型名。
+- 旧配置中模型级的 `upstream` 已移除：升级时把该字段移动到每个候选的 `instances[].upstream`。
 - 接入点只填一个端点就只开放对应协议；模型同时注册到它能提供的每个协议入口。
 - 每个请求按 `(协议, 模型)` 哈希查表，得到一条按 `priority` 排序的候选链。
 - 上游返回 5xx / 429 / 超时时自动切到下一个候选；4xx 不切换，原样透传。
@@ -157,10 +159,10 @@ schedule:
 
 models:
   - name: deepseek-chat
-    upstream: deepseek-chat
     instances:
       # 谷时（00:00-08:00）deepseek 打折：这段时间它的生效优先级降到 0
       - name: deepseek
+        upstream: deepseek-chat
         priority: 10
         windows:
           - start: "00:00"

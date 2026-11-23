@@ -94,8 +94,11 @@ type Server struct {
 	AdminEnabled *bool `yaml:"admin_enabled"`
 
 	// KeyRPM is the per-gateway-key request budget per minute. Zero disables
-	// the limiter. KeyMaxConcurrent caps in-flight requests of one key.
-	KeyRPM           int `yaml:"key_rpm"`
+	// the limiter.
+	KeyRPM int `yaml:"key_rpm"`
+
+	// KeyMaxConcurrent caps the number of in-flight requests of one key.
+	// Zero disables the cap.
 	KeyMaxConcurrent int `yaml:"key_max_concurrent"`
 
 	TrustedPrefixes []netip.Prefix `yaml:"-"`

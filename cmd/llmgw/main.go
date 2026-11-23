@@ -456,21 +456,45 @@ func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *serv
 // compared, because a filesystem with a coarse timestamp resolution can report
 // the same modification time for two different contents. A hot switch that
 // silently does nothing is worse than a reload that is one second late.
+//
+// A file that cannot be read is not the same thing as a file that did not
+// change. The first case is written to the log, once per outage, so a
+// deleted or unreadable config file does not stall the hot reload silently.
 func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(*config.Config) error) {
 	sum, err := configFingerprint(path)
 	if err != nil {
+		log.Warn("config fingerprint failed; the config file is not watched",
+			"path", path, "err", err)
 		return
 	}
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		// unreadable tells whether the last poll failed to read the file. A
+		// file that cannot be read is not "the config did not change": the
+		// difference has to be visible in the log, otherwise the hot reload
+		// stalls without a trace. The warning is written once per outage, so
+		// a missing file does not fill the log with one line per second.
+		unreadable := false
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				cur, err := configFingerprint(path)
-				if err != nil || cur == sum {
+				if err != nil {
+					if !unreadable {
+						log.Warn("config fingerprint failed; skipping this poll",
+							"path", path, "err", err)
+						unreadable = true
+					}
+					continue
+				}
+				if unreadable {
+					log.Info("config file is readable again", "path", path)
+					unreadable = false
+				}
+				if cur == sum {
 					continue
 				}
 				sum = cur

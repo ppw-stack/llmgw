@@ -151,8 +151,14 @@ func (s *Server) SetAdminEnabled(enabled bool) bool {
 // SetAdminPrefixes replaces the admin network whitelist. An empty list means
 // every source that can reach the listener is allowed, which is only safe
 // behind a network boundary.
+//
+// The list is copied: the caller owns the slice it passes in and may reuse
+// or change it afterwards, while the whitelist is read by every request that
+// reaches the management surface.
 func (s *Server) SetAdminPrefixes(prefixes []netip.Prefix) {
-	s.adminPrefixes.Store(&prefixes)
+	cp := make([]netip.Prefix, len(prefixes))
+	copy(cp, prefixes)
+	s.adminPrefixes.Store(&cp)
 }
 
 // SetKeyLimits updates the per-key request budget. Zero disables a

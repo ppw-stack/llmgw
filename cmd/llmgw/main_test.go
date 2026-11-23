@@ -21,6 +21,26 @@ import (
 	"github.com/pw/llmgw/internal/transport"
 )
 
+// testAPIKey returns the upstream key the test config carries. The
+// environment variable injects a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func testAPIKey() string {
+	if v := strings.TrimSpace(os.Getenv("LLMGW_TEST_API_KEY")); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-main"
+}
+
+// testAdminToken returns the admin token the test server accepts. The
+// environment variable injects a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func testAdminToken() string {
+	if v := strings.TrimSpace(os.Getenv("LLMGW_TEST_ADMIN_TOKEN")); v != "" {
+		return v
+	}
+	return "admin-token-placeholder"
+}
+
 // testConfig renders a config file whose management surface state is
 // admin_enabled.
 func testConfig(dbPath string, adminEnabled bool) string {
@@ -32,7 +52,7 @@ database:
   path: %q
 instances:
   - name: mock
-    api_key: "k"
+    api_key: %q
     endpoints:
       - {protocol: openai, base_url: "https://example.com/v1"}
     models: [gpt-test]
@@ -41,7 +61,7 @@ models:
     upstream: gpt-test
     instances:
       - name: mock
-`, adminEnabled, dbPath)
+`, adminEnabled, dbPath, testAPIKey())
 }
 
 // adminResponse asks the admin API for its status code without credentials:
@@ -69,6 +89,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 // TestWatchConfigClosesTheManagementSurface: editing the config file shuts
 // the console down and re-opens it, without restarting the gateway.
 func TestWatchConfigClosesTheManagementSurface(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -101,7 +122,7 @@ func TestWatchConfigClosesTheManagementSurface(t *testing.T) {
 		Forwarder:    transport.New(rt, st, logger),
 		Store:        st,
 		Box:          box,
-		AdminToken:   "admin-test",
+		AdminToken:   testAdminToken(),
 		AdminEnabled: cfg.Server.AdminEnabled,
 		Log:          logger,
 	})
@@ -137,6 +158,7 @@ func TestWatchConfigClosesTheManagementSurface(t *testing.T) {
 // TestWatchConfigAppliesTheAdminWhitelist: the network policy of the console
 // follows the config file.
 func TestWatchConfigAppliesTheAdminWhitelist(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -169,7 +191,7 @@ func TestWatchConfigAppliesTheAdminWhitelist(t *testing.T) {
 		Forwarder:    transport.New(rt, st, logger),
 		Store:        st,
 		Box:          box,
-		AdminToken:   "admin-test",
+		AdminToken:   testAdminToken(),
 		AdminEnabled: cfg.Server.AdminEnabled,
 		Log:          logger,
 	})
@@ -203,6 +225,7 @@ func TestWatchConfigAppliesTheAdminWhitelist(t *testing.T) {
 // TestReloadConfigKeepsTheSurfaceWhenTheTopologyIsRejected: a configuration
 // the gateway refuses must not move the management surface either.
 func TestReloadConfigKeepsTheSurfaceWhenTheTopologyIsRejected(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -235,7 +258,7 @@ func TestReloadConfigKeepsTheSurfaceWhenTheTopologyIsRejected(t *testing.T) {
 		Forwarder:    transport.New(rt, st, logger),
 		Store:        st,
 		Box:          box,
-		AdminToken:   "admin-test",
+		AdminToken:   testAdminToken(),
 		AdminEnabled: cfg.Server.AdminEnabled,
 		Log:          logger,
 	})

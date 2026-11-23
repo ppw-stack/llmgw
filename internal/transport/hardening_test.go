@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,16 @@ import (
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
 )
+
+// testHeaderValue returns the value of a header the tests set. The
+// environment variable injects a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func testHeaderValue(env, placeholder string) string {
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		return v
+	}
+	return placeholder
+}
 
 func chatBody(model string) []byte {
 	return []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`)
@@ -51,11 +62,13 @@ func TestSensitiveHeadersAreNotForwarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Cookie", "llmgw_session=admin-session-value")
+	session := testHeaderValue("LLMGW_TEST_SESSION_COOKIE", "session-placeholder")
+	req.Header.Set("Cookie", "llmgw_session="+session)
 	req.Header.Set("X-Forwarded-For", "203.0.113.7")
 	req.Header.Set("X-Real-IP", "203.0.113.8")
 	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set("X-Internal-Token", "keep-me")
+	internalToken := testHeaderValue("LLMGW_TEST_INTERNAL_TOKEN", "header-placeholder")
+	req.Header.Set("X-Internal-Token", internalToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +83,7 @@ func TestSensitiveHeadersAreNotForwarded(t *testing.T) {
 			t.Errorf("%s leaked upstream: %q", name, v)
 		}
 	}
-	if got.Get("X-Internal-Token") != "keep-me" {
+	if got.Get("X-Internal-Token") != internalToken {
 		t.Error("ordinary client headers must still be forwarded")
 	}
 	if got.Get("Authorization") != "Bearer "+upstreamTestKey() {
@@ -83,7 +96,8 @@ func TestSensitiveHeadersAreNotForwarded(t *testing.T) {
 func TestUpstreamResponseHeadersCannotOverrideGateway(t *testing.T) {
 	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Set-Cookie", "llmgw_session=injected; Path=/")
+		planted := testHeaderValue("LLMGW_TEST_UPSTREAM_COOKIE", "planted-placeholder")
+		w.Header().Set("Set-Cookie", "llmgw_session="+planted+"; Path=/")
 		w.Header().Set("Content-Security-Policy", "default-src *")
 		w.Header().Set("Strict-Transport-Security", "max-age=0")
 		w.Header().Set("Content-Type", "application/json")

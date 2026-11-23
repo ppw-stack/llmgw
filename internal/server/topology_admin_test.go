@@ -61,6 +61,7 @@ func decodeModel(t *testing.T, resp *http.Response) modelView {
 }
 
 func TestInstanceCRUD(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	apiKey := testAPIKey("TEST_INSTANCE_API_KEY", "1234")
 
@@ -362,6 +363,7 @@ func TestProviderCompatView(t *testing.T) {
 }
 
 func TestInstanceRequiresModels(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
 		`{"name":"no-models","api_key":"k",

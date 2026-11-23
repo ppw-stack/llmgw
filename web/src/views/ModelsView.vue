@@ -33,6 +33,7 @@ const models = ref<Model[]>([]);
 const instances = ref<Instance[]>([]);
 const loading = ref(true);
 const error = ref('');
+const refreshError = ref('');
 const editing = ref<ModelForm | null>(null);
 const saving = ref(false);
 
@@ -185,8 +186,11 @@ async function refresh() {
     ]);
     models.value = modelList;
     instances.value = instanceList;
-  } catch {
-    // 刷新失败时保留旧数据，不打断正在查看的内容。
+    refreshError.value = '';
+  } catch (e) {
+    // 刷新失败时保留旧数据，不打断正在查看的内容；但要在页面上留一条提示，
+    // 否则时段切换导致的展示异常无从排查。
+    refreshError.value = errorMessage(e);
   }
 }
 
@@ -351,6 +355,9 @@ onUnmounted(() => {
       还没有上游接入点，请先在「上游接入点」页面创建一个，再来配置模型。
     </p>
     <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="refreshError" class="muted small">
+      自动刷新失败：{{ refreshError }}（仍显示上一次的数据）
+    </p>
     <p v-if="loading" class="muted">加载中…</p>
 
     <div v-else-if="!models.length" class="card muted">还没有模型。点击「新增模型」开始配置。</div>

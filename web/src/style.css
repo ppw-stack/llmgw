@@ -655,7 +655,8 @@ textarea:focus {
   margin: 8px 0 12px;
 }
 
-.row input[type='checkbox'] {
+/* 只作用于时间窗口编辑区，避免影响其他 .row 里的复选框 */
+.window-editor .row input[type='checkbox'] {
   flex: 0 0 auto;
   min-width: 0;
 }

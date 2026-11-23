@@ -159,6 +159,13 @@ func main() {
 		go pruneHistory(ctx, st, logger, days)
 	}
 	warnInsecureDefaults(cfg, logger)
+	if len(effective.Instances) == 0 {
+		// An empty topology is a valid state: the gateway serves nothing
+		// until the operator adds an instance in the console. Say so, so the
+		// empty routing table does not look like a broken deployment.
+		logger.Warn("no upstream instance is configured; the data plane serves nothing " +
+			"until an instance is added in the console")
+	}
 	watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
 		return reloadConfig(rt, st, boxCipher, srv, c)
 	})
@@ -389,8 +396,8 @@ func warnInsecureDefaults(cfg *config.Config, log *slog.Logger) {
 			"restrict it by network policy or set admin_allowed_cidrs")
 	}
 	if cfg.Server.MetricsToken == "" {
-		log.Warn("server.metrics_token is empty: /metrics is readable only from localhost and trusted proxies; " +
-			"set a token to scrape it from elsewhere")
+		log.Warn("server.metrics_token is empty: the /metrics endpoint is disabled; " +
+			"set a token to expose the metrics")
 	}
 	if cfg.Server.AdminToken != "" {
 		log.Warn("server.admin_token is configured: it is a static, never-expiring credential with full admin rights")
@@ -435,11 +442,13 @@ func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *serv
 		return fmt.Errorf("reload routing table: %w", err)
 	}
 	// The runtime policy follows the config: the management surface, its
-	// network whitelist and the per-key budget. Changing them needs no
-	// restart: edit the file and they are in effect within a second.
+	// network whitelist, the per-key budget and the metrics endpoint.
+	// Changing them needs no restart: edit the file and they are in effect
+	// within a second.
 	srv.SetAdminEnabled(c.Server.AdminIsEnabled())
 	srv.SetAdminPrefixes(c.Server.AdminPrefixes)
 	srv.SetKeyLimits(c.Server.KeyRPM, c.Server.KeyMaxConcurrent)
+	srv.SetMetricsToken(c.Server.MetricsToken)
 	return nil
 }
 

@@ -375,9 +375,12 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("schedule.timezone: %w", err)
 	}
 	c.Schedule.Location = loc
-	if len(c.Instances) == 0 && len(c.Models) == 0 && len(c.Providers) == 0 {
-		return fmt.Errorf("at least one instance is required")
-	}
+	// An empty topology is legal: the gateway starts with no upstream and the
+	// operator adds the instances in the console. Refusing to start here
+	// would turn a fresh deployment into a restart loop, because the console
+	// is the only place where the first instance can be created. A model
+	// without its instance is still rejected below, so a half-written
+	// topology cannot slip through.
 
 	for pi := range c.Providers {
 		p := &c.Providers[pi]

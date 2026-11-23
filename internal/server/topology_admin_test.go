@@ -140,6 +140,56 @@ func TestInstanceCRUD(t *testing.T) {
 	}
 }
 
+// TestInstanceUpdateReadsAnOmittedPrivateOptInAsOff: the admin API reads an
+// omitted allow_private_upstream as "off". That is the reason the console
+// sends the current value on every save: without it, editing an instance
+// would silently close the gate. Both halves of the contract are pinned here.
+func TestInstanceUpdateReadsAnOmittedPrivateOptInAsOff(t *testing.T) {
+	t.Parallel()
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+	apiKey := testAPIKey("TEST_INSTANCE_API_KEY", "1234")
+
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
+		instanceBody("private-instance", apiKey))
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create = %d %s", resp.StatusCode, body)
+	}
+	created := decodeInstance(t, resp)
+	if !created.AllowPrivateUpstream {
+		t.Fatalf("the created instance should allow private upstreams: %+v", created)
+	}
+
+	// A save that carries the field leaves the gate open.
+	keep := `{"name":"private-instance","allow_private_upstream":true,
+	  "models":["gpt-upstream"],
+	  "endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:9/v1"}]}`
+	resp = adminRequest(t, http.MethodPut, gw.URL+"/admin/api/instances/"+itoa(created.ID), keep)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("update = %d %s", resp.StatusCode, body)
+	}
+	if updated := decodeInstance(t, resp); !updated.AllowPrivateUpstream {
+		t.Fatalf("the update closed the gate: %+v", updated)
+	}
+
+	// A save without the field closes it: an omitted flag means "off".
+	drop := `{"name":"private-instance",
+	  "models":["gpt-upstream"],
+	  "endpoints":[{"protocol":"openai","base_url":"https://example.com/v1"}]}`
+	resp = adminRequest(t, http.MethodPut, gw.URL+"/admin/api/instances/"+itoa(created.ID), drop)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("update = %d %s", resp.StatusCode, body)
+	}
+	if updated := decodeInstance(t, resp); updated.AllowPrivateUpstream {
+		t.Fatalf("an omitted flag must close the gate: %+v", updated)
+	}
+}
+
 func TestModelCRUD(t *testing.T) {
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	apiKey := testAPIKey("TEST_MODEL_API_KEY", "4321")

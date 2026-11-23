@@ -28,8 +28,8 @@ docker compose -f deploy/docker-compose.test.yml ps
 | metrics | `http://localhost:8080/metrics`，Bearer `test-metrics-token` |
 
 > `test-config.yaml` 里配了 `metrics_token`，所以 `/metrics` 必须带令牌访问，
-> 不带返回 `401`。把 `metrics_token` 留空时，只有本机与 `trusted_proxies` 能读，
-> 其他来源返回 `403`。
+> 不带返回 `401`。把 `metrics_token` 留空时 `/metrics` 整个接口关闭，
+> 任何来源都返回 `404`。
 
 网关 Key 在控制台「网关 Key」页创建，或通过 API：
 

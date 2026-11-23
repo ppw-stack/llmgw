@@ -31,6 +31,8 @@ export interface Instance {
   endpoints: InstanceEndpoint[];
   /** 该接入点支持的上游模型名，模型引用它的前提 */
   models: string[];
+  /** 是否放行指向 loopback / 内网 / 云元数据地址的上游 */
+  allow_private_upstream: boolean;
   max_fails: number;
   cooldown_secs: number;
   timeout_secs: number;
@@ -45,7 +47,7 @@ export interface InstancePayload {
   preset?: string;
   /** 新建必填；编辑时留空表示保留原有 Key */
   api_key?: string;
-  /** 额度查询凭证：新建时可选，编辑时留空表示保留原有凭证 */
+  /** 额度查询凭证：新建时可选；编辑时整组提交才替换，留空表示保留原有凭证 */
   quota_credential?: {
     access_key_id: string;
     secret_access_key: string;
@@ -54,6 +56,13 @@ export interface InstancePayload {
   endpoints?: InstanceEndpoint[];
   /** 必填：该接入点支持的上游模型名 */
   models: string[];
+  /**
+   * 是否放行指向 loopback / 内网 / 云元数据地址的上游。
+   *
+   * 后端按「省略即关闭」处理，所以每次保存都要显式带上当前值；
+   * 不带就会把已放行的内网上游悄悄关掉。
+   */
+  allow_private_upstream?: boolean;
   max_fails?: number;
   cooldown_secs?: number;
   timeout_secs?: number;

@@ -269,6 +269,9 @@ POST /admin/api/instances
 
 即使放行了，运行期也会在拨号前再校验一次解析结果；域名后来解析到内网同样会被拒绝。
 
+控制台「上游接入点」页的自定义端点表单里有一个「允许内网地址」开关，对应这个字段：
+勾选后卡片上会显示「允许内网」标记；编辑时开关的当前值总会一并提交，不会被悄悄关掉。
+
 校验失败返回 `400`；名称重复返回 `409`。内置端点不允许再传 `endpoints`。
 
 #### 更新
@@ -288,6 +291,9 @@ PUT /admin/api/instances/1
 - 省略 `preset`：沿用现有值；显式传入不同的 preset 返回 `400`（需删除重建）。
 - 内置端点的端点由 preset 决定，不接受自定义端点。
 - `models` 必填，更新时整体替换。
+- `allow_private_upstream` **省略即关闭**：这个开关一旦放行内网地址就相当于把网关
+  变成内网代理，所以后端按「没带就是关」处理。更新时要保留已放行的状态，必须显式
+  带上 `"allow_private_upstream": true`。
 
 #### 删除
 
@@ -490,8 +496,12 @@ POST /admin/api/instances
 ```
 GET /healthz   → 200 "ok"
 GET /readyz    → 200 或 503
-GET /metrics   → Prometheus 文本
+GET /metrics   → Prometheus 文本（需 server.metrics_token，否则 404）
 ```
+
+`/metrics` 默认关闭：未配置 `server.metrics_token` 时接口不存在，任何来源都返回 `404`。
+配置令牌后需带 `Authorization: Bearer <token>` 或 `?token=<token>`，令牌不对返回 `401`。
+令牌改完 1 秒内热加载生效。
 
 ## 错误格式
 

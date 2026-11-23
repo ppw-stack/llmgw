@@ -37,10 +37,14 @@ interface InstanceForm {
   apiKey: string;
   keyHint: string;
   quotaAccessKeyId: string;
+  /** 存量的 Access Key ID：留空 Secret 时靠它判断用户是否改过这对凭证。 */
+  quotaAccessKeyIdStored: string;
   quotaSecretKey: string;
   quotaSecretHint: string;
   endpoints: EndpointRow[];
   modelsText: string;
+  /** 是否放行指向 loopback / 内网 / 云元数据地址的上游 */
+  allowPrivateUpstream: boolean;
   maxFails: string;
   cooldownSecs: string;
   timeoutSecs: string;
@@ -169,10 +173,12 @@ function newForm(): InstanceForm {
     apiKey: '',
     keyHint: '',
     quotaAccessKeyId: '',
+    quotaAccessKeyIdStored: '',
     quotaSecretKey: '',
     quotaSecretHint: '',
     endpoints: [{ protocol: 'openai', base_url: '' }],
     modelsText: '',
+    allowPrivateUpstream: false,
     maxFails: '3',
     cooldownSecs: '30',
     timeoutSecs: '0',
@@ -209,6 +215,9 @@ function setMode(mode: InstanceMode) {
   resetCandidates();
   if (mode === 'builtin') {
     applyPreset(form, form.preset || presets.value[0]?.id || '', true);
+    // 内置预设的地址是公网厂商地址，放行内网对它没有意义；切回内置时
+    // 顺手清掉，免得留下一个看不见的开关。
+    form.allowPrivateUpstream = false;
   }
 }
 
@@ -385,6 +394,7 @@ function openEdit(inst: Instance) {
     apiKey: '',
     keyHint: inst.key_hint,
     quotaAccessKeyId: inst.quota_credential?.access_key_id ?? '',
+    quotaAccessKeyIdStored: inst.quota_credential?.access_key_id ?? '',
     quotaSecretKey: '',
     quotaSecretHint: inst.quota_credential?.secret_hint ?? '',
     endpoints: inst.endpoints.map((ep) => ({
@@ -392,6 +402,7 @@ function openEdit(inst: Instance) {
       base_url: ep.base_url,
     })),
     modelsText: inst.models.join('\n'),
+    allowPrivateUpstream: inst.allow_private_upstream,
     maxFails: String(inst.max_fails),
     cooldownSecs: String(inst.cooldown_secs),
     timeoutSecs: String(inst.timeout_secs),
@@ -440,10 +451,16 @@ async function save() {
   }
   // The quota credential is only submitted when the operator filled one in;
   // an untouched field keeps the stored credential.
+  //
+  // The access key id is prefilled when editing, so a blank secret must not
+  // be read as "clear the credential": it means "keep the stored one". Only
+  // a changed access key id needs a new secret, because the stored secret
+  // belongs to the old pair.
   const quotaAccessKeyId = f.quotaAccessKeyId.trim();
   const quotaSecretKey = f.quotaSecretKey.trim();
-  if (quotaAccessKeyId || quotaSecretKey) {
-    if (!quotaAccessKeyId || !quotaSecretKey) {
+  const storedAccessKeyId = f.quotaAccessKeyIdStored.trim();
+  if (quotaSecretKey) {
+    if (!quotaAccessKeyId) {
       error.value = '额度查询凭证需要同时填写 Access Key ID 与 Secret Access Key';
       return;
     }
@@ -451,10 +468,20 @@ async function save() {
       access_key_id: quotaAccessKeyId,
       secret_access_key: quotaSecretKey,
     };
+  } else if (quotaAccessKeyId && quotaAccessKeyId !== storedAccessKeyId) {
+    error.value =
+      f.id === null
+        ? '额度查询凭证需要同时填写 Access Key ID 与 Secret Access Key'
+        : 'Access Key ID 改了，必须同时填写新的 Secret Access Key';
+    return;
   }
   payload.max_fails = maxFails;
   payload.cooldown_secs = cooldownSecs;
   payload.timeout_secs = timeoutSecs;
+  // The private-upstream opt-in is always sent, even when the operator did
+  // not touch it: the backend reads an omitted field as "off", so leaving it
+  // out would silently close the gate of an instance that already has it.
+  payload.allow_private_upstream = f.allowPrivateUpstream;
 
   saving.value = true;
   error.value = '';
@@ -535,7 +562,7 @@ onUnmounted(() => {
     <p class="muted">
       上游接入点代表一个物理上游（厂商地址 + API Key）。模型在「模型」页引用接入点组成主备链路。
     </p>
-    <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="error && !editing" class="error">{{ error }}</p>
     <p v-if="quotaError" class="error">额度查询失败：{{ quotaError }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
@@ -551,6 +578,7 @@ onUnmounted(() => {
             {{ inst.source === 'builtin' ? '内置端点' : '自定义' }}
           </span>
           <span v-if="inst.preset_name" class="badge">{{ inst.preset_name }}</span>
+          <span v-if="inst.allow_private_upstream" class="badge danger">允许内网</span>
         </div>
         <div class="row">
           <a
@@ -683,7 +711,12 @@ onUnmounted(() => {
 
           <template v-if="needsQuotaCredential">
             <div class="field span-2">
-              <label for="instance-quota-ak">额度查询凭证 · Access Key ID</label>
+              <label for="instance-quota-ak">
+                额度查询凭证 · Access Key ID
+                <span v-if="editing.quotaAccessKeyIdStored" class="muted small">
+                  留空保留现有
+                </span>
+              </label>
               <input
                 id="instance-quota-ak"
                 v-model="editing.quotaAccessKeyId"
@@ -756,6 +789,23 @@ onUnmounted(() => {
             <div class="row">
               <button class="ghost" @click="addEndpoint(editing)">添加端点</button>
             </div>
+            <div class="row">
+              <label for="instance-allow-private">允许内网地址</label>
+              <input
+                id="instance-allow-private"
+                v-model="editing.allowPrivateUpstream"
+                type="checkbox"
+              />
+            </div>
+            <p class="muted small">
+              默认拒绝指向 loopback、内网网段与云元数据地址（169.254.169.254）的上游，
+              要指向这类地址必须先勾选本项。打开后网关可以拨号到 127.0.0.1、10.0.0.0/8
+              这类地址：仅在本地 mock 或内网自建上游时开启，控制台被拿下时它等于把网关
+              变成内网代理。
+            </p>
+            <p v-if="editing.allowPrivateUpstream" class="error">
+              该接入点已放行内网地址，请确认上游确实是可信的内网服务。
+            </p>
           </div>
 
           <div class="field span-2">

@@ -524,15 +524,51 @@ func TestLegacyProviderExpandsToInstanceAndModel(t *testing.T) {
 	}
 }
 
-func TestNoUpstreamIsRejected(t *testing.T) {
+// TestEmptyTopologyIsAccepted: a configuration without any upstream is
+// legal. The gateway starts with an empty routing table and the operator
+// adds the instances in the console.
+func TestEmptyTopologyIsAccepted(t *testing.T) {
+	t.Parallel()
 	body := `
 server:
   addr: ":0"
 database:
   path: "/tmp/x.db"
 `
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("an empty topology must load: %v", err)
+	}
+	if len(cfg.Instances) != 0 || len(cfg.Models) != 0 {
+		t.Fatalf("topology = %+v / %+v", cfg.Instances, cfg.Models)
+	}
+	eff, err := cfg.Effective()
+	if err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	if len(eff.Instances) != 0 || len(eff.Models) != 0 {
+		t.Fatalf("effective = %+v", eff)
+	}
+}
+
+// TestModelWithoutInstanceIsRejected: dropping the empty topology does not
+// weaken the checks. A model that points at an instance nobody declared is
+// still a configuration error.
+func TestModelWithoutInstanceIsRejected(t *testing.T) {
+	t.Parallel()
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+models:
+  - name: m
+    upstream: m
+    instances:
+      - name: missing
+`
 	_, err := Load(writeConfig(t, body))
-	if err == nil || !strings.Contains(err.Error(), "at least one instance") {
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected instance error, got %v", err)
 	}
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,6 +36,21 @@ func testAPIKey() string {
 // without the legacy token, which these tests never present.
 func testAdminToken() string {
 	return strings.TrimSpace(os.Getenv("LLMGW_TEST_ADMIN_TOKEN"))
+}
+
+// testMetricsToken returns the token that guards the metrics endpoint. Set
+// LLMGW_TEST_METRICS_TOKEN to inject a real one; without it a random token is
+// generated at runtime, so the repository holds no credential literal.
+func testMetricsToken(t *testing.T) string {
+	t.Helper()
+	if token := strings.TrimSpace(os.Getenv("LLMGW_TEST_METRICS_TOKEN")); token != "" {
+		return token
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatalf("generate a metrics token: %v", err)
+	}
+	return hex.EncodeToString(buf)
 }
 
 // testConfig renders a config file whose management surface state is
@@ -284,5 +301,80 @@ func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// metricsResponse asks the metrics endpoint for its status code without
+// credentials.
+func metricsResponse(handler http.Handler) int {
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestWatchConfigEnablesTheMetricsEndpoint: the metrics endpoint follows the
+// config file. Without a token it does not exist, and setting one switches it
+// on without a restart.
+func TestWatchConfigEnablesTheMetricsEndpoint(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeFile(t, cfgPath, testConfig(dbPath, true))
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, err := store.Open(ctx, dbPath, logger)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	box, err := secret.New(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("secret box: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	rt := router.New()
+	if err := rt.Reload(cfg); err != nil {
+		t.Fatalf("reload router: %v", err)
+	}
+	srv, err := server.New(server.Options{
+		Router:       rt,
+		Forwarder:    transport.New(rt, st, logger),
+		Store:        st,
+		Box:          box,
+		AdminToken:   testAdminToken(),
+		AdminEnabled: cfg.Server.AdminEnabled,
+		Log:          logger,
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	handler := srv.Handler()
+
+	watchConfig(ctx, cfgPath, logger, func(c *config.Config) error {
+		return reloadConfig(rt, st, box, srv, c)
+	})
+
+	if code := metricsResponse(handler); code != http.StatusNotFound {
+		t.Fatalf("metrics without a token = %d, want 404", code)
+	}
+
+	metricsToken := testMetricsToken(t)
+	withToken := strings.Replace(testConfig(dbPath, true), "  admin_enabled: true",
+		"  admin_enabled: true\n  metrics_token: \""+metricsToken+"\"", 1)
+	writeFile(t, cfgPath, withToken)
+	waitFor(t, 10*time.Second, func() bool {
+		return metricsResponse(handler) == http.StatusUnauthorized
+	})
+	if code := metricsResponse(handler); code != http.StatusUnauthorized {
+		t.Fatalf("metrics with a token but without the credential = %d, want 401", code)
 	}
 }

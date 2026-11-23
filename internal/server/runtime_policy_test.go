@@ -177,3 +177,78 @@ func TestKeyLimitsCanBeChangedAtRuntime(t *testing.T) {
 		t.Fatalf("request after lifting the limit = %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestFallbackPageListsTheMetricsEndpointOnlyWhenItIsOn: the page that is
+// served when the console is not built lists the endpoints that exist.
+func TestFallbackPageListsTheMetricsEndpointOnlyWhenItIsOn(t *testing.T) {
+	t.Parallel()
+	gw, _, _, _ := setupConfigServer(t, nil, openaiOK, []string{"k"}, nil, func(o *Options) {
+		o.UI = nil
+	})
+
+	resp := adminRequest(t, http.MethodGet, gw.URL+"/", "")
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read fallback page: %v", err)
+	}
+	resp.Body.Close()
+	if strings.Contains(string(body), "/metrics") {
+		t.Fatal("the fallback page lists the metrics endpoint while it is disabled")
+	}
+
+	gw2, _, _, _ := setupConfigServer(t, nil, openaiOK, []string{"k"}, nil, func(o *Options) {
+		o.UI = nil
+		o.MetricsToken = testMetricsToken(t)
+	})
+	resp = adminRequest(t, http.MethodGet, gw2.URL+"/", "")
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read fallback page: %v", err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(string(body), "/metrics") {
+		t.Fatal("the fallback page does not list the metrics endpoint while it is enabled")
+	}
+}
+
+// TestMetricsEndpointFollowsTheTokenAtRuntime: the metrics endpoint is
+// switched on and off with the config, without a restart.
+func TestMetricsEndpointFollowsTheTokenAtRuntime(t *testing.T) {
+	t.Parallel()
+	gw, _, _, srv := setupConfigServer(t, nil, openaiOK, []string{"k"}, nil)
+
+	// Without a token the endpoint does not exist.
+	resp := adminRequest(t, http.MethodGet, gw.URL+"/metrics", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("metrics without a token = %d, want 404", resp.StatusCode)
+	}
+
+	// A token switches it on, but the token is still required.
+	token := testMetricsToken(t)
+	srv.SetMetricsToken(token)
+	resp = adminRequest(t, http.MethodGet, gw.URL+"/metrics", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("metrics without the token = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	authed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authed.Body.Close()
+	if authed.StatusCode != http.StatusOK {
+		t.Fatalf("metrics with the token = %d, want 200", authed.StatusCode)
+	}
+
+	// Dropping the token switches the endpoint off again.
+	srv.SetMetricsToken("")
+	resp = adminRequest(t, http.MethodGet, gw.URL+"/metrics", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("metrics after dropping the token = %d, want 404", resp.StatusCode)
+	}
+}

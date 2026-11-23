@@ -37,6 +37,8 @@ interface InstanceForm {
   apiKey: string;
   keyHint: string;
   quotaAccessKeyId: string;
+  /** 存量的 Access Key ID：留空 Secret 时靠它判断用户是否改过这对凭证。 */
+  quotaAccessKeyIdStored: string;
   quotaSecretKey: string;
   quotaSecretHint: string;
   endpoints: EndpointRow[];
@@ -169,6 +171,7 @@ function newForm(): InstanceForm {
     apiKey: '',
     keyHint: '',
     quotaAccessKeyId: '',
+    quotaAccessKeyIdStored: '',
     quotaSecretKey: '',
     quotaSecretHint: '',
     endpoints: [{ protocol: 'openai', base_url: '' }],
@@ -385,6 +388,7 @@ function openEdit(inst: Instance) {
     apiKey: '',
     keyHint: inst.key_hint,
     quotaAccessKeyId: inst.quota_credential?.access_key_id ?? '',
+    quotaAccessKeyIdStored: inst.quota_credential?.access_key_id ?? '',
     quotaSecretKey: '',
     quotaSecretHint: inst.quota_credential?.secret_hint ?? '',
     endpoints: inst.endpoints.map((ep) => ({
@@ -440,10 +444,16 @@ async function save() {
   }
   // The quota credential is only submitted when the operator filled one in;
   // an untouched field keeps the stored credential.
+  //
+  // The access key id is prefilled when editing, so a blank secret must not
+  // be read as "clear the credential": it means "keep the stored one". Only
+  // a changed access key id needs a new secret, because the stored secret
+  // belongs to the old pair.
   const quotaAccessKeyId = f.quotaAccessKeyId.trim();
   const quotaSecretKey = f.quotaSecretKey.trim();
-  if (quotaAccessKeyId || quotaSecretKey) {
-    if (!quotaAccessKeyId || !quotaSecretKey) {
+  const storedAccessKeyId = f.quotaAccessKeyIdStored.trim();
+  if (quotaSecretKey) {
+    if (!quotaAccessKeyId) {
       error.value = '额度查询凭证需要同时填写 Access Key ID 与 Secret Access Key';
       return;
     }
@@ -451,6 +461,12 @@ async function save() {
       access_key_id: quotaAccessKeyId,
       secret_access_key: quotaSecretKey,
     };
+  } else if (quotaAccessKeyId && quotaAccessKeyId !== storedAccessKeyId) {
+    error.value =
+      f.id === null
+        ? '额度查询凭证需要同时填写 Access Key ID 与 Secret Access Key'
+        : 'Access Key ID 改了，必须同时填写新的 Secret Access Key';
+    return;
   }
   payload.max_fails = maxFails;
   payload.cooldown_secs = cooldownSecs;
@@ -535,7 +551,7 @@ onUnmounted(() => {
     <p class="muted">
       上游接入点代表一个物理上游（厂商地址 + API Key）。模型在「模型」页引用接入点组成主备链路。
     </p>
-    <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="error && !editing" class="error">{{ error }}</p>
     <p v-if="quotaError" class="error">额度查询失败：{{ quotaError }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
@@ -683,7 +699,12 @@ onUnmounted(() => {
 
           <template v-if="needsQuotaCredential">
             <div class="field span-2">
-              <label for="instance-quota-ak">额度查询凭证 · Access Key ID</label>
+              <label for="instance-quota-ak">
+                额度查询凭证 · Access Key ID
+                <span v-if="editing.quotaAccessKeyIdStored" class="muted small">
+                  留空保留现有
+                </span>
+              </label>
               <input
                 id="instance-quota-ak"
                 v-model="editing.quotaAccessKeyId"

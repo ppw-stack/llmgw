@@ -115,10 +115,11 @@ func TestKeyConcurrencyCap(t *testing.T) {
 	}
 }
 
-// TestMetricsAreNotPublicWithoutToken: without metrics_token the endpoint is
-// readable from the host only, so an accidental public listener does not
-// publish traffic volumes.
-func TestMetricsAreNotPublicWithoutToken(t *testing.T) {
+// TestMetricsAreDisabledWithoutToken: without metrics_token the endpoint
+// does not exist at all. There is no credential to check, so serving the
+// traffic volumes to whoever asks is not an option - not even to the host
+// itself.
+func TestMetricsAreDisabledWithoutToken(t *testing.T) {
 	t.Parallel()
 	gw, _, _ := setup(t, nil, openaiOK, nil)
 	handler := gw.Config.Handler
@@ -127,19 +128,19 @@ func TestMetricsAreNotPublicWithoutToken(t *testing.T) {
 	public.RemoteAddr = "203.0.113.20:5555"
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, public)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("public metrics = %d, want 403", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("public metrics = %d, want 404", rec.Code)
 	}
 
 	local := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	local.RemoteAddr = "127.0.0.1:5555"
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, local)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("local metrics = %d, want 200", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("local metrics = %d, want 404", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "go_goroutines") {
-		t.Fatal("local metrics body looks empty")
+	if strings.Contains(rec.Body.String(), "go_goroutines") {
+		t.Fatal("the disabled metrics endpoint leaked the metrics")
 	}
 }
 

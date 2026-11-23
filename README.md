@@ -45,6 +45,9 @@ open http://localhost:8080
 [BOOTSTRAP] first gateway key: sk-gw-xxxxxxxx
 ```
 
+`config.yaml` 里不写任何上游（空拓扑）也能启动：此时网关不转发任何请求，
+在控制台「上游接入点」页新增第一个接入点即可。
+
 验证：
 
 ```bash

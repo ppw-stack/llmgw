@@ -490,8 +490,12 @@ POST /admin/api/instances
 ```
 GET /healthz   → 200 "ok"
 GET /readyz    → 200 或 503
-GET /metrics   → Prometheus 文本
+GET /metrics   → Prometheus 文本（需 server.metrics_token，否则 404）
 ```
+
+`/metrics` 默认关闭：未配置 `server.metrics_token` 时接口不存在，任何来源都返回 `404`。
+配置令牌后需带 `Authorization: Bearer <token>` 或 `?token=<token>`，令牌不对返回 `401`。
+令牌改完 1 秒内热加载生效。
 
 ## 错误格式
 

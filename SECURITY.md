@@ -15,7 +15,7 @@ https://github.com/ppw-stack/llmgw/security/advisories/new
 ## 部署提醒
 
 - 公网部署必须由反向代理终止 TLS，并配置 `server.trusted_proxies` 与 `secure_cookie: true`。
-- 用 `server.admin_allowed_cidrs` 把控制台限制到运维网段；`/metrics` 未设 `metrics_token` 时只允许本机与可信代理读取。
+- 用 `server.admin_allowed_cidrs` 把控制台限制到运维网段；`/metrics` 默认关闭，未设 `metrics_token` 时接口返回 `404`，设了令牌则必须携带该令牌访问。
 - 怀疑控制台被拿下时把 `server.admin_enabled` 改成 `false`：1 秒内热加载生效，控制台 API、
   登录接口与控制台页面全部 `403`，数据面不受影响；处置完改回 `true` 即可恢复。
 - 设置 `server.key_rpm` / `server.key_max_concurrent`：一把网关 Key 泄漏就等同于上游额度被无限制消耗。

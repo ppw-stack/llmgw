@@ -45,7 +45,7 @@ export interface InstancePayload {
   preset?: string;
   /** 新建必填；编辑时留空表示保留原有 Key */
   api_key?: string;
-  /** 额度查询凭证：新建时可选，编辑时留空表示保留原有凭证 */
+  /** 额度查询凭证：新建时可选；编辑时整组提交才替换，留空表示保留原有凭证 */
   quota_credential?: {
     access_key_id: string;
     secret_access_key: string;

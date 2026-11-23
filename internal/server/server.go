@@ -59,7 +59,6 @@ type Server struct {
 	store          *store.Store
 	box            *secret.Box
 	adminToken     string
-	metricsToken   string
 	maxBody        int64
 	log            *slog.Logger
 	ui             http.Handler
@@ -72,6 +71,10 @@ type Server struct {
 	// adminEnabled gates the management surface. It is atomic because the
 	// config watcher flips it while requests are in flight.
 	adminEnabled atomic.Bool
+	// metricsToken guards the /metrics endpoint. It is atomic because the
+	// config watcher swaps it while requests are in flight. An empty token
+	// disables the endpoint.
+	metricsToken atomic.Pointer[string]
 	limiter      *loginLimiter
 	keys         *keyCache
 	keyLimiter   *keyLimiter
@@ -114,7 +117,6 @@ func New(o Options) (*Server, error) {
 		store:          o.Store,
 		box:            box,
 		adminToken:     o.AdminToken,
-		metricsToken:   o.MetricsToken,
 		maxBody:        o.MaxBody,
 		log:            o.Log,
 		ui:             o.UI,
@@ -127,6 +129,7 @@ func New(o Options) (*Server, error) {
 		loginSem:       make(chan struct{}, 4),
 		quota:          quotaService,
 	}
+	s.SetMetricsToken(o.MetricsToken)
 	// A nil AdminEnabled means the management surface stays open.
 	s.adminEnabled.Store(o.AdminEnabled == nil || *o.AdminEnabled)
 	s.SetAdminPrefixes(o.AdminPrefixes)
@@ -165,6 +168,24 @@ func (s *Server) SetAdminPrefixes(prefixes []netip.Prefix) {
 // dimension.
 func (s *Server) SetKeyLimits(rpm, maxConcurrent int) {
 	s.keyLimiter.setLimits(rpm, maxConcurrent)
+}
+
+// SetMetricsToken swaps the token that guards the /metrics endpoint. An
+// empty token disables the endpoint.
+//
+// The config watcher calls it on every reload, so the metrics surface can be
+// turned on and off without a restart.
+func (s *Server) SetMetricsToken(token string) {
+	s.metricsToken.Store(&token)
+}
+
+// metricsTokenValue returns the token that guards the /metrics endpoint. An
+// empty string means the endpoint is disabled.
+func (s *Server) metricsTokenValue() string {
+	if p := s.metricsToken.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // adminSurfaceOpen reports whether the management surface is reachable.
@@ -365,6 +386,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	metricsLine := ""
+	if s.metricsTokenValue() != "" {
+		metricsLine = "  <li><code>GET  /metrics</code>（需 metrics_token）</li>\n"
+	}
 	_, _ = io.WriteString(w, `<!doctype html>
 <html><head><meta charset="utf-8"><title>llmgw</title></head>
 <body style="font-family:ui-sans-serif,system-ui;max-width:720px;margin:48px auto;line-height:1.7">
@@ -375,8 +400,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
   <li><code>GET  /openai/v1/models</code></li>
   <li><code>POST /anthropic/v1/messages</code></li>
   <li><code>GET  /admin/api/keys</code>（需 admin_token）</li>
-  <li><code>GET  /metrics</code></li>
-</ul>
+`+metricsLine+`</ul>
 </body></html>`)
 }
 

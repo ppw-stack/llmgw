@@ -17,11 +17,14 @@ type InstanceSpec struct {
 	Name         string
 	Preset       string
 	EncryptedKey string
-	Endpoints    []config.Endpoint
-	Models       []string
-	MaxFails     int
-	CooldownSecs int
-	TimeoutSecs  int
+	// EncryptedQuotaCredential holds the extra credential some vendors need
+	// to read the subscription quota. It is empty when the instance has none.
+	EncryptedQuotaCredential string
+	Endpoints                []config.Endpoint
+	Models                   []string
+	MaxFails                 int
+	CooldownSecs             int
+	TimeoutSecs              int
 }
 
 // InstanceRecord is the storage form of an instance.
@@ -63,7 +66,7 @@ func (s *Store) CountInstances() (int, error) {
 }
 
 func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
-	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, endpoints_json, models_json,
+	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, quota_cred_enc, endpoints_json, models_json,
 		max_fails, cooldown_secs, timeout_secs, created_at, updated_at
 		FROM instances ORDER BY id`)
 	if err != nil {
@@ -79,8 +82,8 @@ func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 			created   string
 			updated   string
 		)
-		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &endpoints, &models,
-			&rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs, &created, &updated); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &rec.EncryptedQuotaCredential,
+			&endpoints, &models, &rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs, &created, &updated); err != nil {
 			return nil, err
 		}
 		if endpoints != "" {
@@ -120,11 +123,11 @@ func (s *Store) CreateInstance(spec InstanceSpec) (*InstanceRecord, error) {
 		modelsJSON = []byte("[]")
 	}
 	now := nowStamp()
-	res, err := s.db.Exec(`INSERT INTO instances(name, preset, key_enc, endpoints_json,
+	res, err := s.db.Exec(`INSERT INTO instances(name, preset, key_enc, quota_cred_enc, endpoints_json,
 		models_json, max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON), string(modelsJSON),
-		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		spec.Name, spec.Preset, spec.EncryptedKey, spec.EncryptedQuotaCredential, string(endpointsJSON),
+		string(modelsJSON), spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -148,10 +151,10 @@ func (s *Store) UpdateInstance(id int64, spec InstanceSpec) error {
 	if spec.Models == nil {
 		modelsJSON = []byte("[]")
 	}
-	res, err := s.db.Exec(`UPDATE instances SET name=?, preset=?, key_enc=?, endpoints_json=?,
+	res, err := s.db.Exec(`UPDATE instances SET name=?, preset=?, key_enc=?, quota_cred_enc=?, endpoints_json=?,
 		models_json=?, max_fails=?, cooldown_secs=?, timeout_secs=?, updated_at=? WHERE id=?`,
-		spec.Name, spec.Preset, spec.EncryptedKey, string(endpointsJSON), string(modelsJSON),
-		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
+		spec.Name, spec.Preset, spec.EncryptedKey, spec.EncryptedQuotaCredential, string(endpointsJSON),
+		string(modelsJSON), spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
 	if err != nil {
 		return err
 	}
@@ -339,15 +342,20 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 			}
 			key = plain
 		}
+		credential, err := decryptQuotaCredential(box, rec.EncryptedQuotaCredential)
+		if err != nil {
+			return nil, nil, fmt.Errorf("instance %q: cannot decrypt quota credential: %w", rec.Name, err)
+		}
 		instances = append(instances, config.Instance{
-			Name:         rec.Name,
-			Preset:       rec.Preset,
-			APIKey:       key,
-			Endpoints:    rec.Endpoints,
-			Models:       rec.Models,
-			MaxFails:     rec.MaxFails,
-			CooldownSecs: rec.CooldownSecs,
-			TimeoutSecs:  rec.TimeoutSecs,
+			Name:            rec.Name,
+			Preset:          rec.Preset,
+			APIKey:          key,
+			QuotaCredential: credential,
+			Endpoints:       rec.Endpoints,
+			Models:          rec.Models,
+			MaxFails:        rec.MaxFails,
+			CooldownSecs:    rec.CooldownSecs,
+			TimeoutSecs:     rec.TimeoutSecs,
 		})
 	}
 
@@ -385,15 +393,20 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 			}
 			encrypted = enc
 		}
+		encryptedCredential, err := encryptQuotaCredential(box, inst.QuotaCredential)
+		if err != nil {
+			return err
+		}
 		spec := InstanceSpec{
-			Name:         inst.Name,
-			Preset:       inst.Preset,
-			EncryptedKey: encrypted,
-			Endpoints:    inst.Endpoints,
-			Models:       inst.Models,
-			MaxFails:     inst.MaxFails,
-			CooldownSecs: inst.CooldownSecs,
-			TimeoutSecs:  inst.TimeoutSecs,
+			Name:                     inst.Name,
+			Preset:                   inst.Preset,
+			EncryptedKey:             encrypted,
+			EncryptedQuotaCredential: encryptedCredential,
+			Endpoints:                inst.Endpoints,
+			Models:                   inst.Models,
+			MaxFails:                 inst.MaxFails,
+			CooldownSecs:             inst.CooldownSecs,
+			TimeoutSecs:              inst.TimeoutSecs,
 		}
 		if _, err := s.CreateInstance(spec); err != nil {
 			if isUniqueViolation(err) {
@@ -428,6 +441,39 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 func nowTime(stamp string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, stamp)
 	return t
+}
+
+// encryptQuotaCredential encrypts the quota credential of an instance. An
+// empty credential is stored as an empty string.
+func encryptQuotaCredential(box *secret.Box, cred config.QuotaCredential) (string, error) {
+	if cred.Empty() {
+		return "", nil
+	}
+	raw, err := json.Marshal(cred)
+	if err != nil {
+		return "", fmt.Errorf("encode quota credential: %w", err)
+	}
+	encrypted, err := box.Encrypt(string(raw))
+	if err != nil {
+		return "", fmt.Errorf("encrypt quota credential: %w", err)
+	}
+	return encrypted, nil
+}
+
+// decryptQuotaCredential reads the quota credential of an instance back.
+func decryptQuotaCredential(box *secret.Box, encrypted string) (config.QuotaCredential, error) {
+	if encrypted == "" {
+		return config.QuotaCredential{}, nil
+	}
+	raw, err := box.Decrypt(encrypted)
+	if err != nil {
+		return config.QuotaCredential{}, err
+	}
+	var cred config.QuotaCredential
+	if err := json.Unmarshal([]byte(raw), &cred); err != nil {
+		return config.QuotaCredential{}, fmt.Errorf("decode quota credential: %w", err)
+	}
+	return cred, nil
 }
 
 // isUniqueViolation reports whether the error is a unique constraint failure.

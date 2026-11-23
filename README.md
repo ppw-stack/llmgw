@@ -146,6 +146,7 @@ models:
 - 内置端点的文档：MiniMax 编码套餐国内 <https://platform.minimaxi.com/docs/m-plan/other-tools>、国际 <https://platform.minimax.io/docs/m-plan/other-tools>。两边 Key 不通用，按套餐归属选择 `minimax-mplan-cn` / `minimax-mplan-global`。
 - 内置端点 `opencode-go`（OpenCode Go 订阅，<https://opencode.ai/docs/console/go/>）：上游强制要求每个请求带 `x-opencode-session`，缺失直接返回 `400 MissingSessionID`。网关原样透传客户端请求头，所以 Claude Code / Codex / ZCode / Pi / Hermes 这类自带会话头的客户端可直接使用；裸 SDK 客户端需要自己带上这个头（值必须是**同一对话内稳定**的字符串）。
 - 内置端点 `ark-coding-plan-cn`（火山方舟 Coding Plan，<https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview>）：只有 `/api/coding` 系列的地址才扣套餐额度，用 `/api/v3` 不扣额度而是另外计费；额度也只在编程 / Agent 类工具里生效。
+- 套餐额度：OpenCode Go 与 MiniMax 编码套餐的接入点会在卡片上显示 5 小时 / 每周（MiniMax 无月度窗口）的已用百分比与重置倒计时；火山方舟 Coding Plan 显示 5 小时 / 每周 / 每月，但它的套餐额度只在账号管控面上，需要在接入点上额外填一组火山引擎 **Access Key ID + Secret Access Key**（推理用的 API Key 读不到额度）。
 
 ## 管理 API
 
@@ -160,11 +161,12 @@ curl -b cookies.txt -X POST localhost:8080/admin/api/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"laptop"}'
 
-# 查看上游接入点、模型、日志、用量、审计
+# 查看上游接入点、模型、日志、用量、额度、审计
 curl -b cookies.txt localhost:8080/admin/api/instances
 curl -b cookies.txt localhost:8080/admin/api/models
 curl -b cookies.txt "localhost:8080/admin/api/logs?limit=20"
 curl -b cookies.txt "localhost:8080/admin/api/usage?days=7"
+curl -b cookies.txt localhost:8080/admin/api/quota
 curl -b cookies.txt "localhost:8080/admin/api/audit?limit=20"
 ```
 
@@ -186,6 +188,7 @@ internal/config/      YAML 解析、校验、${ENV} 展开
 internal/ingress/     路径归一化、协议判定、模型/流式元数据解析
 internal/router/      查表路由与快照
 internal/preset/      内置端点目录（MiniMax 编码套餐等）
+internal/quota/       内置端点的套餐额度查询（5 小时 / 每周 / 每月窗口）
 internal/transport/   转发、SSE 透传、usage 嗅探、错误分类
 internal/store/       SQLite、异步日志、用量查询
 internal/auth/        网关 Key 生成、密码哈希、会话令牌

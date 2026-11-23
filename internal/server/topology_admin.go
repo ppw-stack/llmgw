@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,32 +23,49 @@ type endpointInput struct {
 
 // instanceInput is the write form of an instance.
 type instanceInput struct {
-	Name         string          `json:"name"`
-	Preset       *string         `json:"preset"`
-	APIKey       *string         `json:"api_key"`
-	Endpoints    []endpointInput `json:"endpoints"`
-	Models       []string        `json:"models"`
-	MaxFails     *int            `json:"max_fails"`
-	CooldownSecs *int            `json:"cooldown_secs"`
-	TimeoutSecs  *int            `json:"timeout_secs"`
+	Name            string                `json:"name"`
+	Preset          *string               `json:"preset"`
+	APIKey          *string               `json:"api_key"`
+	QuotaCredential *quotaCredentialInput `json:"quota_credential"`
+	Endpoints       []endpointInput       `json:"endpoints"`
+	Models          []string              `json:"models"`
+	MaxFails        *int                  `json:"max_fails"`
+	CooldownSecs    *int                  `json:"cooldown_secs"`
+	TimeoutSecs     *int                  `json:"timeout_secs"`
+}
+
+// quotaCredentialInput is the write form of the extra credential some
+// vendors need to read the subscription quota. The secret is only written,
+// never read back.
+type quotaCredentialInput struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+}
+
+// quotaCredentialView is the read form of the quota credential: the access
+// key id identifies the credential, the secret stays masked.
+type quotaCredentialView struct {
+	AccessKeyID string `json:"access_key_id,omitempty"`
+	SecretHint  string `json:"secret_hint,omitempty"`
 }
 
 // instanceView is the read form of an instance.
 type instanceView struct {
-	ID           int64          `json:"id"`
-	Name         string         `json:"name"`
-	Preset       string         `json:"preset,omitempty"`
-	PresetName   string         `json:"preset_name,omitempty"`
-	Source       string         `json:"source"`
-	DocsURL      string         `json:"docs_url,omitempty"`
-	KeyHint      string         `json:"key_hint"`
-	Endpoints    []endpointView `json:"endpoints"`
-	Models       []string       `json:"models"`
-	MaxFails     int            `json:"max_fails"`
-	CooldownSecs int            `json:"cooldown_secs"`
-	TimeoutSecs  int            `json:"timeout_secs"`
-	CreatedAt    string         `json:"created_at"`
-	UpdatedAt    string         `json:"updated_at"`
+	ID              int64                `json:"id"`
+	Name            string               `json:"name"`
+	Preset          string               `json:"preset,omitempty"`
+	PresetName      string               `json:"preset_name,omitempty"`
+	Source          string               `json:"source"`
+	DocsURL         string               `json:"docs_url,omitempty"`
+	KeyHint         string               `json:"key_hint"`
+	QuotaCredential *quotaCredentialView `json:"quota_credential,omitempty"`
+	Endpoints       []endpointView       `json:"endpoints"`
+	Models          []string             `json:"models"`
+	MaxFails        int                  `json:"max_fails"`
+	CooldownSecs    int                  `json:"cooldown_secs"`
+	TimeoutSecs     int                  `json:"timeout_secs"`
+	CreatedAt       string               `json:"created_at"`
+	UpdatedAt       string               `json:"updated_at"`
 }
 
 type endpointView struct {
@@ -172,6 +190,9 @@ func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
 		CreatedAt:    rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:    rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
+	if rec.EncryptedQuotaCredential != "" {
+		view.QuotaCredential = s.quotaCredentialView(rec.EncryptedQuotaCredential)
+	}
 	for _, ep := range rec.Endpoints {
 		view.Endpoints = append(view.Endpoints, endpointView{Protocol: ep.Protocol, BaseURL: ep.BaseURL})
 	}
@@ -231,15 +252,21 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	encryptedCredential, err := s.encryptQuotaCredential(instance.QuotaCredential)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	rec, err := s.store.CreateInstance(store.InstanceSpec{
-		Name:         instance.Name,
-		Preset:       instance.Preset,
-		EncryptedKey: encrypted,
-		Endpoints:    instance.Endpoints,
-		Models:       instance.Models,
-		MaxFails:     instance.MaxFails,
-		CooldownSecs: instance.CooldownSecs,
-		TimeoutSecs:  instance.TimeoutSecs,
+		Name:                     instance.Name,
+		Preset:                   instance.Preset,
+		EncryptedKey:             encrypted,
+		EncryptedQuotaCredential: encryptedCredential,
+		Endpoints:                instance.Endpoints,
+		Models:                   instance.Models,
+		MaxFails:                 instance.MaxFails,
+		CooldownSecs:             instance.CooldownSecs,
+		TimeoutSecs:              instance.TimeoutSecs,
 	})
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -302,6 +329,16 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The quota credential is only replaced when the request carries one;
+	// an omitted field keeps the stored credential.
+	encryptedCredential := existing.EncryptedQuotaCredential
+	if in.QuotaCredential != nil {
+		encryptedCredential, err = s.encryptQuotaCredential(instance.QuotaCredential)
+		if err != nil {
+			writeAdminError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	instances, models, err := s.store.Topology(s.box)
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -321,14 +358,15 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 	}
 
 	if err := s.store.UpdateInstance(instanceID, store.InstanceSpec{
-		Name:         instance.Name,
-		Preset:       instance.Preset,
-		EncryptedKey: encrypted,
-		Endpoints:    instance.Endpoints,
-		Models:       instance.Models,
-		MaxFails:     instance.MaxFails,
-		CooldownSecs: instance.CooldownSecs,
-		TimeoutSecs:  instance.TimeoutSecs,
+		Name:                     instance.Name,
+		Preset:                   instance.Preset,
+		EncryptedKey:             encrypted,
+		EncryptedQuotaCredential: encryptedCredential,
+		Endpoints:                instance.Endpoints,
+		Models:                   instance.Models,
+		MaxFails:                 instance.MaxFails,
+		CooldownSecs:             instance.CooldownSecs,
+		TimeoutSecs:              instance.TimeoutSecs,
 	}); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -346,14 +384,15 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 	writeJSON(w, http.StatusOK, s.instanceView(store.InstanceRecord{
 		ID: instanceID,
 		InstanceSpec: store.InstanceSpec{
-			Name:         instance.Name,
-			Preset:       instance.Preset,
-			EncryptedKey: encrypted,
-			Endpoints:    instance.Endpoints,
-			Models:       instance.Models,
-			MaxFails:     instance.MaxFails,
-			CooldownSecs: instance.CooldownSecs,
-			TimeoutSecs:  instance.TimeoutSecs,
+			Name:                     instance.Name,
+			Preset:                   instance.Preset,
+			EncryptedKey:             encrypted,
+			EncryptedQuotaCredential: encryptedCredential,
+			Endpoints:                instance.Endpoints,
+			Models:                   instance.Models,
+			MaxFails:                 instance.MaxFails,
+			CooldownSecs:             instance.CooldownSecs,
+			TimeoutSecs:              instance.TimeoutSecs,
 		},
 		CreatedAt: existing.CreatedAt,
 		UpdatedAt: time.Now().UTC(),
@@ -591,6 +630,12 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 		Preset: presetID,
 		APIKey: strings.TrimSpace(in.APIKeyString()),
 	}
+	if in.QuotaCredential != nil {
+		instance.QuotaCredential = config.QuotaCredential{
+			AccessKeyID:     strings.TrimSpace(in.QuotaCredential.AccessKeyID),
+			SecretAccessKey: strings.TrimSpace(in.QuotaCredential.SecretAccessKey),
+		}
+	}
 	for _, ep := range in.Endpoints {
 		instance.Endpoints = append(instance.Endpoints, config.Endpoint{
 			Protocol: strings.TrimSpace(ep.Protocol),
@@ -692,6 +737,43 @@ func (s *Server) encryptKey(key string) (string, error) {
 		return "", nil
 	}
 	return s.box.Encrypt(strings.TrimSpace(key))
+}
+
+// encryptQuotaCredential encrypts the extra credential of an instance.
+func (s *Server) encryptQuotaCredential(cred config.QuotaCredential) (string, error) {
+	if cred.Empty() {
+		return "", nil
+	}
+	raw, err := json.Marshal(cred)
+	if err != nil {
+		return "", fmt.Errorf("encode quota credential: %w", err)
+	}
+	return s.box.Encrypt(string(raw))
+}
+
+// quotaCredentialView masks the secret of the quota credential. The access key
+// id stays visible: it identifies the credential without granting access.
+func (s *Server) quotaCredentialView(encrypted string) *quotaCredentialView {
+	raw, err := s.box.Decrypt(encrypted)
+	if err != nil {
+		return nil
+	}
+	var cred config.QuotaCredential
+	if err := json.Unmarshal([]byte(raw), &cred); err != nil {
+		return nil
+	}
+	return &quotaCredentialView{
+		AccessKeyID: cred.AccessKeyID,
+		SecretHint:  secretHint(cred.SecretAccessKey),
+	}
+}
+
+// secretHint masks a secret the way the upstream key hint does.
+func secretHint(secret string) string {
+	if len(secret) < 4 {
+		return "****"
+	}
+	return "****" + secret[len(secret)-4:]
 }
 
 // providerCompatView is the legacy aggregated read model of /providers.

@@ -146,6 +146,8 @@ GET /admin/api/provider-presets
 
 网关在 OpenAI 协议上请求 `<base>/chat/completions`，在 Anthropic 协议上请求 `<base>/v1/messages`，所以同一家厂商的两个 Base URL 不一定只差一段路径。
 
+OpenCode Go 与 MiniMax 编码套餐直接用上游 Key 查额度；火山方舟 Coding Plan 需要在接入点上另填一组访问密钥，见「[套餐额度](#套餐额度)」。
+
 使用内置端点时要注意上游自己的要求：
 
 - `opencode-go`：上游强制要求每个请求带 `x-opencode-session`，缺失直接返回 `400 MissingSessionID`。网关原样透传客户端请求头，Claude Code / Codex / ZCode / Pi / Hermes 这类自带会话头的客户端可直接使用；裸 SDK 客户端需要自己带上这个头，值必须在同一对话内保持稳定。
@@ -330,6 +332,65 @@ GET /admin/api/usage?days=7
   "by_key": [{"key_id":1,"name":"laptop","requests":80,"cost_usd":0.22}]
 }
 ```
+
+## 套餐额度
+
+内置端点如果厂商提供额度接口，网关会用该接入点的上游 Key 查询套餐的额度窗口，控制台在「上游接入点」卡片上直接显示。
+
+```
+GET /admin/api/quota
+
+200 {
+  "reports": [
+    {
+      "instance_id": 1,
+      "instance": "opencode-go",
+      "preset": "opencode-go",
+      "supported": true,
+      "fetched_at": "2026-11-23T03:20:00Z",
+      "error": "",
+      "windows": [
+        {"id": "5h", "label": "5 小时", "used_pct": 12,
+         "resets_at": "2026-11-23T04:23:18Z", "status": "ok"},
+        {"id": "weekly", "label": "每周", "used_pct": 78,
+         "resets_at": "2026-11-30T00:00:00Z", "status": "ok"},
+        {"id": "monthly", "label": "每月", "used_pct": 94,
+         "resets_at": "2026-12-20T14:43:31Z", "status": "ok"}
+      ]
+    },
+    {"instance_id": 2, "instance": "custom", "supported": false, "windows": []}
+  ]
+}
+```
+
+- `used_pct` 是**已用**百分比（0–100）；`resets_at` 是窗口重置时间（RFC 3339），上游不返回时为空；`status` 为 `ok` 或 `exhausted`。
+- 窗口按厂商实际提供的返回：OpenCode Go 与火山方舟 Coding Plan 有 5 小时 / 每周 / 每月三个窗口，MiniMax 编码套餐只有 5 小时与每周两个窗口（没有月度窗口）。
+- 火山方舟的套餐额度只在账号管控面上，推理用的 API Key 读不到：接入点上要另外填一组**额度查询凭证**（火山引擎 Access Key ID + Secret Access Key），网关用火山 V4 签名去查。凭证加密存储，只回显掩码。
+- 自定义端点没有额度接口，`supported` 为 `false`。
+- 单个接入点查询失败只影响它自己：错误写在该条报告的 `error` 里，其余接入点照常返回，接口整体仍是 `200`。
+- 上游 Key 只用于向厂商固定的额度地址发只读请求（火山是签名的 POST），不会出现在响应或日志里。
+- 结果按接入点缓存 60 秒，控制台每 60 秒轮询一次。
+
+### 额度查询凭证
+
+接入点可以带一组额外的额度查询凭证，形状与火山引擎的访问密钥一致：
+
+```
+POST /admin/api/instances
+{
+  "name": "ark-coding",
+  "preset": "ark-coding-plan-cn",
+  "api_key": "ark-...",
+  "quota_credential": {
+    "access_key_id": "AKLT...",
+    "secret_access_key": "..."
+  },
+  "models": ["ark-code-latest"]
+}
+```
+
+- 提交后只写不读：列表与详情里的 `quota_credential` 只有 `access_key_id` 与 `secret_hint`（末四位掩码）。
+- 编辑时不带这个字段表示保留原凭证；带上就整组替换。
 
 ## 健康与指标
 

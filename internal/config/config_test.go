@@ -130,6 +130,38 @@ func TestCustomInstanceRequiresEndpoint(t *testing.T) {
 	}
 }
 
+// TestQuotaCredentialExpandsEnv checks that the environment variables of the
+// quota credential are expanded like the other secrets.
+func TestQuotaCredentialExpandsEnv(t *testing.T) {
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: ark
+    preset: ark-coding-plan-cn
+    api_key: "ark-test"
+    quota_credential:
+      access_key_id: "${LLMGW_TEST_VOLC_AK}"
+      secret_access_key: "${LLMGW_TEST_VOLC_SK}"
+    models: [ark-code-latest]
+`
+	t.Setenv("LLMGW_TEST_VOLC_AK", "AKLT-test")
+	t.Setenv("LLMGW_TEST_VOLC_SK", "sk-test")
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Instances) != 1 {
+		t.Fatalf("instances = %v", cfg.Instances)
+	}
+	cred := cfg.Instances[0].QuotaCredential
+	if cred.AccessKeyID != "AKLT-test" || cred.SecretAccessKey != "sk-test" {
+		t.Fatalf("quota credential = %+v", cred)
+	}
+}
+
 func TestPresetProvider(t *testing.T) {
 	body := `
 server:

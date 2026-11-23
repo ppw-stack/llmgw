@@ -124,3 +124,54 @@ func TestLabelsOmitEmptyVariant(t *testing.T) {
 		t.Fatalf("empty variant must not add parentheses: %q", goPreset.Label())
 	}
 }
+
+func TestQuotaDeclarations(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		id   string
+		kind string
+		url  string
+	}{
+		{"opencode-go", "opencode-go", "https://opencode.ai/zen/go/v1/usage"},
+		{"minimax-mplan-cn", "minimax", "https://api.minimax.cn/v1/token_plan/remains"},
+		{"minimax-mplan-global", "minimax", "https://www.minimax.io/v1/token_plan/remains"},
+	}
+	for _, tc := range cases {
+		p, ok := Lookup(tc.id)
+		if !ok {
+			t.Fatalf("missing preset %q", tc.id)
+		}
+		if p.Quota == nil {
+			t.Fatalf("preset %q has no quota declaration", tc.id)
+		}
+		if p.Quota.Kind != tc.kind || p.Quota.URL != tc.url {
+			t.Fatalf("preset %q quota = %+v", tc.id, p.Quota)
+		}
+		u, err := url.Parse(p.Quota.URL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			t.Fatalf("preset %q: invalid quota url %q", tc.id, p.Quota.URL)
+		}
+	}
+	// Ark publishes the plan windows on its account control plane, which
+	// needs a signed request instead of a plain URL.
+	ark, _ := Lookup("ark-coding-plan-cn")
+	if ark.Quota == nil {
+		t.Fatal("the ark preset has no quota declaration")
+	}
+	if ark.Quota.Kind != "ark" || ark.Quota.URL != "" {
+		t.Fatalf("ark quota = %+v", ark.Quota)
+	}
+}
+
+func TestLookupReturnsCopyOfQuota(t *testing.T) {
+	t.Parallel()
+	p, ok := Lookup("opencode-go")
+	if !ok || p.Quota == nil {
+		t.Fatal("expected the opencode-go preset with a quota declaration")
+	}
+	p.Quota.URL = "https://evil.test/usage"
+	again, _ := Lookup("opencode-go")
+	if again.Quota == nil || again.Quota.URL != "https://opencode.ai/zen/go/v1/usage" {
+		t.Fatalf("the catalog was mutated: %+v", again.Quota)
+	}
+}

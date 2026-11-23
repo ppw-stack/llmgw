@@ -200,11 +200,13 @@ REST API：
     窗口外的候选（`only`）不参与路由，全部候选都被关掉时返回 `503`。
 21. 实例地址为 `http://127.0.0.1:...` 或云元数据地址时，保存返回 `400`；加
     `allow_private_upstream: true` 后可保存，运行期拨号放行。
-22. 网关 Key 超过 `key_rpm` 后返回 `429` + `Retry-After`；并发超过 `key_max_concurrent` 同样 `429`。
-23. 浏览器带上 `Cookie` 调数据面时，上游收到的请求头里没有 `Cookie`、`X-Forwarded-For`、`X-Real-IP`。
-24. 上游返回 `Set-Cookie`/CSP/HSTS 时，客户端只看到网关自己设置的头，对话响应带 `Cache-Control: no-store`。
-25. 配置 `admin_allowed_cidrs` 后，白名单外来源访问 `/admin/api/*` 返回 `403`。
-26. 配置 `admin_enabled: false` 后，管理 API、登录接口与控制台页面返回 `403`，
+22. 控制台的自定义端点表单提供「允许内网地址」开关：勾选后才能保存内网地址，
+    卡片上显示「允许内网」标记；编辑该接入点而不动这个开关时，放行状态保持不变。
+23. 网关 Key 超过 `key_rpm` 后返回 `429` + `Retry-After`；并发超过 `key_max_concurrent` 同样 `429`。
+24. 浏览器带上 `Cookie` 调数据面时，上游收到的请求头里没有 `Cookie`、`X-Forwarded-For`、`X-Real-IP`。
+25. 上游返回 `Set-Cookie`/CSP/HSTS 时，客户端只看到网关自己设置的头，对话响应带 `Cache-Control: no-store`。
+26. 配置 `admin_allowed_cidrs` 后，白名单外来源访问 `/admin/api/*` 返回 `403`。
+27. 配置 `admin_enabled: false` 后，管理 API、登录接口与控制台页面返回 `403`，
     数据面与健康检查照常；改回 `true` 后控制台立即可用，无需重新登录。
 
 ## 7. 里程碑

@@ -31,6 +31,8 @@ export interface Instance {
   endpoints: InstanceEndpoint[];
   /** 该接入点支持的上游模型名，模型引用它的前提 */
   models: string[];
+  /** 是否放行指向 loopback / 内网 / 云元数据地址的上游 */
+  allow_private_upstream: boolean;
   max_fails: number;
   cooldown_secs: number;
   timeout_secs: number;
@@ -54,6 +56,13 @@ export interface InstancePayload {
   endpoints?: InstanceEndpoint[];
   /** 必填：该接入点支持的上游模型名 */
   models: string[];
+  /**
+   * 是否放行指向 loopback / 内网 / 云元数据地址的上游。
+   *
+   * 后端按「省略即关闭」处理，所以每次保存都要显式带上当前值；
+   * 不带就会把已放行的内网上游悄悄关掉。
+   */
+  allow_private_upstream?: boolean;
   max_fails?: number;
   cooldown_secs?: number;
   timeout_secs?: number;

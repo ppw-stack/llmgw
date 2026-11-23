@@ -19,6 +19,6 @@ https://github.com/ppw-stack/llmgw/security/advisories/new
 - 怀疑控制台被拿下时把 `server.admin_enabled` 改成 `false`：1 秒内热加载生效，控制台 API、
   登录接口与控制台页面全部 `403`，数据面不受影响；处置完改回 `true` 即可恢复。
 - 设置 `server.key_rpm` / `server.key_max_concurrent`：一把网关 Key 泄漏就等同于上游额度被无限制消耗。
-- 上游地址默认拒绝 loopback、内网与云元数据网段。本地 mock 需在实例上显式设置 `allow_private_upstream: true`，不要在公网实例上开。
+- 上游地址默认拒绝 loopback、内网与云元数据网段。本地 mock 需在实例上显式设置 `allow_private_upstream: true`，不要在公网实例上开。这个开关现在可以在控制台「上游接入点」的自定义端点表单里勾选，勾上的实例在卡片上带「允许内网」标记；它等于允许网关拨内网地址，控制台被拿下时就是内网代理。
 - `master.key` 与数据库同等敏感，请一并备份；数据库目录以 0700 创建、库文件 0600，备份时保持同样权限。
 - 不要把真实上游 Key 写入 `config.yaml` 或提交到仓库；仓库中的 `deploy/test-config.yaml` 只包含本地 mock 的假值。

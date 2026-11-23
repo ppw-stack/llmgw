@@ -377,6 +377,12 @@ tbody tr:last-child td {
   color: var(--muted);
 }
 
+/* 危险标记：允许内网地址的接入点 */
+.badge.danger {
+  background: rgba(201, 60, 60, 0.12);
+  color: var(--danger);
+}
+
 .tag {
   display: inline-block;
   padding: 2px 8px;
@@ -746,8 +752,8 @@ textarea:focus {
   margin: 8px 0 12px;
 }
 
-/* 只作用于时间窗口编辑区，避免影响其他 .row 里的复选框 */
-.window-editor .row input[type='checkbox'] {
+/* 只作用于复选框：.row input 会把输入框拉宽，复选框要保持原尺寸 */
+.row input[type='checkbox'] {
   flex: 0 0 auto;
   min-width: 0;
 }

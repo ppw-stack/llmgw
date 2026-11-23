@@ -43,6 +43,8 @@ interface InstanceForm {
   quotaSecretHint: string;
   endpoints: EndpointRow[];
   modelsText: string;
+  /** 是否放行指向 loopback / 内网 / 云元数据地址的上游 */
+  allowPrivateUpstream: boolean;
   maxFails: string;
   cooldownSecs: string;
   timeoutSecs: string;
@@ -176,6 +178,7 @@ function newForm(): InstanceForm {
     quotaSecretHint: '',
     endpoints: [{ protocol: 'openai', base_url: '' }],
     modelsText: '',
+    allowPrivateUpstream: false,
     maxFails: '3',
     cooldownSecs: '30',
     timeoutSecs: '0',
@@ -212,6 +215,9 @@ function setMode(mode: InstanceMode) {
   resetCandidates();
   if (mode === 'builtin') {
     applyPreset(form, form.preset || presets.value[0]?.id || '', true);
+    // 内置预设的地址是公网厂商地址，放行内网对它没有意义；切回内置时
+    // 顺手清掉，免得留下一个看不见的开关。
+    form.allowPrivateUpstream = false;
   }
 }
 
@@ -396,6 +402,7 @@ function openEdit(inst: Instance) {
       base_url: ep.base_url,
     })),
     modelsText: inst.models.join('\n'),
+    allowPrivateUpstream: inst.allow_private_upstream,
     maxFails: String(inst.max_fails),
     cooldownSecs: String(inst.cooldown_secs),
     timeoutSecs: String(inst.timeout_secs),
@@ -471,6 +478,10 @@ async function save() {
   payload.max_fails = maxFails;
   payload.cooldown_secs = cooldownSecs;
   payload.timeout_secs = timeoutSecs;
+  // The private-upstream opt-in is always sent, even when the operator did
+  // not touch it: the backend reads an omitted field as "off", so leaving it
+  // out would silently close the gate of an instance that already has it.
+  payload.allow_private_upstream = f.allowPrivateUpstream;
 
   saving.value = true;
   error.value = '';
@@ -567,6 +578,7 @@ onUnmounted(() => {
             {{ inst.source === 'builtin' ? '内置端点' : '自定义' }}
           </span>
           <span v-if="inst.preset_name" class="badge">{{ inst.preset_name }}</span>
+          <span v-if="inst.allow_private_upstream" class="badge danger">允许内网</span>
         </div>
         <div class="row">
           <a
@@ -777,6 +789,23 @@ onUnmounted(() => {
             <div class="row">
               <button class="ghost" @click="addEndpoint(editing)">添加端点</button>
             </div>
+            <div class="row">
+              <label for="instance-allow-private">允许内网地址</label>
+              <input
+                id="instance-allow-private"
+                v-model="editing.allowPrivateUpstream"
+                type="checkbox"
+              />
+            </div>
+            <p class="muted small">
+              默认拒绝指向 loopback、内网网段与云元数据地址（169.254.169.254）的上游，
+              要指向这类地址必须先勾选本项。打开后网关可以拨号到 127.0.0.1、10.0.0.0/8
+              这类地址：仅在本地 mock 或内网自建上游时开启，控制台被拿下时它等于把网关
+              变成内网代理。
+            </p>
+            <p v-if="editing.allowPrivateUpstream" class="error">
+              该接入点已放行内网地址，请确认上游确实是可信的内网服务。
+            </p>
           </div>
 
           <div class="field span-2">

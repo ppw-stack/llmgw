@@ -245,6 +245,22 @@ func TestPresetInstanceCRUD(t *testing.T) {
 		t.Fatalf("preset urls = %+v", presets[0])
 	}
 
+	// The other providers are part of the catalog as well.
+	byID := map[string]int{}
+	for i, p := range presets {
+		byID[p.ID] = i
+	}
+	for _, id := range []string{"opencode-go", "ark-coding-plan-cn"} {
+		i, ok := byID[id]
+		if !ok {
+			t.Fatalf("preset %q missing from the catalog: %+v", id, presets)
+		}
+		if presets[i].OpenAIBaseURL == "" || presets[i].AnthropicBaseURL == "" ||
+			len(presets[i].Models) == 0 {
+			t.Fatalf("preset %q is incomplete: %+v", id, presets[i])
+		}
+	}
+
 	// Create with only a key: the endpoints come from the preset.
 	presetKey := testAPIKey("TEST_PRESET_API_KEY", "9999")
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
@@ -288,6 +304,32 @@ func TestPresetInstanceCRUD(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "supplies its own endpoints") {
 		t.Fatalf("preset endpoint = %d %s", resp.StatusCode, body)
+	}
+}
+
+// TestPresetWithoutVariantNamesThePreset checks that a preset without a
+// variant is shown by its family name alone.
+func TestPresetWithoutVariantNamesThePreset(t *testing.T) {
+	t.Parallel()
+	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+
+	apiKey := testAPIKey("TEST_OPENCODE_API_KEY", "8888")
+	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances",
+		`{"name":"opencode-go","preset":"opencode-go","api_key":"`+apiKey+`",
+		  "models":["glm-5.3"]}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create preset = %d %s", resp.StatusCode, body)
+	}
+	created := decodeInstance(t, resp)
+	if created.PresetName != "OpenCode Go" {
+		t.Fatalf("preset name = %q", created.PresetName)
+	}
+	if len(created.Endpoints) != 2 ||
+		created.Endpoints[0].BaseURL != "https://opencode.ai/inference/go/openai/v1" ||
+		created.Endpoints[1].BaseURL != "https://opencode.ai/inference/go/anthropic" {
+		t.Fatalf("resolved endpoints = %+v", created.Endpoints)
 	}
 }
 

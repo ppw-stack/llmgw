@@ -137,6 +137,22 @@ GET /admin/api/provider-presets
 
 目录同时提供 `minimax-mplan-cn`（`https://api.minimax.cn/v1` 与 `https://api.minimax.cn/anthropic`），默认名称 `minimax-cn`。国内与国际套餐的 Key 不通用。
 
+另外两个内置端点：
+
+| id | 名称 | OpenAI Base URL | Anthropic Base URL |
+|---|---|---|---|
+| `opencode-go` | OpenCode Go | `https://opencode.ai/inference/go/openai/v1` | `https://opencode.ai/inference/go/anthropic` |
+| `ark-coding-plan-cn` | 火山方舟（Coding Plan） | `https://ark.cn-beijing.volces.com/api/coding/v3` | `https://ark.cn-beijing.volces.com/api/coding` |
+
+网关在 OpenAI 协议上请求 `<base>/chat/completions`，在 Anthropic 协议上请求 `<base>/v1/messages`，所以同一家厂商的两个 Base URL 不一定只差一段路径。
+
+使用内置端点时要注意上游自己的要求：
+
+- `opencode-go`：上游强制要求每个请求带 `x-opencode-session`，缺失直接返回 `400 MissingSessionID`。网关原样透传客户端请求头，Claude Code / Codex / ZCode / Pi / Hermes 这类自带会话头的客户端可直接使用；裸 SDK 客户端需要自己带上这个头，值必须在同一对话内保持稳定。
+- `ark-coding-plan-cn`：只有 `/api/coding` 系列的地址才扣套餐额度，`/api/v3` 不扣额度而是另外计费；套餐额度也只在编程 / Agent 类工具中生效。
+
+`models` 是该预设的建议模型名，可以在创建接入点时改。OpenCode Go 走 `/responses` 与 Google 端点的模型（GPT、Grok、Muse Spark、Gemini）不在建议列表里——本网关只提供 chat/completions 与 Anthropic Messages 两个入口。
+
 ### 上游接入点
 
 #### 列表

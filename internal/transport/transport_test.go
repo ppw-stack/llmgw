@@ -16,6 +16,7 @@ import (
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/ingress"
+	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
 )
@@ -91,6 +92,53 @@ func TestCopyRequestHeadersDropsAcceptEncoding(t *testing.T) {
 	}
 	if dst.Get("X-Test") != "1" {
 		t.Fatal("ordinary headers must be preserved")
+	}
+}
+
+// TestPresetUpstreamURLs locks the final upstream URL of the built-in
+// presets. The gateway appends /chat/completions on the OpenAI protocol and
+// /v1/messages on the Anthropic one, so the two base URLs of a preset differ
+// by exactly that segment.
+func TestPresetUpstreamURLs(t *testing.T) {
+	t.Parallel()
+	goPreset, ok := preset.Lookup("opencode-go")
+	if !ok {
+		t.Fatal("missing opencode-go preset")
+	}
+	arkPreset, ok := preset.Lookup("ark-coding-plan-cn")
+	if !ok {
+		t.Fatal("missing ark-coding-plan-cn preset")
+	}
+	cases := []struct {
+		name   string
+		target router.Target
+		want   string
+	}{
+		{
+			name:   "opencode go openai",
+			target: router.Target{Protocol: config.ProtocolOpenAI, BaseURL: goPreset.OpenAIBaseURL},
+			want:   "https://opencode.ai/inference/go/openai/v1/chat/completions",
+		},
+		{
+			name:   "opencode go anthropic",
+			target: router.Target{Protocol: config.ProtocolAnthropic, BaseURL: goPreset.AnthropicBaseURL},
+			want:   "https://opencode.ai/inference/go/anthropic/v1/messages",
+		},
+		{
+			name:   "ark coding openai",
+			target: router.Target{Protocol: config.ProtocolOpenAI, BaseURL: arkPreset.OpenAIBaseURL},
+			want:   "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+		},
+		{
+			name:   "ark coding anthropic",
+			target: router.Target{Protocol: config.ProtocolAnthropic, BaseURL: arkPreset.AnthropicBaseURL},
+			want:   "https://ark.cn-beijing.volces.com/api/coding/v1/messages",
+		},
+	}
+	for _, tc := range cases {
+		if got := upstreamURL(tc.target); got != tc.want {
+			t.Fatalf("%s: upstream url = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

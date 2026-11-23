@@ -40,6 +40,7 @@ upstream_timeout: 120s
 instances:
   # 内置端点：端点地址由程序内置，升级自动更新
   # 国内用 minimax-mplan-cn，国际用 minimax-mplan-global（两者 Key 不通用）
+  # 另外还有 opencode-go（OpenCode Go 订阅）、ark-coding-plan-cn（火山方舟 Coding Plan）
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"

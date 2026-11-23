@@ -181,7 +181,7 @@ func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
 	if rec.Preset != "" {
 		view.Source = "builtin"
 		if pr, ok := preset.Lookup(rec.Preset); ok {
-			view.PresetName = pr.FamilyName + "（" + pr.VariantName + "）"
+			view.PresetName = pr.Label()
 			view.DocsURL = pr.DocsURL
 		}
 	}
@@ -754,7 +754,7 @@ func (s *Server) adminProviders(w http.ResponseWriter, r *http.Request) {
 		if rec.Preset != "" {
 			view.Source = "builtin"
 			if pr, ok := preset.Lookup(rec.Preset); ok {
-				view.PresetName = pr.FamilyName + "（" + pr.VariantName + "）"
+				view.PresetName = pr.Label()
 				view.DocsURL = pr.DocsURL
 			}
 		}

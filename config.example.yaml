@@ -33,6 +33,7 @@ upstream_timeout: 120s
 instances:
   # 内置端点：端点地址由程序内置，随版本升级自动更新。
   # 国内套餐用 minimax-mplan-cn（api.minimax.cn），国际套餐用 minimax-mplan-global。
+  # 另外还有 opencode-go（OpenCode Go 订阅）与 ark-coding-plan-cn（火山方舟 Coding Plan）。
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
@@ -52,6 +53,21 @@ instances:
     models: [MiniMax-M3.1-Flash]
     max_fails: 3
     cooldown_secs: 30
+
+  # OpenCode Go 订阅（端点地址由程序内置：opencode.ai/inference/go）。
+  # 上游强制要求每个请求带 x-opencode-session，缺失直接返回 400 MissingSessionID；
+  # 网关原样透传客户端请求头，自带会话头的客户端（Claude Code / Codex / ZCode / Pi）可直接用。
+  - name: opencode-go
+    preset: opencode-go
+    api_key: "${OPENCODE_GO_KEY}"
+    models: [glm-5.3, kimi-k3]
+
+  # 火山方舟 Coding Plan（端点地址由程序内置：…/api/coding）。
+  # 只有 /api/coding 系列地址才扣套餐额度，/api/v3 不扣额度而是另外计费。
+  - name: ark-coding
+    preset: ark-coding-plan-cn
+    api_key: "${ARK_API_KEY}"
+    models: [ark-code-latest, doubao-seed-2.1-pro]
 
   # 自定义端点：任意 code plan 都是「一个 Key + 1~2 个端点」。
   - name: glm

@@ -2,6 +2,7 @@ package preset
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,63 @@ func TestLookupReturnsCopy(t *testing.T) {
 	}
 	if _, ok := Lookup("nope"); ok {
 		t.Fatal("unknown preset must not be found")
+	}
+}
+
+func TestOpenCodeGoPreset(t *testing.T) {
+	t.Parallel()
+	p, ok := Lookup("opencode-go")
+	if !ok {
+		t.Fatal("missing opencode-go preset")
+	}
+	// The gateway appends /chat/completions to the OpenAI base and
+	// /v1/messages to the Anthropic one.
+	if p.OpenAIBaseURL != "https://opencode.ai/inference/go/openai/v1" {
+		t.Fatalf("openai base url = %q", p.OpenAIBaseURL)
+	}
+	if p.AnthropicBaseURL != "https://opencode.ai/inference/go/anthropic" {
+		t.Fatalf("anthropic base url = %q", p.AnthropicBaseURL)
+	}
+	if p.Label() != "OpenCode Go" {
+		t.Fatalf("label = %q", p.Label())
+	}
+	if len(p.Models) == 0 {
+		t.Fatal("no default models")
+	}
+}
+
+func TestArkCodingPlanPreset(t *testing.T) {
+	t.Parallel()
+	p, ok := Lookup("ark-coding-plan-cn")
+	if !ok {
+		t.Fatal("missing ark-coding-plan-cn preset")
+	}
+	// The Coding Plan bases are the ones that draw from the subscription.
+	if p.OpenAIBaseURL != "https://ark.cn-beijing.volces.com/api/coding/v3" {
+		t.Fatalf("openai base url = %q", p.OpenAIBaseURL)
+	}
+	if p.AnthropicBaseURL != "https://ark.cn-beijing.volces.com/api/coding" {
+		t.Fatalf("anthropic base url = %q", p.AnthropicBaseURL)
+	}
+	if p.Label() != "火山方舟（Coding Plan）" {
+		t.Fatalf("label = %q", p.Label())
+	}
+	if p.DefaultName != "ark-coding" {
+		t.Fatalf("default name = %q", p.DefaultName)
+	}
+	if len(p.Models) == 0 {
+		t.Fatal("no default models")
+	}
+}
+
+func TestLabelsOmitEmptyVariant(t *testing.T) {
+	t.Parallel()
+	global, _ := Lookup("minimax-mplan-global")
+	if global.Label() != "MiniMax 编码套餐（国际）" {
+		t.Fatalf("label = %q", global.Label())
+	}
+	goPreset, _ := Lookup("opencode-go")
+	if strings.Contains(goPreset.Label(), "（）") {
+		t.Fatalf("empty variant must not add parentheses: %q", goPreset.Label())
 	}
 }

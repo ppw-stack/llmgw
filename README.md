@@ -15,7 +15,7 @@
 | 按 `(协议, 模型)` 查表路由，得到候选链 | 规则引擎、权重轮询 |
 | 同一模型挂多个上游，主实例失败自动切换 | 跨实例限流、预算 |
 | 上游接入点熔断（连续失败后跳过） | 主动健康检查 |
-| 内置端点（MiniMax 编码套餐国内 / 国际）/ 自定义接入点 | RPM/TPM/预算、模型白名单 |
+| 内置端点（MiniMax 编码套餐国内 / 国际、OpenCode Go、火山方舟 Coding Plan）/ 自定义接入点 | RPM/TPM/预算、模型白名单 |
 | 上游 401/403 原样透传 | 4xx 自动重试 |
 | 请求日志、token 与成本统计 | 多租户、计费、在线支付 |
 | 配置热更新 | MCP、RAG、护栏 |
@@ -87,6 +87,20 @@ instances:
     api_key: "${MINIMAX_KEY_BACKUP}"
     models: [MiniMax-M3.1-Flash]
 
+  # OpenCode Go 订阅：opencode.ai/inference/go
+  # 上游强制要求请求带 x-opencode-session，缺失直接返回 400 MissingSessionID；
+  # 网关原样透传客户端请求头，Claude Code / Codex / ZCode / Pi 等自带会话头的客户端可直接用。
+  - name: opencode-go
+    preset: opencode-go
+    api_key: "${OPENCODE_GO_KEY}"
+    models: [glm-5.3, kimi-k3]
+
+  # 火山方舟 Coding Plan：必须用 /api/coding 系列的地址才会扣套餐额度
+  - name: ark-coding
+    preset: ark-coding-plan-cn
+    api_key: "${ARK_API_KEY}"
+    models: [ark-code-latest, doubao-seed-2.1-pro]
+
   # 自定义端点：一个 Key + 1~2 个端点
   - name: glm
     api_key: "${GLM_KEY}"
@@ -130,6 +144,8 @@ models:
 - 改配置后 1 秒内自动生效，在途流式请求不受影响。
 - 上游超时全局默认 120s，单个接入点只能调低；代理使用进程的 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
 - 内置端点的文档：MiniMax 编码套餐国内 <https://platform.minimaxi.com/docs/m-plan/other-tools>、国际 <https://platform.minimax.io/docs/m-plan/other-tools>。两边 Key 不通用，按套餐归属选择 `minimax-mplan-cn` / `minimax-mplan-global`。
+- 内置端点 `opencode-go`（OpenCode Go 订阅，<https://opencode.ai/docs/console/go/>）：上游强制要求每个请求带 `x-opencode-session`，缺失直接返回 `400 MissingSessionID`。网关原样透传客户端请求头，所以 Claude Code / Codex / ZCode / Pi / Hermes 这类自带会话头的客户端可直接使用；裸 SDK 客户端需要自己带上这个头（值必须是**同一对话内稳定**的字符串）。
+- 内置端点 `ark-coding-plan-cn`（火山方舟 Coding Plan，<https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview>）：只有 `/api/coding` 系列的地址才扣套餐额度，用 `/api/v3` 不扣额度而是另外计费；额度也只在编程 / Agent 类工具里生效。
 
 ## 管理 API
 

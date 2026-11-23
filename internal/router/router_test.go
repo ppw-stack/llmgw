@@ -1,12 +1,23 @@
 package router
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
 )
+
+// testAPIKey returns the upstream key used by the router tests. The
+// environment variable injects a real key; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func testAPIKey(env, suffix string) string {
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-" + suffix
+}
 
 func testConfig() *config.Config {
 	return &config.Config{
@@ -29,24 +40,21 @@ func testConfig() *config.Config {
 		},
 		Models: []config.Model{
 			{
-				Name:     "glm-4.6",
-				Upstream: "glm-4.6",
+				Name: "glm-4.6",
 				Instances: []config.ModelInstance{
-					{Name: "glm"},
+					{Name: "glm", Upstream: "glm-4.6"},
 				},
 			},
 			{
-				Name:     "claude-only",
-				Upstream: "claude-3",
+				Name: "claude-only",
 				Instances: []config.ModelInstance{
-					{Name: "glm"},
+					{Name: "glm", Upstream: "claude-3"},
 				},
 			},
 			{
-				Name:     "deepseek-chat",
-				Upstream: "deepseek-chat",
+				Name: "deepseek-chat",
 				Instances: []config.ModelInstance{
-					{Name: "deepseek"},
+					{Name: "deepseek", Upstream: "deepseek-chat"},
 				},
 			},
 		},
@@ -91,6 +99,35 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+func TestCandidatesUseTheirOwnUpstreamModel(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.Instances = append(cfg.Instances, config.Instance{
+		Name:      "glm-next",
+		APIKey:    testAPIKey("LLMGW_TEST_GLM_NEXT_API_KEY", "glm-next"),
+		Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://d/v1"}},
+		Models:    []string{"glm-5.3-flash"},
+	})
+	cfg.Models[0].Instances = []config.ModelInstance{
+		{Name: "glm", Upstream: "glm-4.6", Priority: 0},
+		{Name: "glm-next", Upstream: "glm-5.3-flash", Priority: 1},
+	}
+	r := New()
+	if err := r.Reload(cfg); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := r.Resolve(config.ProtocolOpenAI, "glm-4.6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	if targets[0].UpstreamModel != "glm-4.6" || targets[1].UpstreamModel != "glm-5.3-flash" {
+		t.Fatalf("candidate upstreams = %+v", targets)
+	}
+}
+
 func TestCrossProtocolHint(t *testing.T) {
 	r := New()
 	if err := r.Reload(testConfig()); err != nil {
@@ -117,8 +154,8 @@ func TestSameModelOnSeveralInstances(t *testing.T) {
 		Models:    []string{"glm-4.6"},
 	})
 	cfg.Models[0].Instances = []config.ModelInstance{
-		{Name: "glm-backup", Priority: 1},
-		{Name: "glm", Priority: 0},
+		{Name: "glm-backup", Upstream: "glm-4.6", Priority: 1},
+		{Name: "glm", Upstream: "glm-4.6", Priority: 0},
 	}
 	r := New()
 	if err := r.Reload(cfg); err != nil {
@@ -150,10 +187,9 @@ func TestSameModelOnSeveralInstances(t *testing.T) {
 func TestModelNameMustBeUnique(t *testing.T) {
 	cfg := testConfig()
 	cfg.Models = append(cfg.Models, config.Model{
-		Name:     "glm-4.6",
-		Upstream: "something",
+		Name: "glm-4.6",
 		Instances: []config.ModelInstance{
-			{Name: "deepseek"},
+			{Name: "deepseek", Upstream: "something"},
 		},
 	})
 	r := New()
@@ -222,10 +258,9 @@ func TestPresetProviderRouting(t *testing.T) {
 			Models: []string{"MiniMax-M3.1-Flash"},
 		}},
 		Models: []config.Model{{
-			Name:     "MiniMax-M3.1-Flash",
-			Upstream: "MiniMax-M3.1-Flash",
+			Name: "MiniMax-M3.1-Flash",
 			Instances: []config.ModelInstance{
-				{Name: "minimax"},
+				{Name: "minimax", Upstream: "MiniMax-M3.1-Flash"},
 			},
 		}},
 	}

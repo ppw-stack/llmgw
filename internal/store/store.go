@@ -91,7 +91,6 @@ CREATE TABLE IF NOT EXISTS instances (
 CREATE TABLE IF NOT EXISTS models (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT    NOT NULL UNIQUE,
-    upstream    TEXT    NOT NULL DEFAULT '',
     strategy    TEXT    NOT NULL DEFAULT 'failover',
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL
@@ -100,6 +99,7 @@ CREATE TABLE IF NOT EXISTS models (
 CREATE TABLE IF NOT EXISTS model_instances (
     model_id     INTEGER NOT NULL,
     instance_id  INTEGER NOT NULL,
+    upstream     TEXT    NOT NULL DEFAULT '',
     priority     INTEGER NOT NULL DEFAULT 0,
     windows_json TEXT    NOT NULL DEFAULT '[]',
     PRIMARY KEY (model_id, instance_id)
@@ -215,6 +215,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrateModelInstanceUpstream(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate model instance upstream: %w", err)
+	}
 	if err := migrateProviders(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate providers: %w", err)
@@ -269,6 +273,51 @@ func restrictFile(path string) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return
 	}
+}
+
+// migrateModelInstanceUpstream moves the upstream model name from the model
+// row onto each candidate. Older releases stored one upstream name for the
+// whole model; now a candidate is an instance plus one concrete model of that
+// instance.
+func migrateModelInstanceUpstream(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(ctx, db, "model_instances")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	modelCols, err := tableColumns(ctx, db, "models")
+	if err != nil {
+		return err
+	}
+	hasLegacyUpstream := modelCols["upstream"]
+	if !cols["upstream"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE model_instances ADD COLUMN upstream TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add upstream column: %w", err)
+		}
+		if hasLegacyUpstream {
+			// The old alias mechanism stored the name the vendor receives in
+			// models.upstream; every candidate of that model used it. Fall
+			// back to the public model name when the column was empty.
+			if _, err := db.ExecContext(ctx, `UPDATE model_instances SET upstream = COALESCE(
+				NULLIF((SELECT m.upstream FROM models m WHERE m.id = model_instances.model_id), ''),
+				(SELECT m.name FROM models m WHERE m.id = model_instances.model_id),
+				'')`); err != nil {
+				return fmt.Errorf("backfill candidate upstream: %w", err)
+			}
+		}
+	}
+	if hasLegacyUpstream {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE models DROP COLUMN upstream`); err != nil {
+			return fmt.Errorf("drop models.upstream column: %w", err)
+		}
+	}
+	if log != nil && (hasLegacyUpstream || !cols["upstream"]) {
+		log.Info("moved the upstream model name from models to model_instances")
+	}
+	return nil
 }
 
 // migrateProviders converts the legacy providers table into the instance and
@@ -336,9 +385,9 @@ func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
 			if err := config.NormalizeModel(&m); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO models(name, upstream, strategy, created_at, updated_at)
-				VALUES(?,?,?,?,?)`,
-				m.Name, m.Upstream, m.Strategy, nowStamp(), nowStamp()); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO models(name, strategy, created_at, updated_at)
+				VALUES(?,?,?,?)`,
+				m.Name, m.Strategy, nowStamp(), nowStamp()); err != nil {
 				return err
 			}
 			var modelID int64
@@ -347,8 +396,8 @@ func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
 				return err
 			}
 			for _, mi := range m.Instances {
-				if _, err := tx.ExecContext(ctx, `INSERT INTO model_instances(model_id, instance_id, priority)
-					VALUES(?,?,?)`, modelID, instanceID, mi.Priority); err != nil {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO model_instances(model_id, instance_id, upstream, priority)
+					VALUES(?,?,?,?)`, modelID, instanceID, mi.Upstream, mi.Priority); err != nil {
 					return err
 				}
 			}
@@ -624,9 +673,8 @@ func instanceUpstreamNames(ctx context.Context, tx *sql.Tx, p pendingInstance) (
 		}
 	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT DISTINCT m.upstream FROM models m
-		 JOIN model_instances mi ON mi.model_id = m.id
-		 WHERE mi.instance_id = ? ORDER BY m.upstream`, p.id)
+		`SELECT DISTINCT upstream FROM model_instances
+		 WHERE instance_id = ? AND upstream <> '' ORDER BY upstream`, p.id)
 	if err != nil {
 		return nil, err
 	}

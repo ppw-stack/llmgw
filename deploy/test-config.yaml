@@ -61,25 +61,26 @@ instances:
 
 models:
   - name: gpt-test
-    upstream: gpt-test
     instances:
       - name: mock
+        upstream: gpt-test
   - name: claude-test
-    upstream: claude-test
     instances:
       - name: mock
+        upstream: claude-test
   - name: gpt-alias
-    upstream: gpt-upstream-name
     instances:
       - name: mock
+        upstream: gpt-upstream-name
   # 时间窗口示例：北京时间 00:00-08:00 命中 mock-night（生效优先级 0），
   # 其他时段按基础优先级走 mock。请求日志里的「上游接入点」会变化。
   - name: gpt-windowed
-    upstream: gpt-test
     instances:
       - name: mock
+        upstream: gpt-test
         priority: 1
       - name: mock-night
+        upstream: gpt-test
         priority: 10
         windows:
           - start: "00:00"

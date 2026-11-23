@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { api } from '../api';
 import type { Instance, Model, ModelInstance, ModelPayload, TimeWindow } from '../types';
 import { confirmAction } from '../utils/confirm';
@@ -13,9 +13,10 @@ interface WindowRow {
   only: boolean;
 }
 
-/** 表单里的一行候选接入点。 */
+/** 表单里的一行候选接入点：接入点 + 该接入点上的具体模型。 */
 interface CandidateRow {
   instance: string;
+  upstream: string;
   priority: string;
   windows: WindowRow[];
 }
@@ -24,7 +25,6 @@ interface CandidateRow {
 interface ModelForm {
   id: number | null;
   name: string;
-  upstream: string;
   candidates: CandidateRow[];
 }
 
@@ -36,45 +36,21 @@ const refreshError = ref('');
 const editing = ref<ModelForm | null>(null);
 const saving = ref(false);
 
-/** 当前模型真正发给上游的名字：留空时与对外名相同。 */
-const currentUpstream = computed<string>(() => {
-  const form = editing.value;
-  if (!form) return '';
-  return form.upstream.trim() || form.name.trim();
-});
-
-/** 接入点是否声明支持该上游模型名。未填上游名时不限制。 */
-function supports(inst: Instance, upstream: string): boolean {
-  return upstream === '' || inst.models.includes(upstream);
-}
-
-/**
- * 当前表单是否无解：没有接入点，或没有任何接入点声明支持这个上游名。
- * 这两种情况下候选下拉框会整体不可选，必须给出明确提示。
- */
-const missingSupport = computed<boolean>(() => {
-  if (!instances.value.length) return true;
-  const upstream = currentUpstream.value;
-  if (!upstream) return false;
-  return !instances.value.some((inst) => inst.models.includes(upstream));
-});
-
 function instanceByName(name: string): Instance | null {
   return instances.value.find((i) => i.name === name) ?? null;
 }
 
-/** 该候选接入点是否与当前上游名不匹配。 */
-function candidateUnsupported(name: string): boolean {
-  const inst = instanceByName(name);
-  if (!inst) return false;
-  return !supports(inst, currentUpstream.value);
+/** 某个接入点声明的上游模型名。 */
+function instanceModels(name: string): string[] {
+  return instanceByName(name)?.models ?? [];
 }
 
-/** 列表页用：某个候选接入点是否声明支持该模型的上游名。 */
-function modelCandidateUnsupported(m: Model, instanceName: string): boolean {
-  const inst = instanceByName(instanceName);
-  if (!inst) return true;
-  return !inst.models.includes(m.upstream);
+/** 切换接入点时，把候选模型收敛到该接入点声明里的第一项。 */
+function onInstanceChange(row: CandidateRow) {
+  const declared = instanceModels(row.instance);
+  if (!declared.includes(row.upstream)) {
+    row.upstream = declared[0] ?? '';
+  }
 }
 
 /** 下拉框里的接入点标签，顺带展示它声明的模型。 */
@@ -99,10 +75,10 @@ function effectiveSummary(m: Model): string {
   const idle = list.filter((c) => !c.active);
   const parts = active.map((c) => {
     const hit = c.window ? `（${c.window} 时段内，优先级 ${c.priority}）` : '';
-    return `${c.instance}${hit}`;
+    return `${c.instance} / ${c.upstream}${hit}`;
   });
   for (const c of idle) {
-    parts.push(`${c.instance}（当前不在时段内）`);
+    parts.push(`${c.instance} / ${c.upstream}（当前不在时段内）`);
   }
   return parts.join(' → ');
 }
@@ -122,13 +98,12 @@ function newForm(): ModelForm {
   return {
     id: null,
     name: '',
-    upstream: '',
-    candidates: [{ instance: '', priority: '0', windows: [] }],
+    candidates: [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
 }
 
 function addCandidate(form: ModelForm) {
-  form.candidates.push({ instance: '', priority: '0', windows: [] });
+  form.candidates.push({ instance: '', upstream: '', priority: '0', windows: [] });
 }
 
 function removeCandidate(form: ModelForm, index: number) {
@@ -202,6 +177,7 @@ function openEdit(m: Model) {
   error.value = '';
   const rows = m.instances.map((mi) => ({
     instance: mi.instance,
+    upstream: mi.upstream,
     priority: String(mi.priority),
     windows: (mi.windows ?? []).map((w) => ({
       start: w.start,
@@ -213,8 +189,7 @@ function openEdit(m: Model) {
   editing.value = {
     id: m.id,
     name: m.name,
-    upstream: m.upstream,
-    candidates: rows.length ? rows : [{ instance: '', priority: '0', windows: [] }],
+    candidates: rows.length ? rows : [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
 }
 
@@ -245,6 +220,15 @@ async function save() {
       return;
     }
     seen.add(target);
+    const upstream = row.upstream.trim();
+    if (!upstream) {
+      error.value = `请为接入点「${target}」选择一个模型`;
+      return;
+    }
+    if (!instanceModels(target).includes(upstream)) {
+      error.value = `接入点「${target}」没有声明模型「${upstream}」`;
+      return;
+    }
     const priority = parseCount(row.priority);
     if (priority === null) {
       error.value = '优先级必须是非负整数';
@@ -271,7 +255,7 @@ async function save() {
       }
       windows.push({ start, end, priority: windowPriority, only: w.only });
     }
-    list.push({ instance: target, priority, windows });
+    list.push({ instance: target, upstream, priority, windows });
   }
   if (!list.length) {
     error.value = '至少需要一个候选接入点';
@@ -280,7 +264,6 @@ async function save() {
 
   const payload: ModelPayload = {
     name,
-    upstream: f.upstream.trim() || name,
     strategy: 'failover',
     instances: list,
   };
@@ -342,7 +325,8 @@ onUnmounted(() => {
       </div>
     </div>
     <p class="muted">
-      模型是对外暴露的名字，由一个或多个上游接入点组成候选链；主接入点失败后自动切换到下一个。
+      模型是对外暴露的名字，由一个或多个「接入点 +
+      该接入点中的具体模型」组成候选链；主接入点失败后自动切换到下一个。
     </p>
     <p v-if="!instances.length" class="muted small">
       还没有上游接入点，请先在「上游接入点」页面创建一个，再来配置模型。
@@ -367,10 +351,6 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="row small muted">
-        <span>上游模型名：{{ m.upstream }}</span>
-      </div>
-
       <p v-if="effectiveSummary(m)" class="small">
         <span class="muted">当前顺序（{{ m.timezone }}）：</span>
         <span>{{ effectiveSummary(m) }}</span>
@@ -382,11 +362,10 @@ onUnmounted(() => {
             {{ index === 0 ? '主' : '备' }}
           </span>
           <code class="base">{{ c.instance }}</code>
+          <span class="muted small">/</span>
+          <code class="base">{{ c.upstream }}</code>
           <span class="muted small">优先级 {{ c.priority }}</span>
           <span v-if="windowSummary(c)" class="muted small"> 时段：{{ windowSummary(c) }} </span>
-          <span v-if="modelCandidateUnsupported(m, c.instance)" class="badge off">
-            未声明支持 {{ m.upstream }}
-          </span>
         </div>
       </div>
     </div>
@@ -399,20 +378,9 @@ onUnmounted(() => {
         </div>
 
         <div class="form-grid">
-          <div class="field">
+          <div class="field span-2">
             <label for="model-name">对外模型名</label>
             <input id="model-name" v-model="editing.name" placeholder="例如 claude-sonnet-4-5" />
-          </div>
-          <div class="field">
-            <label for="model-upstream">上游模型名</label>
-            <input
-              id="model-upstream"
-              v-model="editing.upstream"
-              placeholder="留空则与对外模型名相同"
-            />
-            <p class="muted small">
-              这里填的是真正发给上游的模型名，候选接入点的「支持的模型」必须包含它。
-            </p>
           </div>
 
           <div class="field span-2 readonly">
@@ -432,17 +400,6 @@ onUnmounted(() => {
             <span class="field-caption">
               候选接入点（优先级数字越小越优先，主接入点失败后自动切换到下一个）
             </span>
-            <p v-if="missingSupport" class="error small">
-              <template v-if="!instances.length">
-                还没有上游接入点，请先到「上游接入点」页创建一个。
-              </template>
-              <template v-else>
-                没有接入点声明支持
-                <code>{{
-                  currentUpstream
-                }}</code>，请先到「上游接入点」页补充它的「支持的模型」，或把上游模型名改成已声明的名字。
-              </template>
-            </p>
             <div v-for="(row, index) in editing.candidates" :key="index">
               <div class="row">
                 <label class="visually-hidden" :for="`model-candidate-instance-${index}`">
@@ -452,15 +409,25 @@ onUnmounted(() => {
                   :id="`model-candidate-instance-${index}`"
                   v-model="row.instance"
                   class="input-grow"
+                  @change="onInstanceChange(row)"
                 >
                   <option value="" disabled>请选择接入点</option>
-                  <option
-                    v-for="inst in instances"
-                    :key="inst.name"
-                    :value="inst.name"
-                    :disabled="!supports(inst, currentUpstream) && row.instance !== inst.name"
-                  >
+                  <option v-for="inst in instances" :key="inst.name" :value="inst.name">
                     {{ optionLabel(inst) }}
+                  </option>
+                </select>
+                <label class="visually-hidden" :for="`model-candidate-upstream-${index}`">
+                  接入点中的模型
+                </label>
+                <select
+                  :id="`model-candidate-upstream-${index}`"
+                  v-model="row.upstream"
+                  class="input-grow"
+                  :disabled="!row.instance"
+                >
+                  <option value="" disabled>请选择模型</option>
+                  <option v-for="name in instanceModels(row.instance)" :key="name" :value="name">
+                    {{ name }}
                   </option>
                 </select>
                 <label class="visually-hidden" :for="`model-candidate-priority-${index}`"
@@ -482,9 +449,10 @@ onUnmounted(() => {
                   删除
                 </button>
               </div>
-              <p v-if="row.instance && candidateUnsupported(row.instance)" class="error small">
-                该接入点未声明支持
-                {{ currentUpstream }}，请先到「上游接入点」页补充声明，或换一个候选。
+              <p v-if="row.instance && !instanceModels(row.instance).length" class="error small">
+                接入点「{{
+                  row.instance
+                }}」还没有声明任何模型，请先到「上游接入点」页补充「支持的模型」。
               </p>
 
               <div class="window-editor">

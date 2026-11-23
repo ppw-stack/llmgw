@@ -73,9 +73,12 @@ type Instance struct {
 	AllowPrivateUpstream bool `yaml:"allow_private_upstream"`
 }
 
-// ModelInstance binds a model to one instance.
+// ModelInstance binds a model to one concrete upstream model of one instance.
 type ModelInstance struct {
-	Name     string `yaml:"name"`
+	Name string `yaml:"name"`
+	// Upstream is the model name this candidate actually sends to the
+	// instance. It must be declared in the instance's models list.
+	Upstream string `yaml:"upstream"`
 	Priority int    `yaml:"priority"`
 	// Windows are the time ranges in which this candidate takes over
 	// another priority or is the only candidate allowed to serve the model.
@@ -83,10 +86,9 @@ type ModelInstance struct {
 }
 
 // Model is a logical model. It owns the strategy and the ordered candidate
-// list of the instances that serve it.
+// list of the instance + upstream model pairs that serve it.
 type Model struct {
 	Name      string          `yaml:"name"`
-	Upstream  string          `yaml:"upstream"`
 	Strategy  string          `yaml:"strategy"`
 	Instances []ModelInstance `yaml:"instances"`
 }
@@ -121,7 +123,6 @@ type EffectiveEndpoint struct {
 // EffectiveModel is one model in its routing-ready form.
 type EffectiveModel struct {
 	Name      string
-	Upstream  string
 	Strategy  string
 	Instances []EffectiveModelInstance
 }
@@ -129,6 +130,8 @@ type EffectiveModel struct {
 // EffectiveModelInstance is one candidate of a model.
 type EffectiveModelInstance struct {
 	Instance string
+	// Upstream is the model name the candidate sends to the instance.
+	Upstream string
 	Priority int
 	// Windows are the compiled time windows of the candidate.
 	Windows []EffectiveWindow
@@ -318,10 +321,6 @@ func NormalizeModel(in *Model) error {
 	if in.Name == "" {
 		return fmt.Errorf("model name is required")
 	}
-	in.Upstream = strings.TrimSpace(in.Upstream)
-	if in.Upstream == "" {
-		in.Upstream = in.Name
-	}
 	in.Strategy = strings.ToLower(strings.TrimSpace(in.Strategy))
 	if in.Strategy == "" {
 		in.Strategy = StrategyFailover
@@ -344,6 +343,10 @@ func NormalizeModel(in *Model) error {
 			return fmt.Errorf("model %q: instance %q is listed twice", in.Name, mi.Name)
 		}
 		seen[mi.Name] = true
+		mi.Upstream = strings.TrimSpace(mi.Upstream)
+		if mi.Upstream == "" {
+			return fmt.Errorf("model %q: instance %q: upstream model is required", in.Name, mi.Name)
+		}
 		if mi.Priority < 0 {
 			return fmt.Errorf("model %q: instance %q has a negative priority", in.Name, mi.Name)
 		}
@@ -429,25 +432,25 @@ func (c *Config) Effective() (Effective, error) {
 		}
 		seenModel[m.Name] = true
 
-		upstream := m.Upstream
-		if upstream == "" {
-			upstream = m.Name
-		}
 		strategy := m.Strategy
 		if strategy == "" {
 			strategy = StrategyFailover
 		}
-		eff := EffectiveModel{Name: m.Name, Upstream: upstream, Strategy: strategy}
+		eff := EffectiveModel{Name: m.Name, Strategy: strategy}
 		for _, mi := range m.Instances {
 			if !known[mi.Name] {
 				return Effective{}, fmt.Errorf("model %q: instance %q does not exist", m.Name, mi.Name)
 			}
-			// Every candidate must declare the upstream name: putting an
+			candidateUpstream := strings.TrimSpace(mi.Upstream)
+			if candidateUpstream == "" {
+				return Effective{}, fmt.Errorf("model %q: instance %q: upstream model is required", m.Name, mi.Name)
+			}
+			// Every candidate must declare its own upstream name: putting an
 			// instance in the chain means it is expected to serve it.
-			if !supports[mi.Name][upstream] {
+			if !supports[mi.Name][candidateUpstream] {
 				return Effective{}, fmt.Errorf(
 					"model %q: instance %q does not declare upstream model %q in its models list",
-					m.Name, mi.Name, upstream)
+					m.Name, mi.Name, candidateUpstream)
 			}
 			windows, err := compileWindows(
 				fmt.Sprintf("model %q: instance %q", m.Name, mi.Name), mi.Windows)
@@ -456,6 +459,7 @@ func (c *Config) Effective() (Effective, error) {
 			}
 			eff.Instances = append(eff.Instances, EffectiveModelInstance{
 				Instance: mi.Name,
+				Upstream: candidateUpstream,
 				Priority: mi.Priority,
 				Windows:  windows,
 			})
@@ -529,10 +533,13 @@ func ExpandProvider(p Provider) (Instance, []Model, error) {
 	for alias, upstream := range models {
 		out = append(out, Model{
 			Name:     strings.TrimSpace(alias),
-			Upstream: strings.TrimSpace(upstream),
 			Strategy: StrategyFailover,
 			Instances: []ModelInstance{
-				{Name: inst.Name, Priority: 0},
+				{
+					Name:     inst.Name,
+					Upstream: strings.TrimSpace(upstream),
+					Priority: 0,
+				},
 			},
 		})
 	}
@@ -543,11 +550,13 @@ func ExpandProvider(p Provider) (Instance, []Model, error) {
 	seenUpstream := make(map[string]bool, len(out))
 	upstreams := make([]string, 0, len(out))
 	for _, m := range out {
-		if seenUpstream[m.Upstream] {
-			continue
+		for _, mi := range m.Instances {
+			if seenUpstream[mi.Upstream] {
+				continue
+			}
+			seenUpstream[mi.Upstream] = true
+			upstreams = append(upstreams, mi.Upstream)
 		}
-		seenUpstream[m.Upstream] = true
-		upstreams = append(upstreams, m.Upstream)
 	}
 	sort.Strings(upstreams)
 	inst.Models = upstreams

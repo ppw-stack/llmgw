@@ -149,7 +149,7 @@ atomic.Pointer.Store(new)
 ## 7. 数据库
 
 - `instances`：上游接入点（内置 preset 或自定义端点列表，单个上游 Key 为 AES-256-GCM 密文，附支持的上游模型名与熔断参数）
-- `models`：模型（对外名、上游名、策略）
+- `models`：模型（对外名、策略、候选「接入点 + 模型」链）
 - `model_instances`：模型与接入点的候选关系（优先级、时间窗口）
 - `api_keys`
 - `users`、`sessions`、`audit_logs`

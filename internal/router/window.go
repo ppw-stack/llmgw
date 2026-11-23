@@ -108,6 +108,8 @@ func orderCandidates(candidates []Target, loc *time.Location, now time.Time) []T
 type Preview struct {
 	// Instance is the name of the upstream instance.
 	Instance string
+	// Upstream is the model name the candidate sends to the instance.
+	Upstream string
 	// BasePriority is the configured priority of the candidate.
 	BasePriority int
 	// Priority is the priority that applies right now.
@@ -139,6 +141,7 @@ func (s *Snapshot) PreviewModel(model string, now time.Time) []Preview {
 		state := evaluate(target, local)
 		item := Preview{
 			Instance:     target.Instance,
+			Upstream:     target.UpstreamModel,
 			BasePriority: target.Priority,
 			Priority:     state.Priority,
 			Active:       state.Active,

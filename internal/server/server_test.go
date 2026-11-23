@@ -100,14 +100,16 @@ func setupConfigServer(t *testing.T, cap *capture, upstreamHandler http.HandlerF
 		}},
 		Models: []config.Model{
 			{
-				Name:      "gpt-test",
-				Upstream:  "gpt-upstream",
-				Instances: []config.ModelInstance{{Name: "test"}},
+				Name: "gpt-test",
+				Instances: []config.ModelInstance{
+					{Name: "test", Upstream: "gpt-upstream"},
+				},
 			},
 			{
-				Name:      "claude-test",
-				Upstream:  "claude-upstream",
-				Instances: []config.ModelInstance{{Name: "test"}},
+				Name: "claude-test",
+				Instances: []config.ModelInstance{
+					{Name: "test", Upstream: "claude-upstream"},
+				},
 			},
 		},
 		Pricing: map[string]config.Price{

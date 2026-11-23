@@ -51,7 +51,7 @@ curl -b /tmp/llmgw-cookies -H 'Content-Type: application/json' \
 
 其中 OpenCode Go 要求每个请求带 `x-opencode-session`（缺失返回 `400 MissingSessionID`）：网关会原样透传客户端请求头，Claude Code / Codex / ZCode / Pi 等自带会话头的客户端可以直接用。
 
-每个接入点还要填「支持的模型」——这是它声明能服务的上游模型名。模型页把模型挂到接入点上时，会校验模型的上游名是否在这份声明里。
+每个接入点还要填「支持的模型」——这是它声明能服务的上游模型名。模型页为每个候选选择接入点及其中的具体模型，会校验该模型是否在这份声明里。
 
 首次启动会把 `test-config.yaml` 里的 `mock` 接入点与三个模型导入数据库（Key 加密），之后以页面为准。`database.path` 指向 `/data/llmgw.db`，主密钥自动生成在 `/data/master.key`。
 
@@ -123,11 +123,12 @@ schedule:
 
 models:
   - name: gpt-windowed
-    upstream: gpt-test
     instances:
       - name: mock
+        upstream: gpt-test
         priority: 1
       - name: mock-night
+        upstream: gpt-test
         priority: 10
         windows:
           - start: "00:00"

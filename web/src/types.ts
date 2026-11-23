@@ -158,9 +158,11 @@ export interface TimeWindow {
   only?: boolean;
 }
 
-/** 模型绑定的一个候选上游接入点 */
+/** 模型绑定的一个候选接入点 + 该接入点上的具体模型 */
 export interface ModelInstance {
   instance: string;
+  /** 该候选真正发给上游的模型名，必须是接入点 models 声明里的一项 */
+  upstream: string;
   priority: number;
   /** 该候选的时间窗口 */
   windows?: TimeWindow[];
@@ -169,6 +171,8 @@ export interface ModelInstance {
 /** 当前时刻某个候选的路由状态 */
 export interface EffectiveCandidate {
   instance: string;
+  /** 该候选发给上游的模型名 */
+  upstream: string;
   /** 当前生效的优先级 */
   priority: number;
   /** 配置里的基础优先级 */
@@ -183,7 +187,6 @@ export interface EffectiveCandidate {
 export interface Model {
   id: number;
   name: string;
-  upstream: string;
   strategy: 'failover';
   instances: ModelInstance[];
   /** 时间窗口使用的时区 */
@@ -199,7 +202,6 @@ export interface Model {
 /** 新建 / 更新模型时提交的内容 */
 export interface ModelPayload {
   name: string;
-  upstream: string;
   strategy: string;
   instances: ModelInstance[];
 }

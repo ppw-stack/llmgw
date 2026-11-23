@@ -200,12 +200,12 @@ func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]instanceView, 0, len(records))
 	for _, rec := range records {
-		views = append(views, s.instanceView(rec))
+		views = append(views, s.instanceView(r, rec))
 	}
 	writeJSON(w, http.StatusOK, views)
 }
 
-func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
+func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanceView {
 	view := instanceView{
 		ID:           rec.ID,
 		Name:         rec.Name,
@@ -223,9 +223,9 @@ func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
 		credential, err := s.quotaCredentialView(rec.EncryptedQuotaCredential)
 		if err != nil {
 			// A broken or foreign credential must not hide the whole
-			// instance list: log it with the instance name and degrade to
-			// an empty credential.
-			s.log.Error("read quota credential", "instance", rec.Name, "err", err)
+			// instance list: log it with the request and instance context
+			// and degrade to an empty credential.
+			s.log.Error("read quota credential", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "instance", rec.Name, "err", err)
 		} else {
 			view.QuotaCredential = credential
 		}
@@ -315,7 +315,7 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "instance.create", instance.Name, "success")
-	writeJSON(w, http.StatusCreated, s.instanceView(*rec))
+	writeJSON(w, http.StatusCreated, s.instanceView(r, *rec))
 }
 
 func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
@@ -418,7 +418,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	s.audit(r, id.Username, "instance.update", instance.Name, "success")
-	writeJSON(w, http.StatusOK, s.instanceView(store.InstanceRecord{
+	writeJSON(w, http.StatusOK, s.instanceView(r, store.InstanceRecord{
 		ID: instanceID,
 		InstanceSpec: store.InstanceSpec{
 			Name:                     instance.Name,

@@ -290,6 +290,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 				nf.Error())
 			return
 		}
+		var na *router.NoAvailableTargetError
+		if errors.As(err, &na) {
+			// The model exists but every candidate is outside its time
+			// window right now.
+			ingress.WriteError(w, protocol, http.StatusServiceUnavailable, "overloaded_error",
+				na.Error())
+			return
+		}
 		ingress.WriteError(w, protocol, http.StatusNotFound, "not_found_error", err.Error())
 		return
 	}

@@ -647,6 +647,20 @@ textarea:focus {
   margin-bottom: 12px;
 }
 
+/* 候选接入点下的时间窗口编辑区 */
+.window-editor {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0 12px;
+}
+
+/* 只作用于时间窗口编辑区，避免影响其他 .row 里的复选框 */
+.window-editor .row input[type='checkbox'] {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
 .key-hints {
   display: flex;
   gap: 6px;

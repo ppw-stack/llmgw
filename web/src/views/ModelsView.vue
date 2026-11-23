@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { api } from '../api';
-import type { Instance, Model, ModelInstance, ModelPayload } from '../types';
+import type { Instance, Model, ModelInstance, ModelPayload, TimeWindow } from '../types';
 import { confirmAction } from '../utils/confirm';
 import { errorMessage } from '../utils/error';
+
+/** 表单里的一行时间窗口。优先级留空表示窗口不覆盖优先级。 */
+interface WindowRow {
+  start: string;
+  end: string;
+  priority: string;
+  only: boolean;
+}
 
 /** 表单里的一行候选接入点。 */
 interface CandidateRow {
   instance: string;
   priority: string;
   weight: string;
+  windows: WindowRow[];
 }
 
 /** 新增 / 编辑模型的表单状态。 */
@@ -24,6 +33,7 @@ const models = ref<Model[]>([]);
 const instances = ref<Instance[]>([]);
 const loading = ref(true);
 const error = ref('');
+const refreshError = ref('');
 const editing = ref<ModelForm | null>(null);
 const saving = ref(false);
 
@@ -79,22 +89,60 @@ function sortedCandidates(m: Model): ModelInstance[] {
   return [...m.instances].sort((a, b) => a.priority - b.priority);
 }
 
+/**
+ * 当前生效的候选顺序。服务端已经算好，这里只负责展示：
+ * 在线的候选按尝试顺序排列，不在时段内的候选排在最后。
+ */
+function effectiveSummary(m: Model): string {
+  const list = m.effective_candidates ?? [];
+  if (!list.length) return '';
+  const active = list.filter((c) => c.active);
+  const idle = list.filter((c) => !c.active);
+  const parts = active.map((c) => {
+    const hit = c.window ? `（${c.window} 时段内，优先级 ${c.priority}）` : '';
+    return `${c.instance}${hit}`;
+  });
+  for (const c of idle) {
+    parts.push(`${c.instance}（当前不在时段内）`);
+  }
+  return parts.join(' → ');
+}
+
+/** 候选上的时间窗口摘要，用于列表展示。 */
+function windowSummary(candidate: ModelInstance): string {
+  if (!candidate.windows?.length) return '';
+  return candidate.windows
+    .map((w) => {
+      const only = w.only ? '仅此时段可用' : `优先级 ${w.priority ?? '不变'}`;
+      return `${w.start}-${w.end} ${only}`;
+    })
+    .join('；');
+}
+
 function newForm(): ModelForm {
   return {
     id: null,
     name: '',
     upstream: '',
-    candidates: [{ instance: '', priority: '0', weight: '100' }],
+    candidates: [{ instance: '', priority: '0', weight: '100', windows: [] }],
   };
 }
 
 function addCandidate(form: ModelForm) {
-  form.candidates.push({ instance: '', priority: '0', weight: '100' });
+  form.candidates.push({ instance: '', priority: '0', weight: '100', windows: [] });
 }
 
 function removeCandidate(form: ModelForm, index: number) {
   if (form.candidates.length <= 1) return;
   form.candidates.splice(index, 1);
+}
+
+function addWindow(row: CandidateRow) {
+  row.windows.push({ start: '00:00', end: '08:00', priority: '0', only: false });
+}
+
+function removeWindow(row: CandidateRow, index: number) {
+  row.windows.splice(index, 1);
 }
 
 /** 解析表单里的非负整数，非法时返回 null。 */
@@ -105,6 +153,9 @@ function parseCount(raw: string): number | null {
   if (!Number.isInteger(value) || value < 0) return null;
   return value;
 }
+
+/** 时间窗口的起止时间格式：24 小时制 HH:MM。 */
+const clockPattern = /^\d{2}:\d{2}$/;
 
 async function load() {
   loading.value = true;
@@ -123,6 +174,26 @@ async function load() {
   }
 }
 
+/**
+ * 静默刷新：只换掉数据，不动 loading 状态。
+ * 「当前生效顺序」随时段变化，定时刷新让页面跟上时间。
+ */
+async function refresh() {
+  try {
+    const [modelList, instanceList] = await Promise.all([
+      api<Model[]>('/models'),
+      api<Instance[]>('/instances'),
+    ]);
+    models.value = modelList;
+    instances.value = instanceList;
+    refreshError.value = '';
+  } catch (e) {
+    // 刷新失败时保留旧数据，不打断正在查看的内容；但要在页面上留一条提示，
+    // 否则时段切换导致的展示异常无从排查。
+    refreshError.value = errorMessage(e);
+  }
+}
+
 function openCreate() {
   error.value = '';
   editing.value = newForm();
@@ -134,12 +205,18 @@ function openEdit(m: Model) {
     instance: mi.instance,
     priority: String(mi.priority),
     weight: String(mi.weight),
+    windows: (mi.windows ?? []).map((w) => ({
+      start: w.start,
+      end: w.end,
+      priority: w.priority === null || w.priority === undefined ? '' : String(w.priority),
+      only: Boolean(w.only),
+    })),
   }));
   editing.value = {
     id: m.id,
     name: m.name,
     upstream: m.upstream,
-    candidates: rows.length ? rows : [{ instance: '', priority: '0', weight: '100' }],
+    candidates: rows.length ? rows : [{ instance: '', priority: '0', weight: '100', windows: [] }],
   };
 }
 
@@ -180,7 +257,28 @@ async function save() {
       error.value = '权重必须是正整数';
       return;
     }
-    list.push({ instance: target, priority, weight });
+    const windows: TimeWindow[] = [];
+    for (const w of row.windows) {
+      const start = w.start.trim();
+      const end = w.end.trim();
+      if (!start && !end && !w.priority.trim() && !w.only) continue;
+      if (!clockPattern.test(start) || !clockPattern.test(end)) {
+        error.value = '时间窗口的起止时间必须是 HH:MM 格式';
+        return;
+      }
+      const hasPriority = w.priority.trim() !== '';
+      const windowPriority = hasPriority ? parseCount(w.priority) : null;
+      if (hasPriority && windowPriority === null) {
+        error.value = '窗口内优先级必须是非负整数';
+        return;
+      }
+      if (!hasPriority && !w.only) {
+        error.value = '时间窗口需要填写窗口内优先级，或勾选「仅窗口内可用」';
+        return;
+      }
+      windows.push({ start, end, priority: windowPriority, only: w.only });
+    }
+    list.push({ instance: target, priority, weight, windows });
   }
   if (!list.length) {
     error.value = '至少需要一个候选接入点';
@@ -222,8 +320,22 @@ async function remove(m: Model) {
   }
 }
 
+/** 刷新间隔：让「当前生效顺序」跟着时段变化。 */
+const refreshIntervalMs = 30000;
+let refreshTimer: number | undefined;
+
 onMounted(() => {
   void load();
+  refreshTimer = window.setInterval(() => {
+    void refresh();
+  }, refreshIntervalMs);
+});
+
+onUnmounted(() => {
+  if (refreshTimer !== undefined) {
+    window.clearInterval(refreshTimer);
+    refreshTimer = undefined;
+  }
 });
 </script>
 
@@ -243,6 +355,9 @@ onMounted(() => {
       还没有上游接入点，请先在「上游接入点」页面创建一个，再来配置模型。
     </p>
     <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="refreshError" class="muted small">
+      自动刷新失败：{{ refreshError }}（仍显示上一次的数据）
+    </p>
     <p v-if="loading" class="muted">加载中…</p>
 
     <div v-else-if="!models.length" class="card muted">还没有模型。点击「新增模型」开始配置。</div>
@@ -263,6 +378,11 @@ onMounted(() => {
         <span>上游模型名：{{ m.upstream }}</span>
       </div>
 
+      <p v-if="effectiveSummary(m)" class="small">
+        <span class="muted">当前顺序（{{ m.timezone }}）：</span>
+        <span>{{ effectiveSummary(m) }}</span>
+      </p>
+
       <div class="endpoint-list">
         <div v-for="(c, index) in sortedCandidates(m)" :key="c.instance" class="endpoint-line">
           <span class="badge" :class="index === 0 ? 'ok' : 'off'">
@@ -270,6 +390,7 @@ onMounted(() => {
           </span>
           <code class="base">{{ c.instance }}</code>
           <span class="muted small">优先级 {{ c.priority }} · 权重 {{ c.weight }}</span>
+          <span v-if="windowSummary(c)" class="muted small"> 时段：{{ windowSummary(c) }} </span>
           <span v-if="modelCandidateUnsupported(m, c.instance)" class="badge off">
             未声明支持 {{ m.upstream }}
           </span>
@@ -309,6 +430,9 @@ onMounted(() => {
                 当前版本只支持 failover：主接入点失败后自动切换到下一个候选接入点。
               </span>
             </div>
+            <p class="muted small">
+              时间窗口按 config.yaml 里的 schedule.timezone 判定（默认 Asia/Shanghai）。
+            </p>
           </div>
 
           <div class="field span-2">
@@ -378,6 +502,56 @@ onMounted(() => {
                 该接入点未声明支持
                 {{ currentUpstream }}，请先到「上游接入点」页补充声明，或换一个候选。
               </p>
+
+              <div class="window-editor">
+                <p class="muted small">
+                  时间窗口：命中时该候选按窗口内优先级插队，或（勾选「仅窗口内可用」）只在窗口内参与路由。
+                  时段按调度时区判定，起止时间用 24 小时制 HH:MM，起晚于止视为跨天。
+                </p>
+                <div v-for="(w, wi) in row.windows" :key="wi" class="row">
+                  <label class="visually-hidden" :for="`model-window-start-${index}-${wi}`">
+                    窗口开始时间
+                  </label>
+                  <input
+                    :id="`model-window-start-${index}-${wi}`"
+                    v-model="w.start"
+                    class="input-num"
+                    type="time"
+                  />
+                  <label class="visually-hidden" :for="`model-window-end-${index}-${wi}`">
+                    窗口结束时间
+                  </label>
+                  <input
+                    :id="`model-window-end-${index}-${wi}`"
+                    v-model="w.end"
+                    class="input-num"
+                    type="time"
+                  />
+                  <label class="visually-hidden" :for="`model-window-priority-${index}-${wi}`">
+                    窗口内优先级
+                  </label>
+                  <input
+                    :id="`model-window-priority-${index}-${wi}`"
+                    v-model="w.priority"
+                    class="input-num"
+                    type="text"
+                    inputmode="numeric"
+                    placeholder="窗口内优先级"
+                  />
+                  <label class="nowrap" :for="`model-window-only-${index}-${wi}`">
+                    仅窗口内可用
+                  </label>
+                  <input
+                    :id="`model-window-only-${index}-${wi}`"
+                    v-model="w.only"
+                    type="checkbox"
+                  />
+                  <button class="ghost danger" @click="removeWindow(row, wi)">删除</button>
+                </div>
+                <div class="row">
+                  <button class="ghost" @click="addWindow(row)">添加时间窗口</button>
+                </div>
+              </div>
             </div>
             <div class="row">
               <button class="ghost" @click="addCandidate(editing)">添加候选</button>

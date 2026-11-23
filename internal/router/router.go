@@ -32,6 +32,9 @@ type Target struct {
 	Timeout       time.Duration
 	MaxFails      int
 	Cooldown      time.Duration
+	// Windows are the compiled time windows of the candidate. They decide
+	// the effective priority at the moment of the request.
+	Windows []config.EffectiveWindow
 }
 
 // Snapshot is an immutable routing table swapped atomically on reload.
@@ -40,6 +43,12 @@ type Snapshot struct {
 	Config           *config.Config
 	Index            map[Key][]Target
 	ModelsByProtocol map[string][]string
+	// ByModel holds the candidate chain of every model, independent of the
+	// protocol. The console uses it to show which candidate is in charge
+	// right now.
+	ByModel map[string][]Target
+	// Location is the timezone every time window is evaluated in.
+	Location *time.Location
 }
 
 // Router holds the current snapshot. Reads are lock-free.
@@ -76,6 +85,10 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 		instances[inst.Name] = inst
 	}
 	defaultTimeout := cfg.UpstreamTimeout.Value()
+	location := cfg.Schedule.Location
+	if location == nil {
+		location = time.UTC
+	}
 
 	for _, m := range eff.Models {
 		for _, cand := range m.Instances {
@@ -107,6 +120,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					Timeout:       timeout,
 					MaxFails:      inst.MaxFails,
 					Cooldown:      time.Duration(inst.CooldownSecs) * time.Second,
+					Windows:       cand.Windows,
 				})
 				if models[ep.Protocol] == nil {
 					models[ep.Protocol] = map[string]struct{}{}
@@ -126,10 +140,30 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 		modelsByProtocol[proto] = list
 	}
 
+	// The candidate chain of a model is protocol specific: an instance that
+	// only speaks OpenAI does not show up on the Anthropic chain. The
+	// console shows one chain per model, so the OpenAI chain wins and any
+	// other protocol serves as the fallback.
+	byModel := make(map[string][]Target)
+	for key, targets := range idx {
+		if key.Protocol != config.ProtocolOpenAI {
+			continue
+		}
+		byModel[key.Model] = targets
+	}
+	for key, targets := range idx {
+		if _, ok := byModel[key.Model]; ok {
+			continue
+		}
+		byModel[key.Model] = targets
+	}
+
 	return &Snapshot{
 		Config:           cfg,
 		Index:            idx,
 		ModelsByProtocol: modelsByProtocol,
+		ByModel:          byModel,
+		Location:         location,
 	}, nil
 }
 
@@ -140,23 +174,41 @@ func (r *Router) Ready() bool { return r.snap.Load() != nil }
 // Resolve returns the ordered candidate list of one model on one protocol.
 // The first entry is the primary upstream; the rest are fallbacks that are
 // tried when the previous ones fail.
+//
+// The order depends on the current time: a candidate whose time window is
+// active may take over a better priority.
 func (r *Router) Resolve(protocol, model string) ([]Target, error) {
+	return r.ResolveAt(protocol, model, time.Now())
+}
+
+// ResolveAt is Resolve with an explicit moment. It exists so the tests can
+// pin the clock.
+func (r *Router) ResolveAt(protocol, model string, now time.Time) ([]Target, error) {
 	snap := r.snap.Load()
 	if snap == nil {
 		return nil, &ModelNotFoundError{Model: model, Protocol: protocol, Hint: protocolHint(nil, protocol, model), Reason: "router is not ready"}
 	}
-	if t, ok := snap.Index[Key{Protocol: protocol, Model: model}]; ok {
-		// Snapshot is a shared immutable routing table read lock-free by every
-		// request, so hand out a copy to keep callers from mutating it.
-		candidates := make([]Target, len(t))
-		copy(candidates, t)
-		return candidates, nil
+	t, ok := snap.Index[Key{Protocol: protocol, Model: model}]
+	if !ok {
+		return nil, &ModelNotFoundError{
+			Model:    model,
+			Protocol: protocol,
+			Hint:     protocolHint(snap, protocol, model),
+		}
 	}
-	return nil, &ModelNotFoundError{
-		Model:    model,
-		Protocol: protocol,
-		Hint:     protocolHint(snap, protocol, model),
+	// Snapshot is a shared immutable routing table read lock-free by every
+	// request, so hand out a copy to keep callers from mutating it.
+	candidates := make([]Target, len(t))
+	copy(candidates, t)
+	ordered := orderCandidates(candidates, snap.Location, now)
+	if len(ordered) == 0 {
+		return nil, &NoAvailableTargetError{
+			Model:    model,
+			Protocol: protocol,
+			Reason:   "every candidate is outside its time window",
+		}
 	}
+	return ordered, nil
 }
 
 func protocolHint(snap *Snapshot, protocol, model string) string {
@@ -193,6 +245,23 @@ func (e *ModelNotFoundError) Error() string {
 	if e.Hint != "" {
 		msg += "; " + e.Hint
 	}
+	if e.Reason != "" {
+		msg += " (" + e.Reason + ")"
+	}
+	return msg
+}
+
+// NoAvailableTargetError is returned when the model is configured but none of
+// its candidates may serve it at the moment. It happens when every candidate
+// is restricted to a time window that is currently closed.
+type NoAvailableTargetError struct {
+	Model    string
+	Protocol string
+	Reason   string
+}
+
+func (e *NoAvailableTargetError) Error() string {
+	msg := fmt.Sprintf("model %q has no upstream instance available at the moment", e.Model)
 	if e.Reason != "" {
 		msg += " (" + e.Reason + ")"
 	}

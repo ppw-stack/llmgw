@@ -17,8 +17,22 @@ log:
   level: debug
   format: text
 
+# 时间窗口的判定时区：所有窗口共用这一个。
+schedule:
+  timezone: "Asia/Shanghai"
+
 instances:
   - name: mock
+    api_key: "mock-upstream-key"
+    endpoints:
+      - protocol: openai
+        base_url: http://mock:8000
+      - protocol: anthropic
+        base_url: http://mock:8000
+    models: [gpt-test, claude-test, gpt-upstream-name]
+  # 同一个 mock 的第二个接入点，用来演示时间窗口：在 00:00-08:00
+  # 它接管 gpt-windowed，其他时段由 mock 接管。
+  - name: mock-night
     api_key: "mock-upstream-key"
     endpoints:
       - protocol: openai
@@ -40,6 +54,19 @@ models:
     upstream: gpt-upstream-name
     instances:
       - name: mock
+  # 时间窗口示例：北京时间 00:00-08:00 命中 mock-night（生效优先级 0），
+  # 其他时段按基础优先级走 mock。请求日志里的「上游接入点」会变化。
+  - name: gpt-windowed
+    upstream: gpt-test
+    instances:
+      - name: mock
+        priority: 1
+      - name: mock-night
+        priority: 10
+        windows:
+          - start: "00:00"
+            end: "08:00"
+            priority: 0
 
 pricing:
   gpt-test:

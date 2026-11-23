@@ -38,6 +38,9 @@ type ModelInstanceSpec struct {
 	Instance string
 	Priority int
 	Weight   int
+	// Windows are the time ranges in which this candidate takes over
+	// another priority or is the only candidate allowed to serve the model.
+	Windows []config.TimeWindow
 }
 
 // ModelSpec is the write form of a model.
@@ -190,7 +193,7 @@ func (s *Store) CountModels() (int, error) {
 
 func (s *Store) ListModelRecords() ([]ModelRecord, error) {
 	rows, err := s.db.Query(`SELECT m.id, m.name, m.upstream, m.strategy, m.created_at, m.updated_at,
-		i.name, mi.priority, mi.weight
+		i.name, mi.priority, mi.weight, mi.windows_json
 		FROM models m
 		LEFT JOIN model_instances mi ON mi.model_id = m.id
 		LEFT JOIN instances i ON i.id = mi.instance_id
@@ -208,19 +211,27 @@ func (s *Store) ListModelRecords() ([]ModelRecord, error) {
 			instName sql.NullString
 			priority sql.NullInt64
 			weight   sql.NullInt64
+			windows  sql.NullString
 		)
 		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Upstream, &rec.Strategy, &created, &updated,
-			&instName, &priority, &weight); err != nil {
+			&instName, &priority, &weight, &windows); err != nil {
 			return nil, err
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 		if instName.Valid {
-			rec.Instances = append(rec.Instances, ModelInstanceSpec{
+			spec := ModelInstanceSpec{
 				Instance: instName.String,
 				Priority: int(priority.Int64),
 				Weight:   int(weight.Int64),
-			})
+			}
+			if windows.Valid && windows.String != "" {
+				if err := json.Unmarshal([]byte(windows.String), &spec.Windows); err != nil {
+					return nil, fmt.Errorf("model %q: instance %q: bad windows: %w",
+						rec.Name, instName.String, err)
+				}
+			}
+			rec.Instances = append(rec.Instances, spec)
 		}
 		// The join produces one row per candidate, so the rows of one model
 		// are folded into a single record.
@@ -315,9 +326,16 @@ func replaceModelInstances(tx *sql.Tx, modelID int64, instances []ModelInstanceS
 			}
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO model_instances(model_id, instance_id, priority, weight)
-			VALUES(?,?,?,?)`, modelID, instanceID, mi.Priority, mi.Weight); err != nil {
-			return err
+		windowsJSON, err := json.Marshal(mi.Windows)
+		if err != nil {
+			return fmt.Errorf("instance %q: marshal windows: %w", mi.Instance, err)
+		}
+		if mi.Windows == nil {
+			windowsJSON = []byte("[]")
+		}
+		if _, err := tx.Exec(`INSERT INTO model_instances(model_id, instance_id, priority, weight, windows_json)
+			VALUES(?,?,?,?,?)`, modelID, instanceID, mi.Priority, mi.Weight, string(windowsJSON)); err != nil {
+			return fmt.Errorf("instance %q: store candidate: %w", mi.Instance, err)
 		}
 	}
 	return nil
@@ -367,6 +385,7 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 				Name:     mi.Instance,
 				Priority: mi.Priority,
 				Weight:   mi.Weight,
+				Windows:  mi.Windows,
 			})
 		}
 		models = append(models, m)
@@ -413,6 +432,7 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 				Instance: mi.Name,
 				Priority: mi.Priority,
 				Weight:   mi.Weight,
+				Windows:  mi.Windows,
 			})
 		}
 		if _, err := s.CreateModel(spec); err != nil {

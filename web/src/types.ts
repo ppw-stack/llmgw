@@ -65,11 +65,38 @@ export interface InstancePreset {
   models: string[];
 }
 
+/** 候选接入点的一个时间窗口 */
+export interface TimeWindow {
+  /** 起始时刻，24 小时制 HH:MM */
+  start: string;
+  /** 结束时刻，24 小时制 HH:MM；早于 start 表示跨天 */
+  end: string;
+  /** 窗口内生效的优先级；为空表示不覆盖优先级 */
+  priority?: number | null;
+  /** 仅在窗口内可用，窗口外该候选不参与路由 */
+  only?: boolean;
+}
+
 /** 模型绑定的一个候选上游接入点 */
 export interface ModelInstance {
   instance: string;
   priority: number;
   weight: number;
+  /** 该候选的时间窗口 */
+  windows?: TimeWindow[];
+}
+
+/** 当前时刻某个候选的路由状态 */
+export interface EffectiveCandidate {
+  instance: string;
+  /** 当前生效的优先级 */
+  priority: number;
+  /** 配置里的基础优先级 */
+  base_priority: number;
+  /** 当前是否可以服务该模型 */
+  active: boolean;
+  /** 当前命中的时间窗口 */
+  window?: string;
 }
 
 /** GET /admin/api/models 中的单个模型 */
@@ -79,6 +106,12 @@ export interface Model {
   upstream: string;
   strategy: 'failover';
   instances: ModelInstance[];
+  /** 时间窗口使用的时区 */
+  timezone: string;
+  /** 计算生效顺序时的服务端时间 */
+  server_time: string;
+  /** 当前生效的候选顺序 */
+  effective_candidates?: EffectiveCandidate[];
   created_at: string;
   updated_at: string;
 }

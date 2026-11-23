@@ -255,6 +255,7 @@ func TestUsageFallbackIsEstimated(t *testing.T) {
 // ---- failover ----
 
 func TestFailoverToNextInstanceOnServerError(t *testing.T) {
+	t.Parallel()
 	var firstCalls, secondCalls int
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls++
@@ -316,6 +317,7 @@ func TestFailoverToNextInstanceOnServerError(t *testing.T) {
 }
 
 func TestNoFailoverOnClientError(t *testing.T) {
+	t.Parallel()
 	var firstCalls, secondCalls int
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls++
@@ -353,6 +355,7 @@ func TestNoFailoverOnClientError(t *testing.T) {
 }
 
 func TestFailoverOnRateLimit(t *testing.T) {
+	t.Parallel()
 	var firstCalls, secondCalls int
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls++
@@ -385,6 +388,7 @@ func TestFailoverOnRateLimit(t *testing.T) {
 }
 
 func TestAllCandidatesFailReturnsTheLastUpstreamError(t *testing.T) {
+	t.Parallel()
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"error":{"message":"first"}}`)
@@ -416,6 +420,7 @@ func TestAllCandidatesFailReturnsTheLastUpstreamError(t *testing.T) {
 }
 
 func TestUnreachableUpstreamFailsOver(t *testing.T) {
+	t.Parallel()
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"}}]}`)
 	}))
@@ -443,6 +448,7 @@ func TestUnreachableUpstreamFailsOver(t *testing.T) {
 }
 
 func TestCircuitBreakerSkipsAFailingInstance(t *testing.T) {
+	t.Parallel()
 	var firstCalls, secondCalls int
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls++
@@ -484,6 +490,7 @@ func TestCircuitBreakerSkipsAFailingInstance(t *testing.T) {
 }
 
 func TestAllInstancesInCooldownReturns503(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))

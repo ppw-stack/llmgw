@@ -500,12 +500,14 @@ func instanceUpstreamNames(ctx context.Context, tx *sql.Tx, p pendingInstance) (
 	seen := map[string]bool{}
 	out := []string{}
 	if p.preset != "" {
-		if names, err := config.PresetModels(p.preset); err == nil {
-			for _, name := range names {
-				if !seen[name] {
-					seen[name] = true
-					out = append(out, name)
-				}
+		names, err := config.PresetModels(p.preset)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: derive preset %q models: %w", p.name, p.preset, err)
+		}
+		for _, name := range names {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
 			}
 		}
 	}

@@ -246,7 +246,7 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	if err := s.reloadTopology(); err != nil {
-		s.log.Error("reload topology after instance create", "err", err)
+		s.log.Error("reload topology after instance create", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
 		writeAdminError(w, http.StatusInternalServerError, "instance saved but routing reload failed: "+err.Error())
 		return
 	}
@@ -338,7 +338,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	if err := s.reloadTopology(); err != nil {
-		s.log.Error("reload topology after instance update", "err", err)
+		s.log.Error("reload topology after instance update", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
 		writeAdminError(w, http.StatusInternalServerError, "instance saved but routing reload failed: "+err.Error())
 		return
 	}
@@ -372,7 +372,7 @@ func (s *Server) deleteInstance(w http.ResponseWriter, r *http.Request, id *admi
 		return
 	}
 	if err := s.reloadTopology(); err != nil {
-		s.log.Error("reload topology after instance delete", "err", err)
+		s.log.Error("reload topology after instance delete", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
 		writeAdminError(w, http.StatusInternalServerError, "instance deleted but routing reload failed: "+err.Error())
 		return
 	}
@@ -463,7 +463,7 @@ func (s *Server) createModel(w http.ResponseWriter, r *http.Request, id *adminId
 		return
 	}
 	if err := s.reloadTopology(); err != nil {
-		s.log.Error("reload topology after model create", "err", err)
+		s.log.Error("reload topology after model create", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
 		writeAdminError(w, http.StatusInternalServerError, "model saved but routing reload failed: "+err.Error())
 		return
 	}
@@ -534,7 +534,7 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminId
 		return
 	}
 	if err := s.reloadTopology(); err != nil {
-		s.log.Error("reload topology after model update", "err", err)
+		s.log.Error("reload topology after model update", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
 		writeAdminError(w, http.StatusInternalServerError, "model saved but routing reload failed: "+err.Error())
 		return
 	}
@@ -562,7 +562,7 @@ func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, id *adminId
 		return
 	}
 	if err := s.reloadTopology(); err != nil {
-		s.log.Error("reload topology after model delete", "err", err)
+		s.log.Error("reload topology after model delete", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
 		writeAdminError(w, http.StatusInternalServerError, "model deleted but routing reload failed: "+err.Error())
 		return
 	}

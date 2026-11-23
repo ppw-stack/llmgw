@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-) // Protocols supported by the gateway. v1 does not translate between them.
+)
+
+// Protocols supported by the gateway. v1 does not translate between them.
 const (
-	ProtocolOpenAI    = "openai"
+	// ProtocolOpenAI is the OpenAI-compatible entrance.
+	ProtocolOpenAI = "openai"
+	// ProtocolAnthropic is the Anthropic-compatible entrance.
 	ProtocolAnthropic = "anthropic"
 )
 

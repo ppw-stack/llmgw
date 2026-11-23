@@ -12,12 +12,16 @@ import (
 // Routing strategies. Only failover is implemented in v1; the field exists so
 // the configuration shape does not have to change when the others arrive.
 const (
+	// StrategyFailover tries the primary instance first and falls back to the
+	// next candidate when it fails.
 	StrategyFailover = "failover"
 )
 
 // Circuit breaker defaults for one instance.
 const (
-	DefaultMaxFails     = 3
+	// DefaultMaxFails is the failure count that opens an instance's circuit.
+	DefaultMaxFails = 3
+	// DefaultCooldownSecs is how long an open circuit is skipped before retry.
 	DefaultCooldownSecs = 30
 )
 
@@ -421,11 +425,13 @@ func ExpandProvider(p Provider) (Instance, []Model, error) {
 	if inst.Name == "" {
 		return Instance{}, nil, fmt.Errorf("provider name is required")
 	}
+	var presetDef preset.Preset
 	if inst.Preset != "" {
 		pr, ok := preset.Lookup(inst.Preset)
 		if !ok {
 			return Instance{}, nil, fmt.Errorf("provider %q: unknown preset %q", inst.Name, inst.Preset)
 		}
+		presetDef = pr
 		if p.OpenAIBaseURL != "" || p.AnthropicBaseURL != "" {
 			return Instance{}, nil, fmt.Errorf("provider %q: preset %q supplies its own base URLs; "+
 				"remove openai_base_url/anthropic_base_url or use a custom provider", inst.Name, inst.Preset)
@@ -451,8 +457,7 @@ func ExpandProvider(p Provider) (Instance, []Model, error) {
 		if inst.Preset == "" {
 			return Instance{}, nil, fmt.Errorf("provider %q: models are required", inst.Name)
 		}
-		pr, _ := preset.Lookup(inst.Preset)
-		parsed, err := ParseModels(pr.Models)
+		parsed, err := ParseModels(presetDef.Models)
 		if err != nil {
 			return Instance{}, nil, fmt.Errorf("provider %q: preset %q: %w", inst.Name, inst.Preset, err)
 		}

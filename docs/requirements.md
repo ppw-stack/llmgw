@@ -137,6 +137,7 @@ REST API：
 - `POST /admin/api/keys` 创建（返回一次明文）、`GET /admin/api/keys` 列表、`PATCH /admin/api/keys/{id}` 启停、`DELETE`。
 - `GET/POST/PUT/DELETE /admin/api/instances` 维护上游接入点。
 - `GET/POST/PUT/DELETE /admin/api/models` 维护模型与候选链。
+- 旧 `GET /admin/api/providers` 保留为只读聚合视图，写入方法已移除；依赖旧写入接口的管理脚本需迁移至 `instances` / `models`。
 - `GET /admin/api/provider-presets` 返回编译进程序的内置端点目录。
 - `GET /admin/api/logs` 按 key/模型/时间过滤。
 - `GET /admin/api/usage` 按天/模型/Key 聚合。

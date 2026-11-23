@@ -146,7 +146,11 @@ func (r *Router) Resolve(protocol, model string) ([]Target, error) {
 		return nil, &ModelNotFoundError{Model: model, Protocol: protocol, Hint: protocolHint(nil, protocol, model), Reason: "router is not ready"}
 	}
 	if t, ok := snap.Index[Key{Protocol: protocol, Model: model}]; ok {
-		return t, nil
+		// Snapshot is a shared immutable routing table read lock-free by every
+		// request, so hand out a copy to keep callers from mutating it.
+		candidates := make([]Target, len(t))
+		copy(candidates, t)
+		return candidates, nil
 	}
 	return nil, &ModelNotFoundError{
 		Model:    model,

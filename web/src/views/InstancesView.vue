@@ -45,6 +45,10 @@ interface InstanceForm {
   modelsText: string;
   /** 是否放行指向 loopback / 内网 / 云元数据地址的上游 */
   allowPrivateUpstream: boolean;
+  /** 上游要求会话粘性时使用的请求头名；留空表示用内置端点的默认值 */
+  sessionHeader: string;
+  /** 额外触发候选切换的状态码，逗号分隔 */
+  failoverStatuses: string;
   maxFails: string;
   cooldownSecs: string;
   timeoutSecs: string;
@@ -179,6 +183,8 @@ function newForm(): InstanceForm {
     endpoints: [{ protocol: 'openai', base_url: '' }],
     modelsText: '',
     allowPrivateUpstream: false,
+    sessionHeader: '',
+    failoverStatuses: '',
     maxFails: '3',
     cooldownSecs: '30',
     timeoutSecs: '0',
@@ -317,6 +323,22 @@ function parseCount(raw: string): number | null {
   return value;
 }
 
+/**
+ * 解析「额外可切换状态码」。空输入返回空数组（合法）；
+ * 出现 400-599 之外的整数时返回 null，由调用方提示错误。
+ */
+function parseStatusCodes(raw: string): number[] | null {
+  const out: number[] = [];
+  for (const part of raw.split(/[,，\s]+/)) {
+    const text = part.trim();
+    if (!text) continue;
+    const value = Number(text);
+    if (!Number.isInteger(value) || value < 400 || value > 599) return null;
+    if (!out.includes(value)) out.push(value);
+  }
+  return out.sort((a, b) => a - b);
+}
+
 /** 收集自定义模式下的端点列表，非法时写好错误信息并返回 null。 */
 function collectEndpoints(form: InstanceForm): InstanceEndpoint[] | null {
   const list: InstanceEndpoint[] = [];
@@ -403,6 +425,8 @@ function openEdit(inst: Instance) {
     })),
     modelsText: inst.models.join('\n'),
     allowPrivateUpstream: inst.allow_private_upstream,
+    sessionHeader: inst.session_header ?? '',
+    failoverStatuses: inst.failover_statuses.join(', '),
     maxFails: String(inst.max_fails),
     cooldownSecs: String(inst.cooldown_secs),
     timeoutSecs: String(inst.timeout_secs),
@@ -434,6 +458,11 @@ async function save() {
   const timeoutSecs = parseCount(f.timeoutSecs);
   if (maxFails === null || cooldownSecs === null || timeoutSecs === null) {
     error.value = '熔断阈值、冷却时间与超时都必须是 0 或正整数';
+    return;
+  }
+  const failoverStatuses = parseStatusCodes(f.failoverStatuses);
+  if (failoverStatuses === null) {
+    error.value = '额外可切换状态码必须是 400-599 的整数，用逗号分隔';
     return;
   }
 
@@ -482,6 +511,11 @@ async function save() {
   // not touch it: the backend reads an omitted field as "off", so leaving it
   // out would silently close the gate of an instance that already has it.
   payload.allow_private_upstream = f.allowPrivateUpstream;
+  // Interval options are also always sent for the same reason: an omitted
+  // list would be stored as empty and silently drop the vendor-specific
+  // retry codes.
+  payload.failover_statuses = failoverStatuses;
+  payload.session_header = f.sessionHeader.trim();
 
   saving.value = true;
   error.value = '';
@@ -612,6 +646,12 @@ onUnmounted(() => {
       <div class="row small muted">
         <span>熔断：连续失败 {{ inst.max_fails }} 次后冷却 {{ inst.cooldown_secs }} 秒</span>
         <span>超时：{{ inst.timeout_secs > 0 ? inst.timeout_secs + ' 秒' : '默认' }}</span>
+        <span v-if="inst.session_header"
+          >会话头：<code>{{ inst.session_header }}</code></span
+        >
+        <span v-if="inst.failover_statuses.length"
+          >额外切换：{{ inst.failover_statuses.join(', ') }}</span
+        >
       </div>
 
       <div class="models">
@@ -894,6 +934,35 @@ onUnmounted(() => {
               inputmode="numeric"
               placeholder="0 表示用全局默认"
             />
+          </div>
+
+          <div class="field">
+            <label for="instance-session-header">会话头（可选）</label>
+            <input
+              id="instance-session-header"
+              v-model="editing.sessionHeader"
+              type="text"
+              placeholder="例如 x-opencode-session"
+            />
+            <p class="muted small">
+              上游要求会话粘性时填写。客户端没带该头时，网关按「系统提示 +
+              首条用户消息」派生一个稳定值， 同一对话的后续轮次保持一致，prompt
+              缓存才能命中；客户端自带时原样透传。 内置端点会自带厂商要求的头名，留空即用默认值。
+            </p>
+          </div>
+
+          <div class="field">
+            <label for="instance-failover-statuses">额外可切换状态码（可选）</label>
+            <input
+              id="instance-failover-statuses"
+              v-model="editing.failoverStatuses"
+              type="text"
+              placeholder="例如 402"
+            />
+            <p class="muted small">
+              429 与 5xx 始终触发候选切换，这里只追加厂商特有的状态码：MiniMax 套餐额度耗尽返回
+              402；OpenCode Go 缺会话头返回 400。命中后会尝试下一个候选，并计入熔断失败。
+            </p>
           </div>
         </div>
 

@@ -583,3 +583,252 @@ func TestAllInstancesInCooldownReturns503(t *testing.T) {
 	}
 	t.Fatal("the skipped request was not logged")
 }
+
+// TestShouldFailoverStatuses locks the retry policy: the defaults always
+// apply, and instance-specific codes are additive rather than replacing them.
+func TestShouldFailoverStatuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		code  int
+		extra []int
+		want  bool
+	}{
+		{"rate limit", http.StatusTooManyRequests, nil, true},
+		{"server error", http.StatusInternalServerError, nil, true},
+		{"not configured", http.StatusPaymentRequired, nil, false},
+		{"miniMax quota", http.StatusPaymentRequired, []int{402}, true},
+		{"opencode missing session", http.StatusBadRequest, []int{400}, true},
+		{"bad request stays", http.StatusBadRequest, []int{402}, false},
+		{"5xx survives a narrow list", http.StatusBadGateway, []int{402}, true},
+	}
+	for _, tc := range cases {
+		if got := shouldFailover(tc.code, tc.extra); got != tc.want {
+			t.Fatalf("%s: shouldFailover(%d, %v) = %v, want %v", tc.name, tc.code, tc.extra, got, tc.want)
+		}
+	}
+}
+
+// newConfiguredForwarder builds a forwarder from explicit instances so a test
+// can exercise per-instance options such as failover_statuses and
+// session_header. The first instance is the primary candidate.
+func newConfiguredForwarder(t *testing.T, instances []config.Instance, upstreamModel string) (*Forwarder, []router.Target) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	candidates := make([]config.ModelInstance, 0, len(instances))
+	for i := range instances {
+		instances[i].Models = []string{upstreamModel}
+		candidates = append(candidates, config.ModelInstance{
+			Name: instances[i].Name, Upstream: upstreamModel, Priority: i,
+		})
+	}
+	cfg := &config.Config{
+		Instances: instances,
+		Models:    []config.Model{{Name: "m", Instances: candidates}},
+	}
+	rt := router.New()
+	if err := rt.Reload(cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	targets, err := rt.Resolve(config.ProtocolOpenAI, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewWithTimeout(rt, st, logger, 5*time.Second), targets
+}
+
+// TestFailoverOnConfiguredStatus: a 402 from an instance that lists 402 in
+// failover_statuses must move the request to the next candidate.
+func TestFailoverOnConfiguredStatus(t *testing.T) {
+	t.Parallel()
+	var secondCalls int
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"error":{"message":"plan exhausted"}}`)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer second.Close()
+
+	fw, targets := newConfiguredForwarder(t, []config.Instance{
+		{
+			Name:             "quota",
+			APIKey:           upstreamTestKey(),
+			Endpoints:        []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: first.URL}},
+			FailoverStatuses: []int{402},
+		},
+		{
+			Name:      "backup",
+			APIKey:    upstreamTestKey(),
+			Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: second.URL}},
+		},
+	}, "upstream-m")
+
+	body := []byte(`{"model":"m","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	fw.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Meta:      ingress.Meta{Model: "m", RawBody: body},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-402",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if secondCalls != 1 {
+		t.Fatalf("backup calls = %d, want 1", secondCalls)
+	}
+}
+
+// TestNoFailoverOnUnconfiguredStatus is the counterpart: without the opt-in a
+// 4xx still describes the request and must be returned untouched.
+func TestNoFailoverOnUnconfiguredStatus(t *testing.T) {
+	t.Parallel()
+	var secondCalls int
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"error":{"message":"plan exhausted"}}`)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalls++
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer second.Close()
+
+	fw, targets := newConfiguredForwarder(t, []config.Instance{
+		{Name: "a", APIKey: upstreamTestKey(), Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: first.URL}}},
+		{Name: "b", APIKey: upstreamTestKey(), Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: second.URL}}},
+	}, "upstream-m")
+
+	body := []byte(`{"model":"m","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	fw.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Meta:      ingress.Meta{Model: "m", RawBody: body},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-402-default",
+	})
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", rec.Code)
+	}
+	if secondCalls != 0 {
+		t.Fatalf("backup calls = %d, want 0", secondCalls)
+	}
+}
+
+// TestSessionHeaderValueIsStablePerConversation: every turn of one
+// conversation maps to the same value while a different conversation starts
+// from a different prefix. A per-request random value would satisfy the
+// upstream check and destroy the prompt cache.
+func TestSessionHeaderValueIsStablePerConversation(t *testing.T) {
+	t.Parallel()
+	target := router.Target{SessionHeader: "x-opencode-session"}
+	conv := func(first string) Request {
+		body := []byte(`{"messages":[{"role":"system","content":"you are a bot"},{"role":"user","content":"` + first + `"}]}`)
+		return Request{Protocol: config.ProtocolOpenAI, Meta: ingress.Meta{RawBody: body}, APIKeyID: 7}
+	}
+	one := sessionHeaderValue(httptest.NewRequest(http.MethodPost, "/", nil), conv("hello"), target)
+	two := sessionHeaderValue(httptest.NewRequest(http.MethodPost, "/", nil), conv("hello"), target)
+	other := sessionHeaderValue(httptest.NewRequest(http.MethodPost, "/", nil), conv("different"), target)
+
+	if one != two {
+		t.Fatalf("same conversation derived %q and %q", one, two)
+	}
+	if one == other {
+		t.Fatalf("different conversations share %q", one)
+	}
+	if !strings.HasPrefix(one, "ses_") || len(one) != 36 {
+		t.Fatalf("derived value %q is not ses_ plus 32 hex characters", one)
+	}
+}
+
+// TestSessionHeaderValuePrefersClientHeader: overwriting a client value would
+// split one conversation into two upstream sessions.
+func TestSessionHeaderValuePrefersClientHeader(t *testing.T) {
+	t.Parallel()
+	target := router.Target{SessionHeader: "x-opencode-session"}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("x-opencode-session", "ses_from_client")
+	if got := sessionHeaderValue(req, Request{APIKeyID: 1}, target); got != "ses_from_client" {
+		t.Fatalf("value = %q, want the client's own header", got)
+	}
+}
+
+// TestSessionHeaderValueReusesAliases: a client that already identifies its
+// conversation under another name keeps that identity.
+func TestSessionHeaderValueReusesAliases(t *testing.T) {
+	t.Parallel()
+	target := router.Target{SessionHeader: "x-opencode-session"}
+	alias := httptest.NewRequest(http.MethodPost, "/", nil)
+	alias.Header.Set("x-session-id", "conv-42")
+	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	got := sessionHeaderValue(alias, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target)
+
+	same := httptest.NewRequest(http.MethodPost, "/", nil)
+	same.Header.Set("x-session-id", "conv-42")
+	again := sessionHeaderValue(same, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target)
+	if got != again {
+		t.Fatalf("alias-derived value is not stable: %q vs %q", got, again)
+	}
+
+	different := httptest.NewRequest(http.MethodPost, "/", nil)
+	different.Header.Set("x-session-id", "conv-43")
+	if other := sessionHeaderValue(different, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target); other == got {
+		t.Fatalf("different alias values share %q", got)
+	}
+}
+
+// TestSessionHeaderReachesUpstream covers the wiring: an instance that names a
+// session header always sends a derived value upstream.
+func TestSessionHeaderReachesUpstream(t *testing.T) {
+	t.Parallel()
+	var received string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("x-opencode-session")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[]}`)
+	}))
+	defer upstream.Close()
+
+	fw, targets := newConfiguredForwarder(t, []config.Instance{{
+		Name:          "go",
+		APIKey:        upstreamTestKey(),
+		SessionHeader: "x-opencode-session",
+		Endpoints:     []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: upstream.URL}},
+	}}, "upstream-m")
+
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	fw.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Meta:      ingress.Meta{Model: "m", RawBody: body},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-session",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.HasPrefix(received, "ses_") {
+		t.Fatalf("upstream received session header %q", received)
+	}
+}

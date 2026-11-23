@@ -672,3 +672,120 @@ func TestAdminEnabledCanBeClosed(t *testing.T) {
 		t.Fatal("admin_enabled: true should open the management surface")
 	}
 }
+
+// TestFailoverStatusesAreSortedAndDeduplicated locks the shape of the extra
+// retryable status codes: duplicates collapse and the list is ordered, so the
+// routing table and the API view are stable.
+func TestFailoverStatusesAreSortedAndDeduplicated(t *testing.T) {
+	t.Parallel()
+	body := `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+instances:
+  - name: mm
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: https://example.com/v1}
+    models: [m]
+    failover_statuses: [500, 402, 402, 429]
+models:
+  - name: m
+    instances:
+      - {name: mm, upstream: m}
+`
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Instances[0].FailoverStatuses
+	want := []int{402, 429, 500}
+	if len(got) != len(want) {
+		t.Fatalf("failover statuses = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("failover statuses = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestFailoverStatusesRejectNonErrorCodes: a 2xx or 3xx never describes a
+// failed attempt, so accepting one would be a configuration mistake.
+func TestFailoverStatusesRejectNonErrorCodes(t *testing.T) {
+	t.Parallel()
+	for _, code := range []string{"200", "302", "600"} {
+		body := strings.Replace(`
+instances:
+  - name: mm
+    api_key: "k"
+    endpoints:
+      - {protocol: openai, base_url: https://example.com/v1}
+    models: [m]
+    failover_statuses: [CODE]
+models:
+  - name: m
+    instances:
+      - {name: mm, upstream: m}
+`, "CODE", code, 1)
+		if _, err := Load(writeConfig(t, minimalServer+body)); err == nil {
+			t.Fatalf("failover_statuses: [%s] should be rejected", code)
+		}
+	}
+}
+
+// TestSessionHeaderMustBeAValidHeaderName rejects names net/http would not
+// accept, so a typo fails at load time instead of at the first upstream call.
+func TestSessionHeaderMustBeAValidHeaderName(t *testing.T) {
+	t.Parallel()
+	body := `
+instances:
+  - name: oc
+    api_key: "k"
+    session_header: "bad header"
+    endpoints:
+      - {protocol: openai, base_url: https://example.com/v1}
+    models: [m]
+models:
+  - name: m
+    instances:
+      - {name: oc, upstream: m}
+`
+	if _, err := Load(writeConfig(t, minimalServer+body)); err == nil {
+		t.Fatal("session_header with a space should be rejected")
+	}
+}
+
+// TestPresetSuppliesSessionHeader: OpenCode Go requires the header on every
+// call, so the preset ships the name instead of every deployment typing it.
+func TestPresetSuppliesSessionHeader(t *testing.T) {
+	t.Parallel()
+	body := `
+instances:
+  - name: go
+    preset: opencode-go
+    api_key: "k"
+    models: [glm-5.3-flash]
+models:
+  - name: glm-5.3-flash
+    instances:
+      - {name: go, upstream: glm-5.3-flash}
+`
+	cfg, err := Load(writeConfig(t, minimalServer+body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Instances[0].SessionHeader != "x-opencode-session" {
+		t.Fatalf("session header = %q, want x-opencode-session", cfg.Instances[0].SessionHeader)
+	}
+}
+
+// minimalServer is the smallest valid server/database preamble for tests that
+// only care about the instance block.
+const minimalServer = `
+server:
+  addr: ":0"
+database:
+  path: "/tmp/x.db"
+`

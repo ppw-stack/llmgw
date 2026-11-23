@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -150,11 +153,104 @@ type attemptOutcome struct {
 	header    http.Header
 }
 
-// shouldFailoverStatus reports whether an upstream status means the request
-// may be retried on the next candidate. Client errors are never retried: they
-// describe the request, not the upstream.
-func shouldFailoverStatus(status int) bool {
-	return status == http.StatusTooManyRequests || status >= 500
+// shouldFailover reports whether an upstream status means the request may be
+// retried on the next candidate.
+//
+// Client errors normally describe the request, not the upstream, so they are
+// not retried. Some vendors nevertheless report account-level problems on a
+// 4xx: MiniMax answers 402 when the plan window is exhausted and OpenCode Go
+// answers 400 when the session header is missing. An instance lists those in
+// failover_statuses. They are added to the defaults instead of replacing them,
+// so a misconfiguration can never turn off retrying a 429 or a 5xx.
+func shouldFailover(status int, extra []int) bool {
+	if status == http.StatusTooManyRequests || status >= 500 {
+		return true
+	}
+	for _, code := range extra {
+		if status == code {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionHeaderAliases are client headers that already identify a
+// conversation. Reusing one keeps a single upstream session per conversation
+// instead of deriving a second, unrelated one.
+var sessionHeaderAliases = []string{
+	"x-session-id",
+	"x-claude-code-session-id",
+	"x-conversation-id",
+}
+
+// sessionHeaderValue returns the value to send for an upstream that requires a
+// session header.
+//
+// A header the client already set always wins: overwriting it would split one
+// conversation into two upstream sessions and throw away the prompt-cache
+// locality the header exists for. Otherwise a value is derived from a stable
+// fingerprint of the conversation prefix, so every turn of one conversation
+// maps to the same value while different conversations diverge. A per-request
+// random value would satisfy the upstream check and destroy the cache.
+func sessionHeaderValue(r *http.Request, in Request, target router.Target) string {
+	if v := strings.TrimSpace(r.Header.Get(target.SessionHeader)); v != "" {
+		return v
+	}
+	for _, alias := range sessionHeaderAliases {
+		if v := strings.TrimSpace(r.Header.Get(alias)); v != "" {
+			sum := sha256.Sum256([]byte("header:" + alias + ":" + v))
+			return "ses_" + hex.EncodeToString(sum[:16])
+		}
+	}
+	seed := fmt.Sprintf("key:%d\nprefix:", in.APIKeyID)
+	return "ses_" + hex.EncodeToString(byteSeed(seed+conversationPrefix(in.Meta.RawBody)))
+}
+
+// conversationPrefix fingerprints the part of a request that identifies a
+// conversation: its system prompt and first user message. Later turns repeat
+// that prefix, which keeps the derived session stable, while a different
+// conversation starts from a different prefix.
+func conversationPrefix(body []byte) string {
+	var payload struct {
+		System   json.RawMessage `json:"system"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if len(body) == 0 {
+		return ""
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	h := sha256.New()
+	if len(payload.System) > 0 {
+		h.Write(payload.System)
+	}
+	// Every system prompt the client sends, whichever shape it uses: the
+	// top-level field above for Anthropic, a message here for OpenAI.
+	for _, m := range payload.Messages {
+		if m.Role == "system" {
+			h.Write(m.Content)
+		}
+	}
+	// Then the first user turn, which is where two conversations sharing a
+	// system prompt diverge.
+	for _, m := range payload.Messages {
+		if m.Role == "user" {
+			h.Write(m.Content)
+			break
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// byteSeed spreads the seed over 16 bytes so the caller can hex-encode it into
+// the 32-character tail the OpenCode tooling uses.
+func byteSeed(seed string) []byte {
+	sum := sha256.Sum256([]byte(seed))
+	return sum[:16]
 }
 
 // Forward sends the request to the first candidate and walks down the
@@ -262,6 +358,9 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		} else if target.Key != "" {
 			req.Header.Set("Authorization", "Bearer "+target.Key)
 		}
+		if target.SessionHeader != "" {
+			req.Header.Set(target.SessionHeader, sessionHeaderValue(r, in, target))
+		}
 		return f.client.Do(req)
 	}
 
@@ -303,7 +402,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 
 	// A retryable status while a fallback is still available: keep the
 	// upstream answer aside and let the caller try the next candidate.
-	if hasFallback && shouldFailoverStatus(resp.StatusCode) {
+	if hasFallback && shouldFailover(resp.StatusCode, target.FailoverStatuses) {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponse+1))
 		code := responseCode(resp.StatusCode)
 		f.record(in, target, resp.StatusCode, start, 0, usageAcc{estimated: true}, code)
@@ -345,7 +444,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		f.record(in, target, resp.StatusCode, start, 0, acc, responseCode(resp.StatusCode))
 		if resp.StatusCode < 300 {
 			f.breaker.RecordSuccess(target.Instance)
-		} else if shouldFailoverStatus(resp.StatusCode) {
+		} else if shouldFailover(resp.StatusCode, target.FailoverStatuses) {
 			// The last candidate failed as well: count it so the instance
 			// is skipped for a while instead of failing every request.
 			f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)

@@ -30,6 +30,10 @@ type Preset struct {
 	OpenAIBaseURL    string   `json:"openai_base_url"`
 	AnthropicBaseURL string   `json:"anthropic_base_url"`
 	Models           []string `json:"models"`
+	// SessionHeader is the request header the vendor uses for session
+	// affinity and requires on every call. Empty means the vendor does not
+	// need one. The gateway derives a stable value when the client omits it.
+	SessionHeader string `json:"session_header,omitempty"`
 	// Quota is nil when the vendor does not expose a quota endpoint the
 	// gateway can read with the instance key alone.
 	Quota *QuotaSpec `json:"quota,omitempty"`
@@ -68,15 +72,17 @@ var all = []Preset{
 	// to the Anthropic one, so the two bases differ by one path segment.
 	//
 	// Go rejects requests without a stable x-opencode-session header with
-	// "400 MissingSessionID". The gateway forwards the client's headers
-	// untouched, so coding agents that carry a session header of their own
-	// (Claude Code, Codex, ZCode, Pi, Hermes) work as they are.
+	// "400 MissingSessionID". Coding agents that carry a session header of
+	// their own (Claude Code, Codex, ZCode, Pi, Hermes) pass it through
+	// untouched; for everything else the gateway derives one from the
+	// conversation prefix so prompt caching keeps working.
 	{
 		ID:               "opencode-go",
 		Family:           "opencode-go",
 		FamilyName:       "OpenCode Go",
 		DefaultName:      "opencode-go",
 		DocsURL:          "https://opencode.ai/docs/console/go/",
+		SessionHeader:    "x-opencode-session",
 		OpenAIBaseURL:    "https://opencode.ai/inference/go/openai/v1",
 		AnthropicBaseURL: "https://opencode.ai/inference/go/anthropic",
 		Models: []string{

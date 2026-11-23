@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/secret"
 )
 
@@ -27,6 +28,10 @@ type InstanceSpec struct {
 	TimeoutSecs              int
 	// AllowPrivateUpstream lets this instance dial loopback/private hosts.
 	AllowPrivateUpstream bool
+	// SessionHeader is the header the upstream needs for session affinity.
+	SessionHeader string
+	// FailoverStatuses are extra upstream status codes treated as retryable.
+	FailoverStatuses []int
 }
 
 // InstanceRecord is the storage form of an instance.
@@ -65,6 +70,19 @@ type ModelRecord struct {
 	UpdatedAt time.Time
 }
 
+// sessionHeaderFor returns the session header an instance sends upstream. A
+// stored value wins; otherwise a preset that needs session affinity supplies
+// its own, so instances created before the column existed keep working.
+func sessionHeaderFor(rec InstanceRecord) string {
+	if rec.SessionHeader != "" || rec.Preset == "" {
+		return rec.SessionHeader
+	}
+	if pr, ok := preset.Lookup(rec.Preset); ok {
+		return pr.SessionHeader
+	}
+	return ""
+}
+
 func (s *Store) CountInstances() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM instances`).Scan(&n)
@@ -73,7 +91,7 @@ func (s *Store) CountInstances() (int, error) {
 
 func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, quota_cred_enc, endpoints_json, models_json,
-		allow_private, max_fails, cooldown_secs, timeout_secs, created_at, updated_at
+		allow_private, session_header, failover_statuses_json, max_fails, cooldown_secs, timeout_secs, created_at, updated_at
 		FROM instances ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -86,11 +104,13 @@ func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 			endpoints    string
 			models       string
 			allowPrivate int
+			statuses     string
 			created      string
 			updated      string
 		)
 		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &rec.EncryptedQuotaCredential,
-			&endpoints, &models, &allowPrivate, &rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs,
+			&endpoints, &models, &allowPrivate, &rec.SessionHeader, &statuses,
+			&rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs,
 			&created, &updated); err != nil {
 			return nil, err
 		}
@@ -103,6 +123,11 @@ func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 		if models != "" {
 			if err := json.Unmarshal([]byte(models), &rec.Models); err != nil {
 				return nil, fmt.Errorf("instance %q: bad models: %w", rec.Name, err)
+			}
+		}
+		if statuses != "" {
+			if err := json.Unmarshal([]byte(statuses), &rec.FailoverStatuses); err != nil {
+				return nil, fmt.Errorf("instance %q: bad failover statuses: %w", rec.Name, err)
 			}
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -131,13 +156,21 @@ func (s *Store) CreateInstance(spec InstanceSpec) (*InstanceRecord, error) {
 	if spec.Models == nil {
 		modelsJSON = []byte("[]")
 	}
+	statusesJSON, err := json.Marshal(spec.FailoverStatuses)
+	if err != nil {
+		return nil, fmt.Errorf("instance %q: marshal failover statuses: %w", spec.Name, err)
+	}
+	if spec.FailoverStatuses == nil {
+		statusesJSON = []byte("[]")
+	}
 	now := nowStamp()
 	res, err := s.db.Exec(`INSERT INTO instances(name, preset, key_enc, quota_cred_enc, endpoints_json,
-		models_json, allow_private, max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		models_json, allow_private, session_header, failover_statuses_json, max_fails, cooldown_secs, timeout_secs,
+		created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		spec.Name, spec.Preset, spec.EncryptedKey, spec.EncryptedQuotaCredential, string(endpointsJSON),
-		string(modelsJSON), boolInt(spec.AllowPrivateUpstream), spec.MaxFails, spec.CooldownSecs,
-		spec.TimeoutSecs, now, now)
+		string(modelsJSON), boolInt(spec.AllowPrivateUpstream), spec.SessionHeader, string(statusesJSON),
+		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -161,11 +194,19 @@ func (s *Store) UpdateInstance(id int64, spec InstanceSpec) error {
 	if spec.Models == nil {
 		modelsJSON = []byte("[]")
 	}
+	statusesJSON, err := json.Marshal(spec.FailoverStatuses)
+	if err != nil {
+		return fmt.Errorf("instance %q: marshal failover statuses: %w", spec.Name, err)
+	}
+	if spec.FailoverStatuses == nil {
+		statusesJSON = []byte("[]")
+	}
 	res, err := s.db.Exec(`UPDATE instances SET name=?, preset=?, key_enc=?, quota_cred_enc=?, endpoints_json=?,
-		models_json=?, allow_private=?, max_fails=?, cooldown_secs=?, timeout_secs=?, updated_at=? WHERE id=?`,
+		models_json=?, allow_private=?, session_header=?, failover_statuses_json=?, max_fails=?, cooldown_secs=?,
+		timeout_secs=?, updated_at=? WHERE id=?`,
 		spec.Name, spec.Preset, spec.EncryptedKey, spec.EncryptedQuotaCredential, string(endpointsJSON),
-		string(modelsJSON), boolInt(spec.AllowPrivateUpstream), spec.MaxFails, spec.CooldownSecs,
-		spec.TimeoutSecs, nowStamp(), id)
+		string(modelsJSON), boolInt(spec.AllowPrivateUpstream), spec.SessionHeader, string(statusesJSON),
+		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
 	if err != nil {
 		return err
 	}
@@ -383,6 +424,8 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 			CooldownSecs:         rec.CooldownSecs,
 			TimeoutSecs:          rec.TimeoutSecs,
 			AllowPrivateUpstream: rec.AllowPrivateUpstream,
+			SessionHeader:        sessionHeaderFor(rec),
+			FailoverStatuses:     rec.FailoverStatuses,
 		})
 	}
 
@@ -435,6 +478,8 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 			CooldownSecs:             inst.CooldownSecs,
 			TimeoutSecs:              inst.TimeoutSecs,
 			AllowPrivateUpstream:     inst.AllowPrivateUpstream,
+			SessionHeader:            inst.SessionHeader,
+			FailoverStatuses:         inst.FailoverStatuses,
 		}
 		if _, err := s.CreateInstance(spec); err != nil {
 			if isUniqueViolation(err) {

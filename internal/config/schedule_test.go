@@ -151,6 +151,7 @@ func TestEffectiveWindowActive(t *testing.T) {
 }
 
 func TestNormalizeModelKeepsWindows(t *testing.T) {
+	t.Parallel()
 	low := 0
 	model := Model{
 		Name: "m",
@@ -174,6 +175,7 @@ func TestNormalizeModelKeepsWindows(t *testing.T) {
 }
 
 func TestEffectiveCompilesWindows(t *testing.T) {
+	t.Parallel()
 	low := 0
 	cfg := &Config{
 		Instances: []Instance{

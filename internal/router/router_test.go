@@ -1,12 +1,23 @@
 package router
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
 )
+
+// testAPIKey returns the upstream key used by the router tests. The
+// environment variable injects a real key; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func testAPIKey(env, suffix string) string {
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		return v
+	}
+	return "sk-test-placeholder-" + suffix
+}
 
 func testConfig() *config.Config {
 	return &config.Config{
@@ -89,10 +100,11 @@ func TestResolve(t *testing.T) {
 }
 
 func TestCandidatesUseTheirOwnUpstreamModel(t *testing.T) {
+	t.Parallel()
 	cfg := testConfig()
 	cfg.Instances = append(cfg.Instances, config.Instance{
 		Name:      "glm-next",
-		APIKey:    "k4",
+		APIKey:    testAPIKey("LLMGW_TEST_GLM_NEXT_API_KEY", "glm-next"),
 		Endpoints: []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://d/v1"}},
 		Models:    []string{"glm-5.3-flash"},
 	})

@@ -191,6 +191,7 @@ func TestInstanceUpdateReadsAnOmittedPrivateOptInAsOff(t *testing.T) {
 }
 
 func TestModelCRUD(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	apiKey := testAPIKey("TEST_MODEL_API_KEY", "4321")
 
@@ -268,6 +269,7 @@ func TestModelCRUD(t *testing.T) {
 }
 
 func TestDuplicateModelNameIsRejected(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
 		`{"name":"gpt-test","instances":[{"instance":"test","upstream":"gpt-upstream"}]}`)
@@ -564,6 +566,7 @@ func TestPresetModelsFailureFallsBack(t *testing.T) {
 }
 
 func TestModelRejectsAnUndeclaredUpstream(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/models",
 		`{"name":"bad-model","instances":[{"instance":"test","upstream":"not-declared"}]}`)

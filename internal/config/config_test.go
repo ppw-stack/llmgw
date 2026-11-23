@@ -417,6 +417,7 @@ models:
 }
 
 func TestCandidatesMayUseDifferentUpstreams(t *testing.T) {
+	t.Parallel()
 	body := `
 server:
   addr: ":0"
@@ -454,6 +455,7 @@ models:
 }
 
 func TestCandidateUpstreamIsRequired(t *testing.T) {
+	t.Parallel()
 	body := `
 server:
   addr: ":0"

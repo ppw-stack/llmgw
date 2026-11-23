@@ -198,7 +198,7 @@ func TestFallbackPageListsTheMetricsEndpointOnlyWhenItIsOn(t *testing.T) {
 
 	gw2, _, _, _ := setupConfigServer(t, nil, openaiOK, []string{"k"}, nil, func(o *Options) {
 		o.UI = nil
-		o.MetricsToken = "metrics-secret"
+		o.MetricsToken = testMetricsToken(t)
 	})
 	resp = adminRequest(t, http.MethodGet, gw2.URL+"/", "")
 	body, err = io.ReadAll(resp.Body)
@@ -225,7 +225,8 @@ func TestMetricsEndpointFollowsTheTokenAtRuntime(t *testing.T) {
 	}
 
 	// A token switches it on, but the token is still required.
-	srv.SetMetricsToken("metrics-secret")
+	token := testMetricsToken(t)
+	srv.SetMetricsToken(token)
 	resp = adminRequest(t, http.MethodGet, gw.URL+"/metrics", "")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -233,7 +234,7 @@ func TestMetricsEndpointFollowsTheTokenAtRuntime(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/metrics", nil)
-	req.Header.Set("Authorization", "Bearer metrics-secret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	authed, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

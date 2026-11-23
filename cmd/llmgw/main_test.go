@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,6 +36,21 @@ func testAPIKey() string {
 // without the legacy token, which these tests never present.
 func testAdminToken() string {
 	return strings.TrimSpace(os.Getenv("LLMGW_TEST_ADMIN_TOKEN"))
+}
+
+// testMetricsToken returns the token that guards the metrics endpoint. Set
+// LLMGW_TEST_METRICS_TOKEN to inject a real one; without it a random token is
+// generated at runtime, so the repository holds no credential literal.
+func testMetricsToken(t *testing.T) string {
+	t.Helper()
+	if token := strings.TrimSpace(os.Getenv("LLMGW_TEST_METRICS_TOKEN")); token != "" {
+		return token
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatalf("generate a metrics token: %v", err)
+	}
+	return hex.EncodeToString(buf)
 }
 
 // testConfig renders a config file whose management surface state is
@@ -350,8 +367,9 @@ func TestWatchConfigEnablesTheMetricsEndpoint(t *testing.T) {
 		t.Fatalf("metrics without a token = %d, want 404", code)
 	}
 
+	metricsToken := testMetricsToken(t)
 	withToken := strings.Replace(testConfig(dbPath, true), "  admin_enabled: true",
-		"  admin_enabled: true\n  metrics_token: \"metrics-secret\"", 1)
+		"  admin_enabled: true\n  metrics_token: \""+metricsToken+"\"", 1)
 	writeFile(t, cfgPath, withToken)
 	waitFor(t, 10*time.Second, func() bool {
 		return metricsResponse(handler) == http.StatusUnauthorized

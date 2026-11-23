@@ -528,6 +528,7 @@ func TestLegacyProviderExpandsToInstanceAndModel(t *testing.T) {
 // legal. The gateway starts with an empty routing table and the operator
 // adds the instances in the console.
 func TestEmptyTopologyIsAccepted(t *testing.T) {
+	t.Parallel()
 	body := `
 server:
   addr: ":0"
@@ -554,6 +555,7 @@ database:
 // weaken the checks. A model that points at an instance nobody declared is
 // still a configuration error.
 func TestModelWithoutInstanceIsRejected(t *testing.T) {
+	t.Parallel()
 	body := `
 server:
   addr: ":0"

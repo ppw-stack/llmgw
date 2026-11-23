@@ -635,6 +635,7 @@ func TestInstanceModelsAreBackfilled(t *testing.T) {
 // stored a per-candidate weight. The column never took part in the routing
 // decision, so opening the database removes it and keeps the candidates.
 func TestWeightColumnIsDropped(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "weight.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {

@@ -16,6 +16,8 @@ https://github.com/ppw-stack/llmgw/security/advisories/new
 
 - 公网部署必须由反向代理终止 TLS，并配置 `server.trusted_proxies` 与 `secure_cookie: true`。
 - 用 `server.admin_allowed_cidrs` 把控制台限制到运维网段；`/metrics` 未设 `metrics_token` 时只允许本机与可信代理读取。
+- 怀疑控制台被拿下时把 `server.admin_enabled` 改成 `false`：1 秒内热加载生效，控制台 API、
+  登录接口与控制台页面全部 `403`，数据面不受影响；处置完改回 `true` 即可恢复。
 - 设置 `server.key_rpm` / `server.key_max_concurrent`：一把网关 Key 泄漏就等同于上游额度被无限制消耗。
 - 上游地址默认拒绝 loopback、内网与云元数据网段。本地 mock 需在实例上显式设置 `allow_private_upstream: true`，不要在公网实例上开。
 - `master.key` 与数据库同等敏感，请一并备份；数据库目录以 0700 创建、库文件 0600，备份时保持同样权限。

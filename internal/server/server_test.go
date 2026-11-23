@@ -64,6 +64,14 @@ func setup(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []
 
 func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string,
 	mutate func(*config.Config), opts ...func(*Options)) (*httptest.Server, *store.Store, string) {
+	gw, st, key, _ := setupConfigServer(t, cap, upstreamHandler, keys, mutate, opts...)
+	return gw, st, key
+}
+
+// setupConfigServer is setupConfig plus a handle on the server itself, for
+// tests that flip runtime state such as the management surface switch.
+func setupConfigServer(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, keys []string,
+	mutate func(*config.Config), opts ...func(*Options)) (*httptest.Server, *store.Store, string, *Server) {
 	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +172,7 @@ func setupConfig(t *testing.T, cap *capture, upstreamHandler http.HandlerFunc, k
 	gw := httptest.NewServer(srv.Handler())
 	t.Cleanup(gw.Close)
 
-	return gw, st, plain
+	return gw, st, plain, srv
 }
 
 func post(t *testing.T, url, key, body string) *http.Response {

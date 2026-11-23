@@ -129,6 +129,7 @@ func main() {
 		SecureCookie:     cfg.Server.SecureCookie,
 		TrustedProxies:   cfg.Server.TrustedPrefixes,
 		AdminPrefixes:    cfg.Server.AdminPrefixes,
+		AdminEnabled:     cfg.Server.AdminEnabled,
 		KeyRPM:           cfg.Server.KeyRPM,
 		KeyMaxConcurrent: cfg.Server.KeyMaxConcurrent,
 		MaxBody:          cfg.Server.MaxBodyBytes,
@@ -158,15 +159,7 @@ func main() {
 	}
 	warnInsecureDefaults(cfg, logger)
 	go watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
-		dbInstances, dbModels, err := st.Topology(boxCipher)
-		if err != nil {
-			return err
-		}
-		if len(dbInstances) > 0 {
-			c.Instances = dbInstances
-			c.Models = dbModels
-		}
-		return rt.Reload(c)
+		return reloadConfig(rt, st, boxCipher, srv, c)
 	})
 
 	go func() {
@@ -410,6 +403,33 @@ func warnInsecureDefaults(cfg *config.Config, log *slog.Logger) {
 			log.Warn("instance allows private/loopback upstreams", "instance", inst.Name)
 		}
 	}
+}
+
+// reloadConfig applies a freshly loaded configuration to the running gateway.
+//
+// The routing table is swapped first and only a successful swap moves the
+// management surface, so a configuration the gateway rejects leaves both
+// untouched.
+func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *server.Server,
+	c *config.Config) error {
+	dbInstances, dbModels, err := st.Topology(box)
+	if err != nil {
+		return err
+	}
+	if len(dbInstances) > 0 {
+		c.Instances = dbInstances
+		c.Models = dbModels
+	}
+	if err := rt.Reload(c); err != nil {
+		return err
+	}
+	// The runtime policy follows the config: the management surface, its
+	// network whitelist and the per-key budget. Changing them needs no
+	// restart: edit the file and they are in effect within a second.
+	srv.SetAdminEnabled(c.Server.AdminIsEnabled())
+	srv.SetAdminPrefixes(c.Server.AdminPrefixes)
+	srv.SetKeyLimits(c.Server.KeyRPM, c.Server.KeyMaxConcurrent)
+	return nil
 }
 
 func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(*config.Config) error) {

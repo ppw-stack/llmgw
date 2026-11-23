@@ -109,6 +109,9 @@
 - `config.yaml` 为配置源；启动时加载，运行中按 mtime 轮询重载。
 - 重载构建新快照并原子替换；进行中的请求继续使用旧快照。
 - 校验失败保留旧配置并记录错误日志。
+- 运行期策略项（`server.admin_enabled`、`server.admin_allowed_cidrs`、
+  `server.key_rpm`、`server.key_max_concurrent`）随重载即时生效，无需重启。
+  其余项（监听地址、证书、口令、令牌、密钥）只在启动时读取，改动需重启。
 
 ### FR-09 可观测
 
@@ -135,6 +138,8 @@ Web 控制台（`/`，Vue 3 构建产物内嵌进二进制）：
 - Cookie 属性：`HttpOnly`、`SameSite=Strict`、HTTPS 下 `Secure`。
 - 登录失败按客户端 IP 限速（5 分钟 10 次），超限返回 `429` + `Retry-After`。
 - 可选 `server.admin_allowed_cidrs`：控制台 API 与登录接口只接受白名单来源，其余返回 `403`。
+- 可选 `server.admin_enabled`（默认开启）：置为 `false` 时控制台 API、登录接口与控制台页面
+  全部返回 `403`，数据面不受影响；热加载即时生效，用于控制台疑似被拿下的应急拉闸。
 - 管理写操作写审计日志（登录、登出、改密、Key 增删改）。
 - 可选 `server.admin_token` 作为脚本用 Bearer token；未配置则禁用。
 - 客户端 IP 仅在直连方属于 `trusted_proxies` 时才采信 `X-Forwarded-For`；`X-Forwarded-Proto` 同样如此，客户端伪造不生效。
@@ -168,6 +173,7 @@ REST API：
 | NFR-11 | 数据面配额 | 按网关 Key 限速与并发上限（`key_rpm` / `key_max_concurrent`），超限 `429` |
 | NFR-12 | 数据外泄 | 转发上游时剥离 `Cookie`/`Authorization`/`X-Forwarded-*`/`X-Real-IP`；丢弃上游 `Set-Cookie` 与安全头 |
 | NFR-13 | 数据保留 | `database.retention_days` 到期清理请求日志、审计日志与按日用量 |
+| NFR-14 | 应急拉闸 | `server.admin_enabled: false` 热加载生效后管理面整体 `403`，数据面不受影响 |
 
 ## 6. 验收标准
 
@@ -198,6 +204,8 @@ REST API：
 23. 浏览器带上 `Cookie` 调数据面时，上游收到的请求头里没有 `Cookie`、`X-Forwarded-For`、`X-Real-IP`。
 24. 上游返回 `Set-Cookie`/CSP/HSTS 时，客户端只看到网关自己设置的头，对话响应带 `Cache-Control: no-store`。
 25. 配置 `admin_allowed_cidrs` 后，白名单外来源访问 `/admin/api/*` 返回 `403`。
+26. 配置 `admin_enabled: false` 后，管理 API、登录接口与控制台页面返回 `403`，
+    数据面与健康检查照常；改回 `true` 后控制台立即可用，无需重新登录。
 
 ## 7. 里程碑
 

@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pw/llmgw/internal/auth"
@@ -38,6 +39,9 @@ type Options struct {
 	TrustedProxies []netip.Prefix
 	// AdminPrefixes restricts the admin surface when non-empty.
 	AdminPrefixes []netip.Prefix
+	// AdminEnabled opens or closes the management surface. Nil means open,
+	// so an embedder that does not care keeps the previous behaviour.
+	AdminEnabled *bool
 	// KeyRPM and KeyMaxConcurrent bound one gateway key. Zero disables.
 	KeyRPM           int
 	KeyMaxConcurrent int
@@ -62,12 +66,17 @@ type Server struct {
 	sessionTTL     time.Duration
 	secureCookie   bool
 	trustedProxies []netip.Prefix
-	adminPrefixes  []netip.Prefix
-	limiter        *loginLimiter
-	keys           *keyCache
-	keyLimiter     *keyLimiter
-	loginSem       chan struct{}
-	quota          *quota.Service
+	// adminPrefixes is the admin network whitelist. It is a pointer so the
+	// config watcher can swap it while requests are in flight.
+	adminPrefixes atomic.Pointer[[]netip.Prefix]
+	// adminEnabled gates the management surface. It is atomic because the
+	// config watcher flips it while requests are in flight.
+	adminEnabled atomic.Bool
+	limiter      *loginLimiter
+	keys         *keyCache
+	keyLimiter   *keyLimiter
+	loginSem     chan struct{}
+	quota        *quota.Service
 }
 
 func New(o Options) (*Server, error) {
@@ -99,7 +108,7 @@ func New(o Options) (*Server, error) {
 	if quotaService == nil {
 		quotaService = quota.NewService()
 	}
-	return &Server{
+	s := &Server{
 		router:         o.Router,
 		forwarder:      o.Forwarder,
 		store:          o.Store,
@@ -112,13 +121,49 @@ func New(o Options) (*Server, error) {
 		sessionTTL:     o.SessionTTL,
 		secureCookie:   o.SecureCookie,
 		trustedProxies: o.TrustedProxies,
-		adminPrefixes:  o.AdminPrefixes,
 		limiter:        newLoginLimiter(5*time.Minute, 10, 10000),
 		keys:           cache,
 		keyLimiter:     newKeyLimiter(o.KeyRPM, o.KeyMaxConcurrent),
 		loginSem:       make(chan struct{}, 4),
 		quota:          quotaService,
-	}, nil
+	}
+	// A nil AdminEnabled means the management surface stays open.
+	s.adminEnabled.Store(o.AdminEnabled == nil || *o.AdminEnabled)
+	s.SetAdminPrefixes(o.AdminPrefixes)
+	return s, nil
+}
+
+// SetAdminEnabled opens or closes the management surface. The config watcher
+// calls it on every reload, so the console can be shut down without a
+// restart. It reports whether the state actually changed.
+func (s *Server) SetAdminEnabled(enabled bool) bool {
+	if s.adminEnabled.Swap(enabled) == enabled {
+		return false
+	}
+	if enabled {
+		s.log.Info("management console enabled")
+	} else {
+		s.log.Warn("management console disabled by configuration")
+	}
+	return true
+}
+
+// SetAdminPrefixes replaces the admin network whitelist. An empty list means
+// every source that can reach the listener is allowed, which is only safe
+// behind a network boundary.
+func (s *Server) SetAdminPrefixes(prefixes []netip.Prefix) {
+	s.adminPrefixes.Store(&prefixes)
+}
+
+// SetKeyLimits updates the per-key request budget. Zero disables a
+// dimension.
+func (s *Server) SetKeyLimits(rpm, maxConcurrent int) {
+	s.keyLimiter.setLimits(rpm, maxConcurrent)
+}
+
+// adminSurfaceOpen reports whether the management surface is reachable.
+func (s *Server) adminSurfaceOpen() bool {
+	return s.adminEnabled.Load()
 }
 
 func (s *Server) Handler() http.Handler {
@@ -144,6 +189,9 @@ func (s *Server) Handler() http.Handler {
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; " +
 	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; " +
 	"connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+// adminDisabledMessage is returned while the management surface is closed.
+const adminDisabledMessage = "the management console is disabled by configuration"
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,9 +223,17 @@ func (s *Server) isHTTPS(r *http.Request) bool {
 // adminGuard rejects admin requests from outside the configured networks.
 // An empty list keeps the historical behaviour, because the operator may rely
 // on a network boundary in front of the gateway.
+//
+// A closed management surface short-circuits the whole check: no credential,
+// not even the static admin token, opens it while it is shut.
 func (s *Server) adminGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(s.adminPrefixes) == 0 {
+		if !s.adminSurfaceOpen() {
+			writeAdminError(w, http.StatusForbidden, adminDisabledMessage)
+			return
+		}
+		allowed := s.adminPrefixes.Load()
+		if allowed == nil || len(*allowed) == 0 {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -187,9 +243,9 @@ func (s *Server) adminGuard(next http.Handler) http.Handler {
 		// appends X-Forwarded-For itself.
 		peer, peerOK := clientip.PeerAddr(r)
 		resolved, err := netip.ParseAddr(s.clientIP(r))
-		allowed := (peerOK && prefixContains(s.adminPrefixes, peer)) ||
-			(err == nil && prefixContains(s.adminPrefixes, resolved))
-		if !allowed {
+		ok := (peerOK && prefixContains(*allowed, peer)) ||
+			(err == nil && prefixContains(*allowed, resolved))
+		if !ok {
 			s.log.Warn("admin request rejected by admin_allowed_cidrs",
 				"request_id", requestID(r), "ip", s.clientIP(r), "path", r.URL.Path)
 			writeAdminError(w, http.StatusForbidden, "admin access is restricted by network policy")
@@ -278,10 +334,24 @@ func protocolOfPath(path string) string {
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if isDataPlanePath(r.URL.Path) {
+		// The console is shut down: say so instead of pretending the path
+		// does not exist. The data plane keeps its own error shape.
+		if !s.adminSurfaceOpen() && strings.HasPrefix(r.URL.Path, "/admin") {
+			writeAdminError(w, http.StatusForbidden, adminDisabledMessage)
+			return
+		}
 		protocol := protocolOfPath(r.URL.Path)
 		ingress.WriteError(w, protocol, http.StatusNotFound, "invalid_request_error",
 			"unknown path "+r.URL.Path+". OpenAI base_url must be <gateway>/openai/v1; "+
 				"Anthropic base_url must be <gateway>/anthropic.")
+		return
+	}
+	if !s.adminSurfaceOpen() {
+		// Do not serve the console shell: a page that loads and then fails
+		// every request is harder to diagnose than a plain refusal.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, adminDisabledMessage+"\n")
 		return
 	}
 	if s.ui != nil {

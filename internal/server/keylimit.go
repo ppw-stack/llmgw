@@ -34,18 +34,32 @@ func newKeyLimiter(rpm, maxConcurrent int) *keyLimiter {
 	}
 }
 
-func (l *keyLimiter) enabled() bool { return l != nil && (l.rpm > 0 || l.max > 0) }
+// setLimits updates the budget that applies to every key. The config watcher
+// calls it on reload, so the operator can tighten or relax the limit without
+// restarting the gateway.
+func (l *keyLimiter) setLimits(rpm, maxConcurrent int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rpm = rpm
+	l.max = maxConcurrent
+}
 
 // acquire reserves one request slot. It returns a release function that must be
 // called when the request finishes, or ok=false with the delay to advertise in
 // Retry-After.
 func (l *keyLimiter) acquire(id int64) (release func(), ok bool, retry time.Duration) {
-	if !l.enabled() {
+	if l == nil {
 		return func() {}, true, 0
 	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// Both dimensions off: nothing to reserve. The check lives under the
+	// lock so a concurrent setLimits is never read half-applied.
+	if l.rpm <= 0 && l.max <= 0 {
+		return func() {}, true, 0
+	}
 
 	st := l.states[id]
 	if st == nil {

@@ -536,3 +536,39 @@ database:
 		t.Fatalf("expected instance error, got %v", err)
 	}
 }
+
+// TestAdminEnabledDefaultsToOpen: a config file that predates the option
+// keeps the management surface open.
+func TestAdminEnabledDefaultsToOpen(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.AdminIsEnabled() {
+		t.Fatal("the management surface should be open by default")
+	}
+}
+
+// TestAdminEnabledCanBeClosed: admin_enabled: false is the emergency switch
+// that shuts the console down.
+func TestAdminEnabledCanBeClosed(t *testing.T) {
+	body := strings.Replace(minimal, `  addr: ":0"`,
+		"  addr: \":0\"\n  admin_enabled: false", 1)
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.AdminIsEnabled() {
+		t.Fatal("admin_enabled: false should close the management surface")
+	}
+
+	body = strings.Replace(minimal, `  addr: ":0"`,
+		"  addr: \":0\"\n  admin_enabled: true", 1)
+	cfg, err = Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.AdminIsEnabled() {
+		t.Fatal("admin_enabled: true should open the management surface")
+	}
+}

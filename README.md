@@ -208,6 +208,10 @@ curl -b cookies.txt "localhost:8080/admin/api/audit?limit=20"
 - 登录失败按 IP 限速，管理写操作有审计日志。
 - 由 nginx/Caddy/云 LB 终止 TLS，并配置 `trusted_proxies` 以正确解析客户端 IP。
 - 反代必须关闭缓冲（`proxy_buffering off`），否则流式会被攒成一次性返回。
+- 用 `server.admin_allowed_cidrs` 把控制台限制到运维网段；用 `server.key_rpm` /
+  `server.key_max_concurrent` 给每把网关 Key 设预算。
+- 怀疑控制台被拿下时，把 `server.admin_enabled` 改成 `false`：1 秒内热加载生效，
+  控制台 API、登录接口与控制台页面全部 `403`，数据面不受影响；处置完改回 `true` 恢复。
 - nginx 示例、HSTS、`/metrics` 保护等见 [docs/operations.md](docs/operations.md#9-安全与公网部署)。
 
 ## 目录结构

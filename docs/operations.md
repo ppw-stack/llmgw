@@ -285,6 +285,9 @@ server:
 - 加密主密钥来自 `server.master_key` 或数据库目录的 `master.key`（0600）。请与数据库一起备份，并限制文件权限。
 - `/metrics` 在未配置令牌时只允许本机与 `trusted_proxies` 读取；公网抓取请设 `server.metrics_token`。
 - 管理面可用 `server.admin_allowed_cidrs` 限制到运维网段，控制台 API 与登录接口一并生效。
+- 怀疑控制台被拿下时，把 `server.admin_enabled` 改成 `false`：1 秒内热加载生效，
+  控制台 API、登录接口与控制台页面全部返回 `403`，数据面与 `/metrics` 不受影响。
+  改回 `true` 立即恢复，已登录的会话继续有效。这是应急拉闸手段，不要当常规开关用。
 - 数据面按 Key 限速：`server.key_rpm`（每分钟请求数）与 `server.key_max_concurrent`（并发上限），
   默认示例值 600 / 32；两者都为 0 表示不限制，公网部署不建议留空。
 - 转发到上游的请求头会剥离 `Cookie`、`Authorization`、`X-Forwarded-*`、`X-Real-IP` 等敏感头

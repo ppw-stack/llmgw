@@ -86,6 +86,13 @@ type Server struct {
 	// acceptable behind a network boundary.
 	AdminAllowedCIDRs []string `yaml:"admin_allowed_cidrs"`
 
+	// AdminEnabled opens or closes the whole management surface. It is a
+	// pointer so that "not configured" (open) can be told apart from an
+	// explicit false. Changing it takes effect on the next config reload,
+	// which is the emergency lever when the console is suspected to be
+	// compromised.
+	AdminEnabled *bool `yaml:"admin_enabled"`
+
 	// KeyRPM is the per-gateway-key request budget per minute. Zero disables
 	// the limiter. KeyMaxConcurrent caps in-flight requests of one key.
 	KeyRPM           int `yaml:"key_rpm"`
@@ -94,6 +101,17 @@ type Server struct {
 	TrustedPrefixes []netip.Prefix `yaml:"-"`
 	AdminPrefixes   []netip.Prefix `yaml:"-"`
 }
+
+// AdminIsEnabled reports whether the management surface is open. An unset
+// admin_enabled means open, so a config file that predates the option keeps
+// the previous behaviour.
+func (s *Server) AdminIsEnabled() bool {
+	return s.AdminEnabled == nil || *s.AdminEnabled
+}
+
+// boolPtr returns a pointer to v. It exists for the optional booleans in the
+// config, where "not set" and "set to false" mean different things.
+func boolPtr(v bool) *bool { return &v }
 
 type Database struct {
 	Path string `yaml:"path"`
@@ -199,6 +217,7 @@ func defaults() *Config {
 	c := &Config{}
 	c.Server.Addr = ":8080"
 	c.Server.AdminUsername = "admin"
+	c.Server.AdminEnabled = boolPtr(true)
 	c.Server.SessionTTL = Duration(12 * time.Hour)
 	c.Server.ReadHeaderTimeout = Duration(10 * time.Second)
 	c.Server.ShutdownTimeout = Duration(30 * time.Second)
@@ -274,6 +293,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Server.AdminUsername == "" {
 		c.Server.AdminUsername = "admin"
+	}
+	if c.Server.AdminEnabled == nil {
+		c.Server.AdminEnabled = boolPtr(true)
 	}
 	if c.Server.SessionTTL == 0 {
 		c.Server.SessionTTL = Duration(12 * time.Hour)

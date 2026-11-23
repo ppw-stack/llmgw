@@ -20,6 +20,10 @@ curl -b cookies.txt https://gw.example.com/admin/api/keys
 
 ## 认证
 
+> 整个管理面（`/admin/api/*`，含登录接口）可以被关掉：配置 `server.admin_enabled: false`
+> 后，这些接口与控制台页面一律返回 `403 the management console is disabled by configuration`，
+> 数据面不受影响。该开关支持热加载，改配置 1 秒内生效。
+
 ### 登录
 
 ```

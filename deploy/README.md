@@ -27,6 +27,10 @@ docker compose -f deploy/docker-compose.test.yml ps
 | Anthropic base_url | `http://localhost:8080/anthropic` |
 | metrics | `http://localhost:8080/metrics`，Bearer `test-metrics-token` |
 
+> `test-config.yaml` 里配了 `metrics_token`，所以 `/metrics` 必须带令牌访问，
+> 不带返回 `401`。把 `metrics_token` 留空时，只有本机与 `trusted_proxies` 能读，
+> 其他来源返回 `403`。
+
 网关 Key 在控制台「网关 Key」页创建，或通过 API：
 
 ```bash
@@ -63,6 +67,51 @@ curl -b /tmp/llmgw-cookies -H 'Content-Type: application/json' \
 | `gpt-windowed` | 两个入口 | 时间窗口示例：北京时间 00:00-08:00 走 `mock-night`，其他时段走 `mock` |
 
 mock 支持 `stream: true`，两种协议的 SSE 事件都完整。
+
+## 安全相关配置
+
+`test-config.yaml` 里开了几项生产环境也该开的开关，方便在本地验证：
+
+| 配置 | 值 | 作用 |
+|---|---|---|
+| `server.admin_enabled` | `true` | 管理面总开关，改成 `false` 会热加载关掉控制台 |
+| `server.admin_allowed_cidrs` | `192.168.222.1/32` 等 | 管理面白名单，名单外访问 `/admin/api/*` 返回 `403` |
+| `server.key_rpm` / `server.key_max_concurrent` | `600` / `32` | 单把网关 Key 的每分钟请求数与并发上限，超限 `429` |
+| `database.retention_days` | `7` | 请求日志、审计日志与按日用量保留 7 天 |
+
+> `192.168.222.1` 是 compose 网络的网关，也就是**宿主机**访问发布端口时容器
+> 看到的来源地址。compose 默认网络每次 Docker Desktop 重启都会换网段，所以
+> `docker-compose.test.yml` 里固定了 `192.168.222.0/24`，白名单才能写死。
+
+### 验证管理面白名单
+
+```bash
+# 宿主机访问：命中白名单，控制台可用
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/admin/api/login
+
+# 从别的容器访问：不在白名单，403
+docker run --rm --network llmgw-test_llmgw-test alpine \
+  wget -qO- --post-data='{"username":"admin","password":"test-admin-password"}' \
+  --header='Content-Type: application/json' http://gateway:8080/admin/api/login
+```
+
+### 验证管理面热加载开关
+
+改 `deploy/test-config.yaml` 里的 `admin_enabled`，1 秒内生效，无需重启容器：
+
+```bash
+# 改成 admin_enabled: false 后
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/admin/api/login  # 403
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/                   # 403，控制台页面也不给
+
+# 数据面不受影响
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}' \
+  http://localhost:8080/openai/v1/chat/completions                               # 200
+```
+
+改回 `admin_enabled: true` 即可恢复，已登录的会话继续有效，不用重新登录。
 
 ## 时间窗口（峰谷计费）
 
@@ -134,5 +183,17 @@ docker compose -f deploy/docker-compose.test.yml down
 
 - mock 上游是确定性的，不调用任何真实模型，不产生费用。
 - 网关配置在 `test-config.yaml`，修改后 1 秒内自动热加载，无需重启容器。
+  管理面开关、管理面白名单与 Key 限速属于运行期策略，改完立即生效；其余项需要重启容器。
+- 配置目录是以 `./` 挂进容器的（不是挂单个文件），这样编辑器改写文件换了 inode 之后，
+  容器里仍能看到新内容——单文件绑定会钉住旧 inode，热加载会静默失效。
 - 数据库位于名为 `llmgw-test_llmgw-test-data` 的卷中。
+- 网关数据目录 `/data` 在容器里以 `llmgw` 用户运行，库文件权限 `0600`、目录 `0700`。
 - 若 8080 被占用，修改 compose 里的端口映射即可。
+- 若 `192.168.222.0/24` 与你本机已有网络冲突，改 `docker-compose.test.yml` 里的
+  `subnet`，并同步改 `test-config.yaml` 的 `admin_allowed_cidrs` 第一项。
+
+> **从旧版本升级的数据卷**：上游拓扑在首次启动时导入数据库，之后以数据库为准。
+> 如果卷是在 `allow_private_upstream` 这个开关之前建的，库里的接入点没有该标记，
+> 请求本地 mock 会报 `upstream host "mock" resolves only to private or reserved addresses`。
+> 处理方式：`docker compose -f deploy/docker-compose.test.yml down -v` 清掉卷重建，
+> 或在控制台「上游接入点」里给该接入点打开「允许内网/本地上游」。

@@ -92,7 +92,7 @@ func CheckUpstreamHost(owner, field, raw string, allowPrivate bool) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("%s: %s is not a valid URL: %q", owner, field, raw)
+		return fmt.Errorf("%s: %s is not a valid URL: %q: %w", owner, field, raw, err)
 	}
 	if LooksPrivateHost(u.Hostname()) {
 		return fmt.Errorf("%s: %s points at a loopback, private or metadata host %q; "+

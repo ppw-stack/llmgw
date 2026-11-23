@@ -99,7 +99,11 @@ type Server struct {
 	KeyMaxConcurrent int `yaml:"key_max_concurrent"`
 
 	TrustedPrefixes []netip.Prefix `yaml:"-"`
-	AdminPrefixes   []netip.Prefix `yaml:"-"`
+
+	// AdminPrefixes holds the parsed admin_allowed_cidrs entries. The admin
+	// surface only answers requests whose source address is inside one of
+	// them; an empty list means "everybody the listener can reach".
+	AdminPrefixes []netip.Prefix `yaml:"-"`
 }
 
 // AdminIsEnabled reports whether the management surface is open. An unset

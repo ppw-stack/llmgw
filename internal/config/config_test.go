@@ -540,6 +540,7 @@ database:
 // TestAdminEnabledDefaultsToOpen: a config file that predates the option
 // keeps the management surface open.
 func TestAdminEnabledDefaultsToOpen(t *testing.T) {
+	t.Parallel()
 	cfg, err := Load(writeConfig(t, minimal))
 	if err != nil {
 		t.Fatal(err)
@@ -552,6 +553,7 @@ func TestAdminEnabledDefaultsToOpen(t *testing.T) {
 // TestAdminEnabledCanBeClosed: admin_enabled: false is the emergency switch
 // that shuts the console down.
 func TestAdminEnabledCanBeClosed(t *testing.T) {
+	t.Parallel()
 	body := strings.Replace(minimal, `  addr: ":0"`,
 		"  addr: \":0\"\n  admin_enabled: false", 1)
 	cfg, err := Load(writeConfig(t, body))

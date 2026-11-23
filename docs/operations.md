@@ -296,6 +296,8 @@ server:
 - 上游地址默认禁止 loopback、内网与云元数据网段，防止控制台被拿下后成为内网代理；
   本地 mock 需在实例上设置 `allow_private_upstream: true`。
 - 请求日志、审计日志与按日用量可用 `database.retention_days` 自动清理（0 表示永久保留）。
+  清理分批进行（每批 5000 行），批与批之间释放写锁，不会长时间阻塞异步日志写入；
+  启动后约 30 秒执行第一次清理，之后每 24 小时一次。
 - 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - 建议定期轮换管理员密码（控制台“修改密码”）与上游 Key。
 

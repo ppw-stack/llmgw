@@ -40,7 +40,10 @@ func TestAdminSurfaceCanBeClosedAtRuntime(t *testing.T) {
 
 	// The console page is not served either.
 	resp = adminRequest(t, http.MethodGet, gw.URL+"/", "")
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read console response body: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("console page while closed = %d, want 403", resp.StatusCode)

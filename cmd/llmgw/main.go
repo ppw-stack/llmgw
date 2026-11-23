@@ -337,8 +337,13 @@ func cleanupSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 	}
 }
 
+// pruneStartupDelay is the pause between the start of the gateway and the
+// first cleanup. Right after the boot the gateway is still warming up, and a
+// large cleanup would take the write lock away from the first requests.
+const pruneStartupDelay = 30 * time.Second
+
 // pruneHistory keeps the request log, the audit log and the daily usage table
-// from growing forever. It runs once at startup and then daily.
+// from growing forever. It runs once shortly after the startup and then daily.
 func pruneHistory(ctx context.Context, st *store.Store, log *slog.Logger, days int) {
 	prune := func() {
 		cutoff := time.Now().UTC().AddDate(0, 0, -days)
@@ -352,6 +357,11 @@ func pruneHistory(ctx context.Context, st *store.Store, log *slog.Logger, days i
 				"request_logs", res.RequestLogs, "audit_logs", res.AuditLogs,
 				"usage_days", res.UsageDays, "retention_days", days)
 		}
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(pruneStartupDelay):
 	}
 	prune()
 	ticker := time.NewTicker(24 * time.Hour)
@@ -414,14 +424,14 @@ func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *serv
 	c *config.Config) error {
 	dbInstances, dbModels, err := st.Topology(box)
 	if err != nil {
-		return err
+		return fmt.Errorf("load topology: %w", err)
 	}
 	if len(dbInstances) > 0 {
 		c.Instances = dbInstances
 		c.Models = dbModels
 	}
 	if err := rt.Reload(c); err != nil {
-		return err
+		return fmt.Errorf("reload routing table: %w", err)
 	}
 	// The runtime policy follows the config: the management surface, its
 	// network whitelist and the per-key budget. Changing them needs no

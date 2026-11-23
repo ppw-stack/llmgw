@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +23,7 @@ func newTestBox(t *testing.T) *secret.Box {
 // TestPruneKeepsRecentRowsAndDropsOldOnes: the tables must not grow forever,
 // but the retention window must not touch recent rows.
 func TestPruneKeepsRecentRowsAndDropsOldOnes(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 
 	old := time.Now().UTC().AddDate(0, 0, -40)
@@ -83,9 +85,77 @@ func TestPruneKeepsRecentRowsAndDropsOldOnes(t *testing.T) {
 	}
 }
 
+// TestPruneRemovesRowsInBatches: the cleanup deletes in batches, so that the
+// write lock is released between them. A table with more rows than one batch
+// must be emptied completely all the same.
+func TestPruneRemovesRowsInBatches(t *testing.T) {
+	t.Parallel()
+	st := testStore(t)
+
+	const rows = 5
+	old := time.Now().UTC().AddDate(0, 0, -40)
+	for i := 0; i < rows; i++ {
+		if err := st.Audit(AuditEntry{TS: old, Actor: "admin", Action: "login", Target: "admin", Result: "success"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A distinct key per entry, so every entry gets a row of its own in the
+	// daily usage table.
+	for i := 0; i < rows; i++ {
+		if !st.Enqueue(LogEntry{TS: old, RequestID: fmt.Sprintf("r-%d", i), APIKeyID: int64(i), Model: "m", Status: 200}) {
+			t.Fatal("enqueue rejected")
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		logRows, err := st.Logs(LogFilter{Limit: 10, Since: time.Now().AddDate(0, 0, -60)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(logRows) == rows {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("request logs were not written, got %d rows", len(logRows))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Two rows per batch: the tables need more than one batch.
+	res, err := st.prune(time.Now().UTC().AddDate(0, 0, -30), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AuditLogs != rows {
+		t.Fatalf("audit rows pruned = %d, want %d", res.AuditLogs, rows)
+	}
+	if res.RequestLogs != rows {
+		t.Fatalf("request rows pruned = %d, want %d", res.RequestLogs, rows)
+	}
+	if res.UsageDays != rows {
+		t.Fatalf("usage days pruned = %d, want %d", res.UsageDays, rows)
+	}
+
+	audits, err := st.AuditLogs(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 0 {
+		t.Fatalf("audit rows left = %d, want 0", len(audits))
+	}
+	logRows, err := st.Logs(LogFilter{Limit: 10, Since: time.Now().AddDate(0, 0, -60)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logRows) != 0 {
+		t.Fatalf("request rows left = %d, want 0", len(logRows))
+	}
+}
+
 // TestOpenRestrictsFilePermissions: the database holds session hashes, the
 // audit log and encrypted upstream keys, so it is owner-only.
 func TestOpenRestrictsFilePermissions(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "data")
 	path := filepath.Join(dir, "perm.db")
 	testStoreAt(t, path)
@@ -110,11 +180,12 @@ func TestOpenRestrictsFilePermissions(t *testing.T) {
 // -> routing round trip, otherwise a configured local mock stops working after
 // the first restart.
 func TestImportTopologyKeepsPrivateOptIn(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 	box := newTestBox(t)
 	instances := []config.Instance{{
 		Name:                 "local",
-		APIKey:               "k",
+		APIKey:               topologyTestKey(),
 		AllowPrivateUpstream: true,
 		Endpoints:            []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "http://127.0.0.1:9000"}},
 		Models:               []string{"m"},

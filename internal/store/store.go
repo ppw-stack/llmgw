@@ -1017,32 +1017,89 @@ type PruneResult struct {
 	UsageDays   int64
 }
 
+// pruneBatchSize bounds how many rows a single DELETE removes.
+//
+// A DELETE without a limit is one implicit transaction: it holds the write
+// lock of the database until it commits. The store talks to SQLite over a
+// single connection, so such a transaction blocks every other database
+// operation - the asynchronous request log writer above all - for as long as
+// it runs. On a public gateway with a 30 day retention the request log reaches
+// millions of rows, so the rows go away in batches instead.
+const pruneBatchSize = 5000
+
+// pruneBatchPause is the pause between two prune batches. The write lock is
+// free during the pause, so the log writer can take it before the next batch
+// starts.
+const pruneBatchPause = 50 * time.Millisecond
+
 // Prune deletes request logs, audit entries and daily usage rows older than the
 // cutoff. Without it the tables grow for the lifetime of the deployment, which
 // on a public gateway ends in a full disk.
+//
+// The rows go away in batches of pruneBatchSize rows: every batch is its own
+// transaction, so the write lock is released between the batches and the
+// request log writer is not blocked for the whole table.
 func (s *Store) Prune(cutoff time.Time) (PruneResult, error) {
+	return s.prune(cutoff, pruneBatchSize)
+}
+
+// prune is Prune with a configurable batch size, so that the tests can
+// exercise the batching without inserting thousands of rows.
+func (s *Store) prune(cutoff time.Time, batchSize int) (PruneResult, error) {
+	if batchSize <= 0 {
+		batchSize = pruneBatchSize
+	}
 	var out PruneResult
 	stamp := cutoff.UTC().Format(time.RFC3339Nano)
 
-	res, err := s.db.Exec(`DELETE FROM request_logs WHERE ts < ?`, stamp)
+	n, err := s.deleteInBatches(
+		`DELETE FROM request_logs WHERE id IN (SELECT id FROM request_logs WHERE ts < ? ORDER BY id LIMIT ?)`,
+		stamp, batchSize)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("prune request logs: %w", err)
 	}
-	out.RequestLogs, _ = res.RowsAffected()
+	out.RequestLogs = n
 
-	res, err = s.db.Exec(`DELETE FROM audit_logs WHERE ts < ?`, stamp)
+	n, err = s.deleteInBatches(
+		`DELETE FROM audit_logs WHERE id IN (SELECT id FROM audit_logs WHERE ts < ? ORDER BY id LIMIT ?)`,
+		stamp, batchSize)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("prune audit logs: %w", err)
 	}
-	out.AuditLogs, _ = res.RowsAffected()
+	out.AuditLogs = n
 
-	res, err = s.db.Exec(`DELETE FROM usage_daily WHERE day < ?`, cutoff.UTC().Format("2006-01-02"))
+	n, err = s.deleteInBatches(
+		`DELETE FROM usage_daily WHERE rowid IN (SELECT rowid FROM usage_daily WHERE day < ? LIMIT ?)`,
+		cutoff.UTC().Format("2006-01-02"), batchSize)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("prune daily usage: %w", err)
 	}
-	out.UsageDays, _ = res.RowsAffected()
+	out.UsageDays = n
 
 	return out, nil
+}
+
+// deleteInBatches runs one DELETE statement over and over until it removes
+// fewer rows than the batch size. Every statement is its own transaction, so
+// the write lock is held for a single batch only.
+func (s *Store) deleteInBatches(stmt, arg string, batchSize int) (int64, error) {
+	var total int64
+	for {
+		res, err := s.db.Exec(stmt, arg, batchSize)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < int64(batchSize) {
+			return total, nil
+		}
+		// The lock is free again: let the writers in before the next batch.
+		time.Sleep(pruneBatchPause)
+	}
 }
 
 // ---- queries ----

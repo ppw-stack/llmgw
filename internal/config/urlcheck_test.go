@@ -2,9 +2,18 @@ package config
 
 import (
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 )
+
+// urlCheckTestKey returns the upstream key for the URL check tests. Set
+// TEST_URLCHECK_API_KEY to inject a real one; without it the instance carries
+// no key at all, because the check under test never looks at it and no
+// credential literal belongs in the repository.
+func urlCheckTestKey() string {
+	return strings.TrimSpace(os.Getenv("TEST_URLCHECK_API_KEY"))
+}
 
 func TestCheckUpstreamHostRejectsPrivateTargets(t *testing.T) {
 	t.Parallel()
@@ -51,7 +60,7 @@ func TestNormalizeInstancePrivateOptIn(t *testing.T) {
 	t.Parallel()
 	inst := Instance{
 		Name:      "mock",
-		APIKey:    "k",
+		APIKey:    urlCheckTestKey(),
 		Endpoints: []Endpoint{{Protocol: ProtocolOpenAI, BaseURL: "http://127.0.0.1:9000"}},
 		Models:    []string{"m"},
 	}

@@ -310,6 +310,7 @@ func TestPresetInstanceCRUD(t *testing.T) {
 // TestPresetWithoutVariantNamesThePreset checks that a preset without a
 // variant is shown by its family name alone.
 func TestPresetWithoutVariantNamesThePreset(t *testing.T) {
+	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 
 	apiKey := testAPIKey("TEST_OPENCODE_API_KEY", "8888")

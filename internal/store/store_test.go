@@ -127,6 +127,13 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 	t.Fatal("log row was not written")
 }
 
+// testQuotaCredentialValues are deliberately fake credential fixtures. They
+// only exercise the encrypt/store/read path and never match a real account.
+const (
+	testQuotaAccessKeyID     = "test-access-key-id"
+	testQuotaSecretAccessKey = "test-secret-access-key"
+)
+
 func TestInstanceQuotaCredentialRoundTrip(t *testing.T) {
 	st := testStore(t)
 	box, err := secret.New(make([]byte, 32))
@@ -134,8 +141,8 @@ func TestInstanceQuotaCredentialRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	encrypted, err := encryptQuotaCredential(box, config.QuotaCredential{
-		AccessKeyID:     "AKLT-test",
-		SecretAccessKey: "sk-secret",
+		AccessKeyID:     testQuotaAccessKeyID,
+		SecretAccessKey: testQuotaSecretAccessKey,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +150,7 @@ func TestInstanceQuotaCredentialRoundTrip(t *testing.T) {
 	if encrypted == "" {
 		t.Fatal("the credential was not encrypted")
 	}
-	if strings.Contains(encrypted, "sk-secret") {
+	if strings.Contains(encrypted, testQuotaSecretAccessKey) {
 		t.Fatal("the credential is stored in the clear")
 	}
 
@@ -162,8 +169,8 @@ func TestInstanceQuotaCredentialRoundTrip(t *testing.T) {
 	if len(instances) != 1 {
 		t.Fatalf("instances = %+v", instances)
 	}
-	if instances[0].QuotaCredential.AccessKeyID != "AKLT-test" ||
-		instances[0].QuotaCredential.SecretAccessKey != "sk-secret" {
+	if instances[0].QuotaCredential.AccessKeyID != testQuotaAccessKeyID ||
+		instances[0].QuotaCredential.SecretAccessKey != testQuotaSecretAccessKey {
 		t.Fatalf("credential = %+v", instances[0].QuotaCredential)
 	}
 }
@@ -177,6 +184,7 @@ func TestInstanceQuotaCredentialColumnIsAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = db.Close() }()
 	_, err = db.Exec(`CREATE TABLE instances (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL UNIQUE,

@@ -455,14 +455,14 @@ func migrateInstanceQuotaCredential(ctx context.Context, db *sql.DB, log *slog.L
 	}
 	cols, err := tableColumns(ctx, db, "instances")
 	if err != nil {
-		return err
+		return fmt.Errorf("read instances table columns: %w", err)
 	}
 	if len(cols) == 0 || cols["quota_cred_enc"] {
 		return nil
 	}
 	if _, err := db.ExecContext(ctx,
 		`ALTER TABLE instances ADD COLUMN quota_cred_enc TEXT NOT NULL DEFAULT ''`); err != nil {
-		return err
+		return fmt.Errorf("add instances quota credential column: %w", err)
 	}
 	log.Info("added the quota credential column to instances")
 	return nil

@@ -414,7 +414,7 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 		}
 		encryptedCredential, err := encryptQuotaCredential(box, inst.QuotaCredential)
 		if err != nil {
-			return err
+			return fmt.Errorf("instance %q: encrypt quota credential: %w", inst.Name, err)
 		}
 		spec := InstanceSpec{
 			Name:                     inst.Name,

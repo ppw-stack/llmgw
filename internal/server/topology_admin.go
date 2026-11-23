@@ -220,7 +220,15 @@ func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
 		UpdatedAt:    rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 	if rec.EncryptedQuotaCredential != "" {
-		view.QuotaCredential = s.quotaCredentialView(rec.EncryptedQuotaCredential)
+		credential, err := s.quotaCredentialView(rec.EncryptedQuotaCredential)
+		if err != nil {
+			// A broken or foreign credential must not hide the whole
+			// instance list: log it with the instance name and degrade to
+			// an empty credential.
+			s.log.Error("read quota credential", "instance", rec.Name, "err", err)
+		} else {
+			view.QuotaCredential = credential
+		}
 	}
 	for _, ep := range rec.Endpoints {
 		view.Endpoints = append(view.Endpoints, endpointView{Protocol: ep.Protocol, BaseURL: ep.BaseURL})
@@ -843,24 +851,28 @@ func (s *Server) encryptQuotaCredential(cred config.QuotaCredential) (string, er
 	if err != nil {
 		return "", fmt.Errorf("encode quota credential: %w", err)
 	}
-	return s.box.Encrypt(string(raw))
+	encrypted, err := s.box.Encrypt(string(raw))
+	if err != nil {
+		return "", fmt.Errorf("encrypt quota credential: %w", err)
+	}
+	return encrypted, nil
 }
 
 // quotaCredentialView masks the secret of the quota credential. The access key
 // id stays visible: it identifies the credential without granting access.
-func (s *Server) quotaCredentialView(encrypted string) *quotaCredentialView {
+func (s *Server) quotaCredentialView(encrypted string) (*quotaCredentialView, error) {
 	raw, err := s.box.Decrypt(encrypted)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("decrypt quota credential: %w", err)
 	}
 	var cred config.QuotaCredential
 	if err := json.Unmarshal([]byte(raw), &cred); err != nil {
-		return nil
+		return nil, fmt.Errorf("decode quota credential: %w", err)
 	}
 	return &quotaCredentialView{
 		AccessKeyID: cred.AccessKeyID,
 		SecretHint:  secretHint(cred.SecretAccessKey),
-	}
+	}, nil
 }
 
 // secretHint masks a secret the way the upstream key hint does.

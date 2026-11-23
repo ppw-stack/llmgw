@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -25,14 +24,15 @@ func (s *Server) adminQuota(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, quotaReportsResponse{Reports: s.quotaReports(r.Context())})
+	writeJSON(w, http.StatusOK, quotaReportsResponse{Reports: s.quotaReports(r)})
 }
 
 // quotaReports asks the vendor quota endpoints for every instance.
-func (s *Server) quotaReports(ctx context.Context) []quota.Report {
+func (s *Server) quotaReports(r *http.Request) []quota.Report {
 	targets, err := s.quotaTargets()
 	if err != nil {
-		s.log.Error("read instances for quota", "err", err)
+		s.log.Error("read instances for quota", "method", r.Method, "path", r.URL.Path,
+			"request_id", requestID(r), "err", err)
 		return []quota.Report{}
 	}
 	reports := make([]quota.Report, len(targets))
@@ -41,7 +41,7 @@ func (s *Server) quotaReports(ctx context.Context) []quota.Report {
 		wg.Add(1)
 		go func(i int, target quota.Target) {
 			defer wg.Done()
-			reports[i] = s.quota.Report(ctx, target)
+			reports[i] = s.quota.Report(r.Context(), target)
 		}(i, target)
 	}
 	wg.Wait()
@@ -83,7 +83,7 @@ func (s *Server) quotaTargets() ([]quota.Target, error) {
 func (s *Server) decryptQuotaCredential(encrypted string) (quota.Credential, error) {
 	raw, err := s.box.Decrypt(encrypted)
 	if err != nil {
-		return quota.Credential{}, err
+		return quota.Credential{}, fmt.Errorf("decrypt quota credential: %w", err)
 	}
 	var cred config.QuotaCredential
 	if err := json.Unmarshal([]byte(raw), &cred); err != nil {

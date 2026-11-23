@@ -477,6 +477,31 @@ models:
 	}
 }
 
+func TestPresetModelsEndpoint(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"minimax-mplan-global": "https://api.minimax.io/v1/models",
+		"minimax-mplan-cn":     "https://api.minimax.cn/v1/models",
+		"opencode-go":          "https://opencode.ai/inference/go/openai/v1/models",
+		"ark-coding-plan-cn":   "https://ark.cn-beijing.volces.com/api/coding/v3/models",
+	}
+	for id, want := range cases {
+		got, protocol, err := PresetModelsEndpoint(id)
+		if err != nil {
+			t.Fatalf("preset %q: %v", id, err)
+		}
+		if got != want {
+			t.Fatalf("preset %q endpoint = %q, want %q", id, got, want)
+		}
+		if protocol != ProtocolOpenAI {
+			t.Fatalf("preset %q protocol = %q", id, protocol)
+		}
+	}
+	if _, _, err := PresetModelsEndpoint("missing"); err == nil {
+		t.Fatal("expected an error for an unknown preset")
+	}
+}
+
 // TestLegacyProviderExpandsToInstanceAndModel proves the old configuration
 // form keeps working and produces the same routing shape.
 func TestLegacyProviderExpandsToInstanceAndModel(t *testing.T) {

@@ -387,6 +387,40 @@ tbody tr:last-child td {
   margin: 0 6px 6px 0;
 }
 
+.candidate-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.candidate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.candidate:hover {
+  border-color: var(--primary);
+}
+
+.candidate.added {
+  border-color: var(--primary);
+  background: rgba(47, 111, 235, 0.08);
+}
+
+.candidate-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
 .status-ok {
   color: var(--ok);
   font-weight: 600;

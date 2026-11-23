@@ -155,6 +155,36 @@ OpenCode Go 与 MiniMax 编码套餐直接用上游 Key 查额度；火山方舟
 
 `models` 是该预设的建议模型名，可以在创建接入点时改。OpenCode Go 走 `/responses` 与 Google 端点的模型（GPT、Grok、Muse Spark、Gemini）不在建议列表里——本网关只提供 chat/completions 与 Anthropic Messages 两个入口。
 
+#### 查询上游可用模型
+
+创建内置端点时，可以用待保存的 Key 向上游模型列表接口查询候选模型。该接口只用于本次查询，Key 不会落库。
+
+```
+POST /admin/api/preset-models
+{
+  "preset": "opencode-go",
+  "api_key": "sk-..."
+}
+
+200 {
+  "models": [
+    {"id": "glm-5.3", "protocols": ["openai", "anthropic"]},
+    {"id": "claude-haiku-5-5", "protocols": ["anthropic"]}
+  ],
+  "suggested": ["glm-5.3", "..."],
+  "warning": ""
+}
+```
+
+- `models` 是上游返回、且声明支持 `chat/completions` 或 `messages` 的模型。`protocols` 来自上游元数据，为空表示上游未提供该信息。
+- `suggested` 是预设的静态建议列表，查询失败时作为兜底。
+- 查询失败、超时或没有可用模型时仍返回 `200`，`models` 为空并在 `warning` 中说明原因。
+- 不同预设的列表含义不同：
+  - `opencode-go`：套餐内模型，可直接使用。
+  - `minimax-*`：上游账号可见模型，可能包含已下线模型（例如 `MiniMax-M2`）。
+  - `ark-coding-plan-cn`：上游账号可见模型，**不保证在 Coding Plan 套餐内**；不在套餐内的模型调用时返回 `404 UnsupportedModel`。
+- 内置端点只支持预设目录里的 `preset`；自定义端点不提供该查询。
+
 ### 上游接入点
 
 #### 列表

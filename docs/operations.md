@@ -180,7 +180,8 @@ GET /metrics    Prometheus
 | `gw_upstream_errors_total{instance}` | 上游错误（按上游接入点） |
 | `gw_log_dropped_total` | 日志队列溢出丢条数 |
 
-`/metrics` 默认公开。公网部署时设置 `server.metrics_token`，之后需以
+未设置 `server.metrics_token` 时，`/metrics` 只对本机与 `trusted_proxies` 可读，
+其他来源返回 `403`。要从别的机器抓取请设置令牌，之后以
 `Authorization: Bearer <token>` 或 `?token=<token>` 访问；也可在反代层限制来源 IP。
 
 日志为 JSON，一行一条，`request_id` 可与响应头 `X-Request-Id` 对应。
@@ -268,9 +269,13 @@ server {
 ```yaml
 server:
   trusted_proxies: ["127.0.0.1/32"]   # 反代地址；只有它传来的 XFF 才会被信任
+  secure_cookie: true                 # 反代没传 X-Forwarded-Proto 时也能锁死 Cookie
 ```
 
-`X-Forwarded-Proto: https` 会让会话 Cookie 自动带上 `Secure`，并触发 HSTS 响应头。
+只有来自 `trusted_proxies` 的 `X-Forwarded-Proto: https` 才会被采信，它会让会话 Cookie
+带上 `Secure` 并触发 HSTS 响应头；客户端自己伪造这个头不会生效。
+反代务必用 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 追加真实地址，
+否则登录限速与审计里的来源 IP 不可信。
 
 ### 9.3 其他
 
@@ -278,7 +283,16 @@ server:
 - 网关 Key 在进程内缓存，创建/停用/删除立即生效；启动时从数据库加载。
 - 上游 Key 来自环境变量或控制台，AES-256-GCM 加密后写入数据库，不出现在任何 API 响应中（仅返回末四位掩码）。
 - 加密主密钥来自 `server.master_key` 或数据库目录的 `master.key`（0600）。请与数据库一起备份，并限制文件权限。
-- `/metrics` 未内置鉴权；公网暴露时请在反代层限制来源 IP 或加 Basic Auth。
+- `/metrics` 在未配置令牌时只允许本机与 `trusted_proxies` 读取；公网抓取请设 `server.metrics_token`。
+- 管理面可用 `server.admin_allowed_cidrs` 限制到运维网段，控制台 API 与登录接口一并生效。
+- 数据面按 Key 限速：`server.key_rpm`（每分钟请求数）与 `server.key_max_concurrent`（并发上限），
+  默认示例值 600 / 32；两者都为 0 表示不限制，公网部署不建议留空。
+- 转发到上游的请求头会剥离 `Cookie`、`Authorization`、`X-Forwarded-*`、`X-Real-IP` 等敏感头
+  （控制台与数据面同源，浏览器会把管理会话 Cookie 带到 API 请求上）；其余厂商需要的头照常透传。
+  上游响应里的 `Set-Cookie`、CSP、HSTS 等头会被丢弃，避免上游覆盖网关自身的安全头。
+- 上游地址默认禁止 loopback、内网与云元数据网段，防止控制台被拿下后成为内网代理；
+  本地 mock 需在实例上设置 `allow_private_upstream: true`。
+- 请求日志、审计日志与按日用量可用 `database.retention_days` 自动清理（0 表示永久保留）。
 - 控制台已设置 CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - 建议定期轮换管理员密码（控制台“修改密码”）与上游 Key。
 

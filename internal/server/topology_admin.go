@@ -34,6 +34,8 @@ type instanceInput struct {
 	MaxFails        *int                  `json:"max_fails"`
 	CooldownSecs    *int                  `json:"cooldown_secs"`
 	TimeoutSecs     *int                  `json:"timeout_secs"`
+	// AllowPrivateUpstream opts an instance into loopback/private endpoints.
+	AllowPrivateUpstream bool `json:"allow_private_upstream"`
 }
 
 // quotaCredentialInput is the write form of the extra credential some
@@ -66,8 +68,10 @@ type instanceView struct {
 	MaxFails        int                  `json:"max_fails"`
 	CooldownSecs    int                  `json:"cooldown_secs"`
 	TimeoutSecs     int                  `json:"timeout_secs"`
-	CreatedAt       string               `json:"created_at"`
-	UpdatedAt       string               `json:"updated_at"`
+	// AllowPrivateUpstream is the instance's loopback/private opt-in.
+	AllowPrivateUpstream bool   `json:"allow_private_upstream"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
 }
 
 type endpointView struct {
@@ -315,17 +319,18 @@ func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanceView {
 	view := instanceView{
-		ID:           rec.ID,
-		Name:         rec.Name,
-		Preset:       rec.Preset,
-		Source:       "custom",
-		KeyHint:      s.keyHint(rec.EncryptedKey),
-		Models:       append([]string{}, rec.Models...),
-		MaxFails:     rec.MaxFails,
-		CooldownSecs: rec.CooldownSecs,
-		TimeoutSecs:  rec.TimeoutSecs,
-		CreatedAt:    rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:    rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		ID:                   rec.ID,
+		Name:                 rec.Name,
+		Preset:               rec.Preset,
+		Source:               "custom",
+		KeyHint:              s.keyHint(rec.EncryptedKey),
+		Models:               append([]string{}, rec.Models...),
+		MaxFails:             rec.MaxFails,
+		CooldownSecs:         rec.CooldownSecs,
+		TimeoutSecs:          rec.TimeoutSecs,
+		AllowPrivateUpstream: rec.AllowPrivateUpstream,
+		CreatedAt:            rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:            rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 	if rec.EncryptedQuotaCredential != "" {
 		credential, err := s.quotaCredentialView(rec.EncryptedQuotaCredential)
@@ -412,6 +417,7 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		MaxFails:                 instance.MaxFails,
 		CooldownSecs:             instance.CooldownSecs,
 		TimeoutSecs:              instance.TimeoutSecs,
+		AllowPrivateUpstream:     instance.AllowPrivateUpstream,
 	})
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -512,6 +518,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		MaxFails:                 instance.MaxFails,
 		CooldownSecs:             instance.CooldownSecs,
 		TimeoutSecs:              instance.TimeoutSecs,
+		AllowPrivateUpstream:     instance.AllowPrivateUpstream,
 	}); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -538,6 +545,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 			MaxFails:                 instance.MaxFails,
 			CooldownSecs:             instance.CooldownSecs,
 			TimeoutSecs:              instance.TimeoutSecs,
+			AllowPrivateUpstream:     instance.AllowPrivateUpstream,
 		},
 		CreatedAt: existing.CreatedAt,
 		UpdatedAt: time.Now().UTC(),
@@ -818,9 +826,10 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 		presetID = strings.TrimSpace(*in.Preset)
 	}
 	instance := config.Instance{
-		Name:   strings.TrimSpace(in.Name),
-		Preset: presetID,
-		APIKey: strings.TrimSpace(in.APIKeyString()),
+		Name:                 strings.TrimSpace(in.Name),
+		Preset:               presetID,
+		APIKey:               strings.TrimSpace(in.APIKeyString()),
+		AllowPrivateUpstream: in.AllowPrivateUpstream,
 	}
 	if in.QuotaCredential != nil {
 		instance.QuotaCredential = config.QuotaCredential{

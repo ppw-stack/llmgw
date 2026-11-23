@@ -67,6 +67,10 @@ type Instance struct {
 	MaxFails        int             `yaml:"max_fails"`
 	CooldownSecs    int             `yaml:"cooldown_secs"`
 	TimeoutSecs     int             `yaml:"timeout_secs"`
+	// AllowPrivateUpstream permits endpoints that point at loopback or a
+	// private address. Without it, such an endpoint is rejected so a stolen
+	// admin session cannot use the gateway as an internal-network proxy.
+	AllowPrivateUpstream bool `yaml:"allow_private_upstream"`
 }
 
 // ModelInstance binds a model to one instance.
@@ -104,6 +108,9 @@ type EffectiveInstance struct {
 	MaxFails     int
 	CooldownSecs int
 	Timeout      time.Duration
+	// AllowPrivateUpstream mirrors the instance flag so the transport can
+	// re-check the resolved address right before dialing.
+	AllowPrivateUpstream bool
 }
 
 // EffectiveEndpoint is one protocol entrance of an instance.
@@ -257,7 +264,7 @@ func NormalizeInstance(in *Instance) error {
 			return fmt.Errorf("instance %q: protocol %q is declared twice", in.Name, ep.Protocol)
 		}
 		seen[ep.Protocol] = true
-		base, err := normalizeBaseURL(in.Name, "endpoints[].base_url", ep.BaseURL)
+		base, err := normalizeBaseURL(in.Name, "endpoints[].base_url", ep.BaseURL, in.AllowPrivateUpstream)
 		if err != nil {
 			return err
 		}
@@ -374,11 +381,12 @@ func (c *Config) Effective() (Effective, error) {
 		known[inst.Name] = true
 
 		eff := EffectiveInstance{
-			Name:         inst.Name,
-			APIKey:       inst.APIKey,
-			Models:       append([]string(nil), inst.Models...),
-			MaxFails:     inst.MaxFails,
-			CooldownSecs: inst.CooldownSecs,
+			Name:                 inst.Name,
+			APIKey:               inst.APIKey,
+			Models:               append([]string(nil), inst.Models...),
+			MaxFails:             inst.MaxFails,
+			CooldownSecs:         inst.CooldownSecs,
+			AllowPrivateUpstream: inst.AllowPrivateUpstream,
 		}
 		if eff.MaxFails <= 0 {
 			eff.MaxFails = DefaultMaxFails

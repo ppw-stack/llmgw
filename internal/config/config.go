@@ -81,11 +81,25 @@ type Server struct {
 	ShutdownTimeout   Duration `yaml:"shutdown_timeout"`
 	MaxBodyBytes      int64    `yaml:"max_body_bytes"`
 
+	// AdminAllowedCIDRs restricts the whole admin surface (console API and
+	// login). Empty means "everyone the listener can reach", which is only
+	// acceptable behind a network boundary.
+	AdminAllowedCIDRs []string `yaml:"admin_allowed_cidrs"`
+
+	// KeyRPM is the per-gateway-key request budget per minute. Zero disables
+	// the limiter. KeyMaxConcurrent caps in-flight requests of one key.
+	KeyRPM           int `yaml:"key_rpm"`
+	KeyMaxConcurrent int `yaml:"key_max_concurrent"`
+
 	TrustedPrefixes []netip.Prefix `yaml:"-"`
+	AdminPrefixes   []netip.Prefix `yaml:"-"`
 }
 
 type Database struct {
 	Path string `yaml:"path"`
+	// RetentionDays prunes request logs, audit logs and daily usage rows
+	// older than this many days. Zero keeps everything forever.
+	RetentionDays int `yaml:"retention_days"`
 }
 
 type Log struct {
@@ -290,8 +304,37 @@ func (c *Config) normalize() error {
 	if c.Server.MaxBodyBytes <= 0 {
 		c.Server.MaxBodyBytes = 32 << 20
 	}
+	if c.Server.KeyRPM < 0 {
+		return fmt.Errorf("server.key_rpm must not be negative")
+	}
+	if c.Server.KeyMaxConcurrent < 0 {
+		return fmt.Errorf("server.key_max_concurrent must not be negative")
+	}
+	for _, raw := range c.Server.AdminAllowedCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			addr, err := netip.ParseAddr(raw)
+			if err != nil {
+				return fmt.Errorf("server.admin_allowed_cidrs: invalid address %q", raw)
+			}
+			c.Server.AdminPrefixes = append(c.Server.AdminPrefixes,
+				netip.PrefixFrom(addr, addr.BitLen()))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("server.admin_allowed_cidrs: invalid CIDR %q", raw)
+		}
+		c.Server.AdminPrefixes = append(c.Server.AdminPrefixes, prefix.Masked())
+	}
 	if c.Database.Path == "" {
 		return fmt.Errorf("database.path is required")
+	}
+	if c.Database.RetentionDays < 0 {
+		return fmt.Errorf("database.retention_days must not be negative")
 	}
 	if c.UpstreamTimeout <= 0 {
 		c.UpstreamTimeout = Duration(DefaultTimeout)
@@ -383,7 +426,7 @@ func (c *Config) expandLegacyProviders() error {
 	return nil
 }
 
-func normalizeBaseURL(owner, field, raw string) (string, error) {
+func normalizeBaseURL(owner, field, raw string, allowPrivate bool) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
@@ -391,6 +434,9 @@ func normalizeBaseURL(owner, field, raw string) (string, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", fmt.Errorf("%s: %s must be an absolute http(s) URL, got %q",
 			owner, field, raw)
+	}
+	if err := CheckUpstreamHost(owner, field, raw, allowPrivate); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(raw, "/"), nil
 }

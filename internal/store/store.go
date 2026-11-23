@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS instances (
     quota_cred_enc  TEXT    NOT NULL DEFAULT '',
     endpoints_json  TEXT    NOT NULL DEFAULT '[]',
     models_json     TEXT    NOT NULL DEFAULT '[]',
+    allow_private   INTEGER NOT NULL DEFAULT 0,
     max_fails       INTEGER NOT NULL DEFAULT 3,
     cooldown_secs   INTEGER NOT NULL DEFAULT 30,
     timeout_secs    INTEGER NOT NULL DEFAULT 0,
@@ -227,9 +228,17 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate instance quota credential: %w", err)
 	}
+	if err := migrateInstanceAllowPrivate(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance allow_private: %w", err)
+	}
 	if err := migrateModelInstanceWindows(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate model instance windows: %w", err)
+	}
+	restrictFile(path)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		restrictFile(path + suffix)
 	}
 	s := &Store{
 		db:   db,
@@ -246,7 +255,17 @@ func ensureDir(path string) error {
 	if dir == "" || dir == "." {
 		return nil
 	}
-	return os.MkdirAll(dir, 0o755)
+	// The directory holds the database (session hashes, audit log, encrypted
+	// upstream keys) and the master key, so it is not world readable.
+	return os.MkdirAll(dir, 0o700)
+}
+
+// restrictFile trims a file to owner-only permissions. It is best effort: the
+// database may live on a filesystem that does not support POSIX modes.
+func restrictFile(path string) {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return
+	}
 }
 
 // migrateProviders converts the legacy providers table into the instance and
@@ -465,6 +484,27 @@ func migrateInstanceQuotaCredential(ctx context.Context, db *sql.DB, log *slog.L
 		return fmt.Errorf("add instances quota credential column: %w", err)
 	}
 	log.Info("added the quota credential column to instances")
+	return nil
+}
+
+// migrateInstanceAllowPrivate adds the column that lets an instance opt into
+// loopback or private endpoints. Existing rows keep the secure default: 0.
+func migrateInstanceAllowPrivate(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
+	if err != nil {
+		return fmt.Errorf("read instances table columns: %w", err)
+	}
+	if len(cols) == 0 || cols["allow_private"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE instances ADD COLUMN allow_private INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add instances allow_private column: %w", err)
+	}
+	log.Info("added the allow_private column to instances")
 	return nil
 }
 
@@ -968,6 +1008,41 @@ func (s *Store) writeBatch(batch []LogEntry) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// PruneResult reports how many rows each retention pass removed.
+type PruneResult struct {
+	RequestLogs int64
+	AuditLogs   int64
+	UsageDays   int64
+}
+
+// Prune deletes request logs, audit entries and daily usage rows older than the
+// cutoff. Without it the tables grow for the lifetime of the deployment, which
+// on a public gateway ends in a full disk.
+func (s *Store) Prune(cutoff time.Time) (PruneResult, error) {
+	var out PruneResult
+	stamp := cutoff.UTC().Format(time.RFC3339Nano)
+
+	res, err := s.db.Exec(`DELETE FROM request_logs WHERE ts < ?`, stamp)
+	if err != nil {
+		return out, err
+	}
+	out.RequestLogs, _ = res.RowsAffected()
+
+	res, err = s.db.Exec(`DELETE FROM audit_logs WHERE ts < ?`, stamp)
+	if err != nil {
+		return out, err
+	}
+	out.AuditLogs, _ = res.RowsAffected()
+
+	res, err = s.db.Exec(`DELETE FROM usage_daily WHERE day < ?`, cutoff.UTC().Format("2006-01-02"))
+	if err != nil {
+		return out, err
+	}
+	out.UsageDays, _ = res.RowsAffected()
+
+	return out, nil
 }
 
 // ---- queries ----

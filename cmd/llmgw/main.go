@@ -113,20 +113,27 @@ func main() {
 	bootstrapKey(st, logger)
 
 	forwarder := transport.NewWithTimeout(rt, st, logger, cfg.UpstreamTimeout.Value())
+	// Refuse to dial loopback and private addresses unless an instance opted in
+	// with allow_private_upstream. This is what keeps a stolen admin session
+	// from turning the gateway into an internal-network proxy.
+	forwarder.SetBlockPrivate(true)
 
 	srv, err := server.New(server.Options{
-		Router:         rt,
-		Forwarder:      forwarder,
-		Store:          st,
-		Box:            boxCipher,
-		AdminToken:     adminToken,
-		MetricsToken:   cfg.Server.MetricsToken,
-		SessionTTL:     cfg.Server.SessionTTL.Value(),
-		SecureCookie:   cfg.Server.SecureCookie,
-		TrustedProxies: cfg.Server.TrustedPrefixes,
-		MaxBody:        cfg.Server.MaxBodyBytes,
-		Log:            logger,
-		UI:             webui.Handler(),
+		Router:           rt,
+		Forwarder:        forwarder,
+		Store:            st,
+		Box:              boxCipher,
+		AdminToken:       adminToken,
+		MetricsToken:     cfg.Server.MetricsToken,
+		SessionTTL:       cfg.Server.SessionTTL.Value(),
+		SecureCookie:     cfg.Server.SecureCookie,
+		TrustedProxies:   cfg.Server.TrustedPrefixes,
+		AdminPrefixes:    cfg.Server.AdminPrefixes,
+		KeyRPM:           cfg.Server.KeyRPM,
+		KeyMaxConcurrent: cfg.Server.KeyMaxConcurrent,
+		MaxBody:          cfg.Server.MaxBodyBytes,
+		Log:              logger,
+		UI:               webui.Handler(),
 	})
 	if err != nil {
 		logger.Error("initialize server", "err", err)
@@ -146,6 +153,10 @@ func main() {
 		logger.Warn("clean expired sessions", "err", err)
 	}
 	go cleanupSessions(ctx, st, logger)
+	if days := cfg.Database.RetentionDays; days > 0 {
+		go pruneHistory(ctx, st, logger, days)
+	}
+	warnInsecureDefaults(cfg, logger)
 	go watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
 		dbInstances, dbModels, err := st.Topology(boxCipher)
 		if err != nil {
@@ -329,6 +340,74 @@ func cleanupSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 			if err := st.DeleteExpiredSessions(); err != nil {
 				log.Warn("clean expired sessions", "err", err)
 			}
+		}
+	}
+}
+
+// pruneHistory keeps the request log, the audit log and the daily usage table
+// from growing forever. It runs once at startup and then daily.
+func pruneHistory(ctx context.Context, st *store.Store, log *slog.Logger, days int) {
+	prune := func() {
+		cutoff := time.Now().UTC().AddDate(0, 0, -days)
+		res, err := st.Prune(cutoff)
+		if err != nil {
+			log.Warn("prune history", "err", err)
+			return
+		}
+		if res.RequestLogs+res.AuditLogs+res.UsageDays > 0 {
+			log.Info("pruned history",
+				"request_logs", res.RequestLogs, "audit_logs", res.AuditLogs,
+				"usage_days", res.UsageDays, "retention_days", days)
+		}
+	}
+	prune()
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
+}
+
+// warnInsecureDefaults points out the settings that are safe on a laptop and
+// dangerous on the public internet. It never refuses to start: the operator may
+// deliberately run behind a network boundary.
+func warnInsecureDefaults(cfg *config.Config, log *slog.Logger) {
+	if cfg.Server.AdminPassword != "" && len(cfg.Server.AdminPassword) < 12 {
+		log.Warn("server.admin_password is shorter than 12 characters; use a long random password on a reachable host")
+	}
+	if len(cfg.Server.AdminPrefixes) == 0 {
+		log.Warn("server.admin_allowed_cidrs is empty: the admin console is reachable from anywhere the listener is; " +
+			"restrict it by network policy or set admin_allowed_cidrs")
+	}
+	if cfg.Server.MetricsToken == "" {
+		log.Warn("server.metrics_token is empty: /metrics is readable only from localhost and trusted proxies; " +
+			"set a token to scrape it from elsewhere")
+	}
+	if cfg.Server.AdminToken != "" {
+		log.Warn("server.admin_token is configured: it is a static, never-expiring credential with full admin rights")
+	}
+	if cfg.Server.KeyRPM == 0 && cfg.Server.KeyMaxConcurrent == 0 {
+		log.Warn("no per-key limits are configured (key_rpm / key_max_concurrent): one leaked gateway key can spend upstream quota without bound")
+	}
+	if !cfg.Server.SecureCookie {
+		log.Warn("server.secure_cookie is false: the admin session cookie is only marked Secure when the request itself is HTTPS")
+	}
+	for _, inst := range cfg.Instances {
+		for _, ep := range inst.Endpoints {
+			if strings.HasPrefix(strings.ToLower(ep.BaseURL), "http://") {
+				log.Warn("upstream endpoint uses plain HTTP; the upstream key travels in clear text",
+					"instance", inst.Name, "base_url", ep.BaseURL)
+			}
+		}
+	}
+	for _, inst := range cfg.Instances {
+		if inst.AllowPrivateUpstream {
+			log.Warn("instance allows private/loopback upstreams", "instance", inst.Name)
 		}
 	}
 }

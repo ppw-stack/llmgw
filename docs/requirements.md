@@ -134,9 +134,10 @@ Web 控制台（`/`，Vue 3 构建产物内嵌进二进制）：
 - 会话令牌随机 32 字节，数据库只存 SHA-256 哈希，默认 12 小时过期。
 - Cookie 属性：`HttpOnly`、`SameSite=Strict`、HTTPS 下 `Secure`。
 - 登录失败按客户端 IP 限速（5 分钟 10 次），超限返回 `429` + `Retry-After`。
+- 可选 `server.admin_allowed_cidrs`：控制台 API 与登录接口只接受白名单来源，其余返回 `403`。
 - 管理写操作写审计日志（登录、登出、改密、Key 增删改）。
 - 可选 `server.admin_token` 作为脚本用 Bearer token；未配置则禁用。
-- 客户端 IP 仅在直连方属于 `trusted_proxies` 时才采信 `X-Forwarded-For`。
+- 客户端 IP 仅在直连方属于 `trusted_proxies` 时才采信 `X-Forwarded-For`；`X-Forwarded-Proto` 同样如此，客户端伪造不生效。
 
 REST API：
 
@@ -146,6 +147,7 @@ REST API：
 - 旧 `GET /admin/api/providers` 保留为只读聚合视图，写入方法已移除；依赖旧写入接口的管理脚本需迁移至 `instances` / `models`。
 - `GET /admin/api/provider-presets` 返回编译进程序的内置端点目录。
 - `GET /admin/api/logs` 按 key/模型/时间过滤。
+- 上游 `endpoints[].base_url` 默认拒绝 loopback/内网/云元数据地址，需实例级 `allow_private_upstream` 才放行；运行期拨号前按解析结果再校验一次。
 - `GET /admin/api/usage` 按天/模型/Key 聚合。
 - 管理鉴权：`admin_token`（配置或环境变量），通过 `Authorization: Bearer` 校验。
 
@@ -163,6 +165,9 @@ REST API：
 | NFR-08 | 部署 | 单二进制（darwin/linux, amd64/arm64），无 cgo |
 | NFR-09 | 管理认证 | bcrypt 密码、HttpOnly 会话 Cookie、登录限速、审计日志 |
 | NFR-10 | 公网 | 反代终止 TLS、trusted_proxies、安全响应头、CSP |
+| NFR-11 | 数据面配额 | 按网关 Key 限速与并发上限（`key_rpm` / `key_max_concurrent`），超限 `429` |
+| NFR-12 | 数据外泄 | 转发上游时剥离 `Cookie`/`Authorization`/`X-Forwarded-*`/`X-Real-IP`；丢弃上游 `Set-Cookie` 与安全头 |
+| NFR-13 | 数据保留 | `database.retention_days` 到期清理请求日志、审计日志与按日用量 |
 
 ## 6. 验收标准
 
@@ -178,7 +183,7 @@ REST API：
 10. 改 `config.yaml` 后 1s 内生效，在途流式请求不受影响。
 11. `/metrics` 可读出请求数、延迟、token；日志队列满时丢弃计数递增且请求不受影响。
 12. 新建或停用网关 Key 立即生效，无需重启；停用后下一次请求即 `401`。
-13. 配置 `server.metrics_token` 后，未携带令牌访问 `/metrics` 返回 `401`。
+13. 配置 `server.metrics_token` 后，未携带令牌访问 `/metrics` 返回 `401`；未配置令牌时非本机/非可信代理访问返回 `403`。
 14. 上游响应超过 64 MiB 时返回 `502`，不会向客户端返回截断的 JSON。
 15. 流式上游在超时内无新数据时，连接被主动关闭并记录日志。
 16. 未上报 usage 的上游响应被标记 `usage_estimated=true` 并给出按字节估算的 token。
@@ -187,6 +192,12 @@ REST API：
 19. 备实例不可用且主实例在冷却期内时返回 `503`，冷却结束后自动恢复。
 20. 候选配了时间窗口时，窗口内按窗口内的优先级插队，窗口外回到基础优先级；
     窗口外的候选（`only`）不参与路由，全部候选都被关掉时返回 `503`。
+21. 实例地址为 `http://127.0.0.1:...` 或云元数据地址时，保存返回 `400`；加
+    `allow_private_upstream: true` 后可保存，运行期拨号放行。
+22. 网关 Key 超过 `key_rpm` 后返回 `429` + `Retry-After`；并发超过 `key_max_concurrent` 同样 `429`。
+23. 浏览器带上 `Cookie` 调数据面时，上游收到的请求头里没有 `Cookie`、`X-Forwarded-For`、`X-Real-IP`。
+24. 上游返回 `Set-Cookie`/CSP/HSTS 时，客户端只看到网关自己设置的头，对话响应带 `Cache-Control: no-store`。
+25. 配置 `admin_allowed_cidrs` 后，白名单外来源访问 `/admin/api/*` 返回 `403`。
 
 ## 7. 里程碑
 

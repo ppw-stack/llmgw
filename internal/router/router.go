@@ -35,6 +35,9 @@ type Target struct {
 	// Windows are the compiled time windows of the candidate. They decide
 	// the effective priority at the moment of the request.
 	Windows []config.EffectiveWindow
+	// AllowPrivate reports whether the instance may dial a loopback or
+	// private address.
+	AllowPrivate bool
 }
 
 // Snapshot is an immutable routing table swapped atomically on reload.
@@ -121,6 +124,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					MaxFails:      inst.MaxFails,
 					Cooldown:      time.Duration(inst.CooldownSecs) * time.Second,
 					Windows:       cand.Windows,
+					AllowPrivate:  inst.AllowPrivateUpstream,
 				})
 				if models[ep.Protocol] == nil {
 					models[ep.Protocol] = map[string]struct{}{}

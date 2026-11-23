@@ -60,8 +60,37 @@ curl -b /tmp/llmgw-cookies -H 'Content-Type: application/json' \
 | `gpt-test` | 两个入口 | 正常响应，带 usage |
 | `gpt-alias` | 两个入口 | 对外名映射为上游 `gpt-upstream-name` |
 | `claude-test` | 两个入口 | 正常响应，带 usage |
+| `gpt-windowed` | 两个入口 | 时间窗口示例：北京时间 00:00-08:00 走 `mock-night`，其他时段走 `mock` |
 
 mock 支持 `stream: true`，两种协议的 SSE 事件都完整。
+
+## 时间窗口（峰谷计费）
+
+`gpt-windowed` 演示候选接入点的时间窗口：
+
+```yaml
+schedule:
+  timezone: "Asia/Shanghai"
+
+models:
+  - name: gpt-windowed
+    upstream: gpt-test
+    instances:
+      - name: mock
+        priority: 1
+      - name: mock-night
+        priority: 10
+        windows:
+          - start: "00:00"
+            end: "08:00"
+            priority: 0
+```
+
+窗口命中时 `mock-night` 的生效优先级降到 0，抢到最前；窗口外回到基础优先级，由 `mock` 接管。
+两个接入点指向同一个 mock，所以响应内容一样，**请求日志里的「上游接入点」列**能看出当前走了谁。
+
+也可以在控制台「模型」页直接编辑窗口，卡片上会显示当前生效顺序（每 30 秒刷新一次）。
+控制台时区来自 `test-config.yaml` 的 `schedule.timezone`。
 
 ## 验证
 

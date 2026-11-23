@@ -847,7 +847,9 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 		Preset:               presetID,
 		APIKey:               strings.TrimSpace(in.APIKeyString()),
 		AllowPrivateUpstream: in.AllowPrivateUpstream,
-		FailoverStatuses:     in.FailoverStatuses,
+		// Copy at the input boundary: NormalizeInstance de-duplicates and
+		// sorts in place, which must not reach the decoded request body.
+		FailoverStatuses: append([]int(nil), in.FailoverStatuses...),
 	}
 	if in.SessionHeader != nil {
 		instance.SessionHeader = strings.TrimSpace(*in.SessionHeader)

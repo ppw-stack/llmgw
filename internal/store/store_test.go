@@ -742,12 +742,16 @@ func TestWeightColumnIsDropped(t *testing.T) {
 // database that predates session_header and failover_statuses_json: the
 // columns are added with the historical defaults and the fields round-trip.
 func TestInstanceSessionAffinityColumnsAreAdded(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Backstop for the t.Fatal exits above and below; the explicit Close
+	// stays so the store can reopen the same file and take its lock.
+	defer func() { _ = db.Close() }()
 	_, err = db.Exec(`CREATE TABLE instances (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL UNIQUE,
@@ -795,6 +799,7 @@ func TestInstanceSessionAffinityColumnsAreAdded(t *testing.T) {
 // TestInstanceSessionHeaderFallsBackToPreset keeps instances created before
 // the column existed working: the preset supplies its required header.
 func TestInstanceSessionHeaderFallsBackToPreset(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 	if _, err := st.CreateInstance(InstanceSpec{
 		Name:   "go",

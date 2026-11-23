@@ -158,7 +158,7 @@ func (s *Store) CreateInstance(spec InstanceSpec) (*InstanceRecord, error) {
 	}
 	statusesJSON, err := json.Marshal(spec.FailoverStatuses)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("instance %q: marshal failover statuses: %w", spec.Name, err)
 	}
 	if spec.FailoverStatuses == nil {
 		statusesJSON = []byte("[]")
@@ -196,7 +196,7 @@ func (s *Store) UpdateInstance(id int64, spec InstanceSpec) error {
 	}
 	statusesJSON, err := json.Marshal(spec.FailoverStatuses)
 	if err != nil {
-		return err
+		return fmt.Errorf("instance %q: marshal failover statuses: %w", spec.Name, err)
 	}
 	if spec.FailoverStatuses == nil {
 		statusesJSON = []byte("[]")

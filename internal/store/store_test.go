@@ -283,7 +283,7 @@ func TestInstanceAndModelCRUD(t *testing.T) {
 		Upstream: "glm-4.6",
 		Strategy: config.StrategyFailover,
 		Instances: []ModelInstanceSpec{
-			{Instance: "glm", Priority: 0, Weight: 100},
+			{Instance: "glm", Priority: 0},
 		},
 	})
 	if err != nil {
@@ -350,8 +350,8 @@ func TestModelWithSeveralInstancesReadsBackAsOneModel(t *testing.T) {
 		Upstream: "m",
 		Strategy: config.StrategyFailover,
 		Instances: []ModelInstanceSpec{
-			{Instance: "a", Priority: 0, Weight: 100},
-			{Instance: "b", Priority: 1, Weight: 100},
+			{Instance: "a", Priority: 0},
+			{Instance: "b", Priority: 1},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -628,5 +628,90 @@ func TestInstanceModelsAreBackfilled(t *testing.T) {
 	}
 	if len(records[0].Models) != 1 || records[0].Models[0] != "old-upstream" {
 		t.Fatalf("models = %v", records[0].Models)
+	}
+}
+
+// TestWeightColumnIsDropped covers an upgrade from the release that still
+// stored a per-candidate weight. The column never took part in the routing
+// decision, so opening the database removes it and keeps the candidates.
+func TestWeightColumnIsDropped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "weight.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`CREATE TABLE instances (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			name            TEXT    NOT NULL UNIQUE,
+			preset          TEXT    NOT NULL DEFAULT '',
+			key_enc         TEXT    NOT NULL DEFAULT '',
+			endpoints_json  TEXT    NOT NULL DEFAULT '[]',
+			models_json     TEXT    NOT NULL DEFAULT '[]',
+			max_fails       INTEGER NOT NULL DEFAULT 3,
+			cooldown_secs   INTEGER NOT NULL DEFAULT 30,
+			timeout_secs    INTEGER NOT NULL DEFAULT 0,
+			created_at      TEXT    NOT NULL,
+			updated_at      TEXT    NOT NULL
+		)`,
+		`CREATE TABLE models (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT    NOT NULL UNIQUE,
+			upstream    TEXT    NOT NULL DEFAULT '',
+			strategy    TEXT    NOT NULL DEFAULT 'failover',
+			created_at  TEXT    NOT NULL,
+			updated_at  TEXT    NOT NULL
+		)`,
+		`CREATE TABLE model_instances (
+			model_id    INTEGER NOT NULL,
+			instance_id INTEGER NOT NULL,
+			priority    INTEGER NOT NULL DEFAULT 0,
+			weight      INTEGER NOT NULL DEFAULT 100,
+			PRIMARY KEY (model_id, instance_id)
+		)`,
+		`INSERT INTO instances(id, name, created_at, updated_at)
+			VALUES (1, 'old-instance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO models(id, name, upstream, created_at, updated_at)
+			VALUES (1, 'old-model', 'old-upstream', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO model_instances(model_id, instance_id, priority, weight)
+			VALUES (1, 1, 7, 100)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := Open(ctx, path, logger)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	cols, err := tableColumns(ctx, st.db, "model_instances")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cols["weight"] {
+		t.Fatal("weight column was not dropped")
+	}
+	if !cols["windows_json"] {
+		t.Fatal("windows_json column is missing")
+	}
+	records, err := st.ListModelRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || len(records[0].Instances) != 1 {
+		t.Fatalf("records = %+v", records)
+	}
+	if records[0].Instances[0].Priority != 7 {
+		t.Fatalf("priority = %d", records[0].Instances[0].Priority)
 	}
 }

@@ -316,8 +316,8 @@ GET /admin/api/models
   "upstream": "MiniMax-M3.1-Flash",
   "strategy": "failover",
   "instances": [
-    {"instance": "minimax", "priority": 0, "weight": 100, "windows": []},
-    {"instance": "minimax-backup", "priority": 1, "weight": 100, "windows": []}
+    {"instance": "minimax", "priority": 0, "windows": []},
+    {"instance": "minimax-backup", "priority": 1, "windows": []}
   ],
   "timezone": "Asia/Shanghai",
   "server_time": "2026-11-22T18:00:00Z",
@@ -345,7 +345,7 @@ POST /admin/api/models
   "name": "claude-sonnet-4-5",
   "upstream": "glm-4.6",
   "strategy": "failover",
-  "instances": [{"instance": "glm", "priority": 0, "weight": 100, "windows": []}]
+  "instances": [{"instance": "glm", "priority": 0, "windows": []}]
 }
 
 201 <model view>
@@ -376,13 +376,11 @@ POST /admin/api/models
     {
       "instance": "deepseek",
       "priority": 10,
-      "weight": 100,
       "windows": [{"start": "00:00", "end": "08:00", "priority": 0}]
     },
     {
       "instance": "glm",
       "priority": 1,
-      "weight": 100,
       "windows": [{"start": "00:00", "end": "08:00", "only": true}]
     }
   ]

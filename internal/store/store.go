@@ -101,7 +101,6 @@ CREATE TABLE IF NOT EXISTS model_instances (
     model_id     INTEGER NOT NULL,
     instance_id  INTEGER NOT NULL,
     priority     INTEGER NOT NULL DEFAULT 0,
-    weight       INTEGER NOT NULL DEFAULT 100,
     windows_json TEXT    NOT NULL DEFAULT '[]',
     PRIMARY KEY (model_id, instance_id)
 );
@@ -236,6 +235,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate model instance windows: %w", err)
 	}
+	if err := migrateModelInstanceWeight(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate model instance weight: %w", err)
+	}
 	restrictFile(path)
 	for _, suffix := range []string{"-wal", "-shm"} {
 		restrictFile(path + suffix)
@@ -344,8 +347,8 @@ func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
 				return err
 			}
 			for _, mi := range m.Instances {
-				if _, err := tx.ExecContext(ctx, `INSERT INTO model_instances(model_id, instance_id, priority, weight)
-					VALUES(?,?,?,?)`, modelID, instanceID, mi.Priority, mi.Weight); err != nil {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO model_instances(model_id, instance_id, priority)
+					VALUES(?,?,?)`, modelID, instanceID, mi.Priority); err != nil {
 					return err
 				}
 			}
@@ -522,6 +525,26 @@ func migrateModelInstanceWindows(ctx context.Context, db *sql.DB, log *slog.Logg
 	_, err = db.ExecContext(ctx,
 		`ALTER TABLE model_instances ADD COLUMN windows_json TEXT NOT NULL DEFAULT '[]'`)
 	return err
+}
+
+// migrateModelInstanceWeight drops the weight column of the candidate table.
+// Only the failover strategy is implemented, so the column never took part in
+// the routing decision; the candidate order is decided by priority alone.
+func migrateModelInstanceWeight(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(ctx, db, "model_instances")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 || !cols["weight"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE model_instances DROP COLUMN weight`); err != nil {
+		return fmt.Errorf("drop weight column: %w", err)
+	}
+	if log != nil {
+		log.Info("dropped the unused weight column from model_instances")
+	}
+	return nil
 }
 
 type pendingInstance struct {

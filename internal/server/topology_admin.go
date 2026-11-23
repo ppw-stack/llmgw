@@ -83,7 +83,6 @@ type endpointView struct {
 type modelInstanceInput struct {
 	Instance string            `json:"instance"`
 	Priority int               `json:"priority"`
-	Weight   int               `json:"weight"`
 	Windows  []timeWindowInput `json:"windows"`
 }
 
@@ -638,7 +637,6 @@ func modelInstanceViews(instances []store.ModelInstanceSpec) []modelInstanceInpu
 		out = append(out, modelInstanceInput{
 			Instance: mi.Instance,
 			Priority: mi.Priority,
-			Weight:   mi.Weight,
 			Windows:  timeWindowViews(mi.Windows),
 		})
 	}
@@ -872,7 +870,6 @@ func (in modelInput) toModel() (config.Model, error) {
 		model.Instances = append(model.Instances, config.ModelInstance{
 			Name:     strings.TrimSpace(mi.Instance),
 			Priority: mi.Priority,
-			Weight:   mi.Weight,
 			Windows:  toTimeWindows(mi.Windows),
 		})
 	}
@@ -905,7 +902,6 @@ func modelInstanceSpecs(instances []config.ModelInstance) []store.ModelInstanceS
 		out = append(out, store.ModelInstanceSpec{
 			Instance: mi.Name,
 			Priority: mi.Priority,
-			Weight:   mi.Weight,
 			Windows:  mi.Windows,
 		})
 	}

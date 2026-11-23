@@ -186,7 +186,7 @@ models:
 
 ingress、transport、日志、管理台均无需改动。
 
-`strategy` 字段已经预留（当前只实现 `failover`），`weight` 字段也已就位。将来加轮询或按权重分配时不需要改配置结构。
+`strategy` 字段已经预留（当前只实现 `failover`）。将来加轮询或按权重分配时再引入对应的字段，不需要改路由键与候选链的结构。
 
 时间窗口已经是这条路径上的第一步：候选从「一个静态 Target」变成「带上下文的 Target」，
 选择规则留在 router 内部，ingress 与 transport 仍然只认顺序。

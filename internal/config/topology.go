@@ -77,7 +77,6 @@ type Instance struct {
 type ModelInstance struct {
 	Name     string `yaml:"name"`
 	Priority int    `yaml:"priority"`
-	Weight   int    `yaml:"weight"`
 	// Windows are the time ranges in which this candidate takes over
 	// another priority or is the only candidate allowed to serve the model.
 	Windows []TimeWindow `yaml:"windows"`
@@ -131,7 +130,6 @@ type EffectiveModel struct {
 type EffectiveModelInstance struct {
 	Instance string
 	Priority int
-	Weight   int
 	// Windows are the compiled time windows of the candidate.
 	Windows []EffectiveWindow
 }
@@ -349,9 +347,6 @@ func NormalizeModel(in *Model) error {
 		if mi.Priority < 0 {
 			return fmt.Errorf("model %q: instance %q has a negative priority", in.Name, mi.Name)
 		}
-		if mi.Weight <= 0 {
-			mi.Weight = 100
-		}
 		// The windows are validated here so a broken range fails at load
 		// time. The compiled form is produced by Effective.
 		if _, err := compileWindows(fmt.Sprintf("model %q: instance %q", in.Name, mi.Name), mi.Windows); err != nil {
@@ -454,10 +449,6 @@ func (c *Config) Effective() (Effective, error) {
 					"model %q: instance %q does not declare upstream model %q in its models list",
 					m.Name, mi.Name, upstream)
 			}
-			weight := mi.Weight
-			if weight <= 0 {
-				weight = 100
-			}
 			windows, err := compileWindows(
 				fmt.Sprintf("model %q: instance %q", m.Name, mi.Name), mi.Windows)
 			if err != nil {
@@ -466,7 +457,6 @@ func (c *Config) Effective() (Effective, error) {
 			eff.Instances = append(eff.Instances, EffectiveModelInstance{
 				Instance: mi.Name,
 				Priority: mi.Priority,
-				Weight:   weight,
 				Windows:  windows,
 			})
 		}
@@ -542,7 +532,7 @@ func ExpandProvider(p Provider) (Instance, []Model, error) {
 			Upstream: strings.TrimSpace(upstream),
 			Strategy: StrategyFailover,
 			Instances: []ModelInstance{
-				{Name: inst.Name, Priority: 0, Weight: 100},
+				{Name: inst.Name, Priority: 0},
 			},
 		})
 	}

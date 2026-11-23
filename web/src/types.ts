@@ -162,7 +162,6 @@ export interface TimeWindow {
 export interface ModelInstance {
   instance: string;
   priority: number;
-  weight: number;
   /** 该候选的时间窗口 */
   windows?: TimeWindow[];
 }

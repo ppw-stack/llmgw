@@ -17,7 +17,6 @@ interface WindowRow {
 interface CandidateRow {
   instance: string;
   priority: string;
-  weight: string;
   windows: WindowRow[];
 }
 
@@ -124,12 +123,12 @@ function newForm(): ModelForm {
     id: null,
     name: '',
     upstream: '',
-    candidates: [{ instance: '', priority: '0', weight: '100', windows: [] }],
+    candidates: [{ instance: '', priority: '0', windows: [] }],
   };
 }
 
 function addCandidate(form: ModelForm) {
-  form.candidates.push({ instance: '', priority: '0', weight: '100', windows: [] });
+  form.candidates.push({ instance: '', priority: '0', windows: [] });
 }
 
 function removeCandidate(form: ModelForm, index: number) {
@@ -204,7 +203,6 @@ function openEdit(m: Model) {
   const rows = m.instances.map((mi) => ({
     instance: mi.instance,
     priority: String(mi.priority),
-    weight: String(mi.weight),
     windows: (mi.windows ?? []).map((w) => ({
       start: w.start,
       end: w.end,
@@ -216,7 +214,7 @@ function openEdit(m: Model) {
     id: m.id,
     name: m.name,
     upstream: m.upstream,
-    candidates: rows.length ? rows : [{ instance: '', priority: '0', weight: '100', windows: [] }],
+    candidates: rows.length ? rows : [{ instance: '', priority: '0', windows: [] }],
   };
 }
 
@@ -248,13 +246,8 @@ async function save() {
     }
     seen.add(target);
     const priority = parseCount(row.priority);
-    const weight = parseCount(row.weight);
     if (priority === null) {
       error.value = '优先级必须是非负整数';
-      return;
-    }
-    if (weight === null || weight === 0) {
-      error.value = '权重必须是正整数';
       return;
     }
     const windows: TimeWindow[] = [];
@@ -278,7 +271,7 @@ async function save() {
       }
       windows.push({ start, end, priority: windowPriority, only: w.only });
     }
-    list.push({ instance: target, priority, weight, windows });
+    list.push({ instance: target, priority, windows });
   }
   if (!list.length) {
     error.value = '至少需要一个候选接入点';
@@ -389,7 +382,7 @@ onUnmounted(() => {
             {{ index === 0 ? '主' : '备' }}
           </span>
           <code class="base">{{ c.instance }}</code>
-          <span class="muted small">优先级 {{ c.priority }} · 权重 {{ c.weight }}</span>
+          <span class="muted small">优先级 {{ c.priority }}</span>
           <span v-if="windowSummary(c)" class="muted small"> 时段：{{ windowSummary(c) }} </span>
           <span v-if="modelCandidateUnsupported(m, c.instance)" class="badge off">
             未声明支持 {{ m.upstream }}
@@ -480,15 +473,6 @@ onUnmounted(() => {
                   type="text"
                   inputmode="numeric"
                   placeholder="优先级"
-                />
-                <label class="visually-hidden" :for="`model-candidate-weight-${index}`">权重</label>
-                <input
-                  :id="`model-candidate-weight-${index}`"
-                  v-model="row.weight"
-                  class="input-num"
-                  type="text"
-                  inputmode="numeric"
-                  placeholder="权重"
                 />
                 <button
                   class="ghost danger"

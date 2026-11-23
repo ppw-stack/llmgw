@@ -22,7 +22,6 @@ type Target struct {
 	Instance      string
 	Model         string
 	Priority      int
-	Weight        int
 	Endpoint      string
 	Protocol      string
 	BaseURL       string
@@ -113,7 +112,6 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					Instance:      inst.Name,
 					Model:         m.Name,
 					Priority:      cand.Priority,
-					Weight:        cand.Weight,
 					Endpoint:      ep.Protocol,
 					Protocol:      ep.Protocol,
 					BaseURL:       ep.BaseURL,

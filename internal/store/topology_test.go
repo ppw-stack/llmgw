@@ -46,7 +46,6 @@ func TestModelWindowsRoundTrip(t *testing.T) {
 			{
 				Instance: "a",
 				Priority: 5,
-				Weight:   100,
 				Windows: []config.TimeWindow{
 					{Start: "00:00", End: "08:00", Priority: &low},
 					{Start: "22:00", End: "06:00", Only: true},
@@ -98,7 +97,6 @@ func TestTopologyKeepsWindows(t *testing.T) {
 		Instances: []ModelInstanceSpec{{
 			Instance: "a",
 			Priority: 5,
-			Weight:   100,
 			Windows:  []config.TimeWindow{{Start: "00:00", End: "08:00", Priority: &low}},
 		}},
 	}); err != nil {
@@ -139,7 +137,6 @@ func TestImportTopologyKeepsWindows(t *testing.T) {
 		Instances: []config.ModelInstance{{
 			Name:     "a",
 			Priority: 5,
-			Weight:   100,
 			Windows:  []config.TimeWindow{{Start: "00:00", End: "08:00", Priority: &low}},
 		}},
 	}}

@@ -97,10 +97,11 @@ CREATE TABLE IF NOT EXISTS models (
 );
 
 CREATE TABLE IF NOT EXISTS model_instances (
-    model_id    INTEGER NOT NULL,
-    instance_id INTEGER NOT NULL,
-    priority    INTEGER NOT NULL DEFAULT 0,
-    weight      INTEGER NOT NULL DEFAULT 100,
+    model_id     INTEGER NOT NULL,
+    instance_id  INTEGER NOT NULL,
+    priority     INTEGER NOT NULL DEFAULT 0,
+    weight       INTEGER NOT NULL DEFAULT 100,
+    windows_json TEXT    NOT NULL DEFAULT '[]',
     PRIMARY KEY (model_id, instance_id)
 );
 CREATE INDEX IF NOT EXISTS idx_model_instances_instance ON model_instances(instance_id);
@@ -225,6 +226,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateInstanceQuotaCredential(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate instance quota credential: %w", err)
+	}
+	if err := migrateModelInstanceWindows(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate model instance windows: %w", err)
 	}
 	s := &Store{
 		db:   db,
@@ -461,6 +466,22 @@ func migrateInstanceQuotaCredential(ctx context.Context, db *sql.DB, log *slog.L
 	}
 	log.Info("added the quota credential column to instances")
 	return nil
+}
+
+// migrateModelInstanceWindows adds the time window column to the candidate
+// table. Rows that predate it keep an empty window list, so their candidates
+// stay on the configured priority.
+func migrateModelInstanceWindows(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(ctx, db, "model_instances")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 || cols["windows_json"] {
+		return nil
+	}
+	_, err = db.ExecContext(ctx,
+		`ALTER TABLE model_instances ADD COLUMN windows_json TEXT NOT NULL DEFAULT '[]'`)
+	return err
 }
 
 type pendingInstance struct {

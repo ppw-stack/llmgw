@@ -74,6 +74,9 @@ type ModelInstance struct {
 	Name     string `yaml:"name"`
 	Priority int    `yaml:"priority"`
 	Weight   int    `yaml:"weight"`
+	// Windows are the time ranges in which this candidate takes over
+	// another priority or is the only candidate allowed to serve the model.
+	Windows []TimeWindow `yaml:"windows"`
 }
 
 // Model is a logical model. It owns the strategy and the ordered candidate
@@ -122,6 +125,8 @@ type EffectiveModelInstance struct {
 	Instance string
 	Priority int
 	Weight   int
+	// Windows are the compiled time windows of the candidate.
+	Windows []EffectiveWindow
 }
 
 // presetEndpoints turns a built-in preset into the endpoints of an instance.
@@ -323,6 +328,11 @@ func NormalizeModel(in *Model) error {
 		if mi.Weight <= 0 {
 			mi.Weight = 100
 		}
+		// The windows are validated here so a broken range fails at load
+		// time. The compiled form is produced by Effective.
+		if _, err := compileWindows(fmt.Sprintf("model %q: instance %q", in.Name, mi.Name), mi.Windows); err != nil {
+			return err
+		}
 	}
 	sort.SliceStable(in.Instances, func(a, b int) bool {
 		return in.Instances[a].Priority < in.Instances[b].Priority
@@ -423,10 +433,16 @@ func (c *Config) Effective() (Effective, error) {
 			if weight <= 0 {
 				weight = 100
 			}
+			windows, err := compileWindows(
+				fmt.Sprintf("model %q: instance %q", m.Name, mi.Name), mi.Windows)
+			if err != nil {
+				return Effective{}, err
+			}
 			eff.Instances = append(eff.Instances, EffectiveModelInstance{
 				Instance: mi.Name,
 				Priority: mi.Priority,
 				Weight:   weight,
+				Windows:  windows,
 			})
 		}
 		// Lower priority wins; the written order breaks ties.

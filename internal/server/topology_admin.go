@@ -75,9 +75,18 @@ type endpointView struct {
 
 // modelInstanceInput binds a model to one instance.
 type modelInstanceInput struct {
-	Instance string `json:"instance"`
-	Priority int    `json:"priority"`
-	Weight   int    `json:"weight"`
+	Instance string            `json:"instance"`
+	Priority int               `json:"priority"`
+	Weight   int               `json:"weight"`
+	Windows  []timeWindowInput `json:"windows"`
+}
+
+// timeWindowInput is one time range of a candidate.
+type timeWindowInput struct {
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Priority *int   `json:"priority"`
+	Only     bool   `json:"only"`
 }
 
 // modelInput is the write form of a model.
@@ -95,8 +104,28 @@ type modelView struct {
 	Upstream  string               `json:"upstream"`
 	Strategy  string               `json:"strategy"`
 	Instances []modelInstanceInput `json:"instances"`
+	// Timezone is the timezone the time windows are evaluated in.
+	Timezone string `json:"timezone"`
+	// ServerTime is the moment the effective candidates were computed.
+	ServerTime string `json:"server_time"`
+	// Effective lists the candidates in the order they are tried right now.
+	Effective []effectiveCandidate `json:"effective_candidates"`
 	CreatedAt string               `json:"created_at"`
 	UpdatedAt string               `json:"updated_at"`
+}
+
+// effectiveCandidate is the routing state of one candidate at the moment the
+// model view was built.
+type effectiveCandidate struct {
+	Instance string `json:"instance"`
+	// Priority is the priority that applies right now.
+	Priority int `json:"priority"`
+	// BasePriority is the priority the candidate is configured with.
+	BasePriority int `json:"base_priority"`
+	// Active reports whether the candidate may serve the model right now.
+	Active bool `json:"active"`
+	// Window describes the time window that is active right now.
+	Window string `json:"window,omitempty"`
 }
 
 func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
@@ -427,23 +456,56 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, modelViews(records))
+	writeJSON(w, http.StatusOK, s.modelViews(records))
 }
 
-func modelViews(records []store.ModelRecord) []modelView {
+func (s *Server) modelViews(records []store.ModelRecord) []modelView {
+	now := time.Now()
 	views := make([]modelView, 0, len(records))
 	for _, rec := range records {
 		views = append(views, modelView{
-			ID:        rec.ID,
-			Name:      rec.Name,
-			Upstream:  rec.Upstream,
-			Strategy:  rec.Strategy,
-			Instances: modelInstanceViews(rec.Instances),
-			CreatedAt: rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			ID:         rec.ID,
+			Name:       rec.Name,
+			Upstream:   rec.Upstream,
+			Strategy:   rec.Strategy,
+			Instances:  modelInstanceViews(rec.Instances),
+			Timezone:   s.scheduleTimezone(),
+			ServerTime: now.UTC().Format(time.RFC3339),
+			Effective:  s.effectiveCandidates(rec.Name, now),
+			CreatedAt:  rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:  rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		})
 	}
 	return views
+}
+
+// effectiveCandidates describes the current routing state of one model.
+func (s *Server) effectiveCandidates(model string, now time.Time) []effectiveCandidate {
+	snap := s.router.Snapshot()
+	if snap == nil {
+		return []effectiveCandidate{}
+	}
+	previews := snap.PreviewModel(model, now)
+	out := make([]effectiveCandidate, 0, len(previews))
+	for _, p := range previews {
+		out = append(out, effectiveCandidate{
+			Instance:     p.Instance,
+			Priority:     p.Priority,
+			BasePriority: p.BasePriority,
+			Active:       p.Active,
+			Window:       p.Window,
+		})
+	}
+	return out
+}
+
+// scheduleTimezone returns the timezone the time windows are evaluated in.
+func (s *Server) scheduleTimezone() string {
+	snap := s.router.Snapshot()
+	if snap == nil || snap.Location == nil {
+		return config.DefaultTimezone
+	}
+	return snap.Location.String()
 }
 
 func modelInstanceViews(instances []store.ModelInstanceSpec) []modelInstanceInput {
@@ -453,6 +515,20 @@ func modelInstanceViews(instances []store.ModelInstanceSpec) []modelInstanceInpu
 			Instance: mi.Instance,
 			Priority: mi.Priority,
 			Weight:   mi.Weight,
+			Windows:  timeWindowViews(mi.Windows),
+		})
+	}
+	return out
+}
+
+func timeWindowViews(windows []config.TimeWindow) []timeWindowInput {
+	out := make([]timeWindowInput, 0, len(windows))
+	for _, w := range windows {
+		out = append(out, timeWindowInput{
+			Start:    w.Start,
+			End:      w.End,
+			Priority: w.Priority,
+			Only:     w.Only,
 		})
 	}
 	return out
@@ -507,7 +583,7 @@ func (s *Server) createModel(w http.ResponseWriter, r *http.Request, id *adminId
 		return
 	}
 	s.audit(r, id.Username, "model.create", model.Name, "success")
-	writeJSON(w, http.StatusCreated, modelViews([]store.ModelRecord{*rec})[0])
+	writeJSON(w, http.StatusCreated, s.modelViews([]store.ModelRecord{*rec})[0])
 }
 
 func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminIdentity, modelID int64) {
@@ -578,7 +654,7 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminId
 		return
 	}
 	s.audit(r, id.Username, "model.update", model.Name, "success")
-	writeJSON(w, http.StatusOK, modelViews([]store.ModelRecord{{
+	writeJSON(w, http.StatusOK, s.modelViews([]store.ModelRecord{{
 		ID: modelID,
 		ModelSpec: store.ModelSpec{
 			Name:      model.Name,
@@ -672,12 +748,30 @@ func (in modelInput) toModel() (config.Model, error) {
 			Name:     strings.TrimSpace(mi.Instance),
 			Priority: mi.Priority,
 			Weight:   mi.Weight,
+			Windows:  toTimeWindows(mi.Windows),
 		})
 	}
 	if err := config.NormalizeModel(&model); err != nil {
 		return config.Model{}, err
 	}
 	return model, nil
+}
+
+// toTimeWindows converts the submitted windows into their configuration form.
+func toTimeWindows(in []timeWindowInput) []config.TimeWindow {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]config.TimeWindow, 0, len(in))
+	for _, w := range in {
+		out = append(out, config.TimeWindow{
+			Start:    strings.TrimSpace(w.Start),
+			End:      strings.TrimSpace(w.End),
+			Priority: w.Priority,
+			Only:     w.Only,
+		})
+	}
+	return out
 }
 
 func modelInstanceSpecs(instances []config.ModelInstance) []store.ModelInstanceSpec {
@@ -687,6 +781,7 @@ func modelInstanceSpecs(instances []config.ModelInstance) []store.ModelInstanceS
 			Instance: mi.Name,
 			Priority: mi.Priority,
 			Weight:   mi.Weight,
+			Windows:  mi.Windows,
 		})
 	}
 	return out

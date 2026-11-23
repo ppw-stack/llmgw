@@ -141,6 +141,36 @@ models:
 - 上游返回 5xx / 429 / 超时时自动切到下一个候选；4xx 不切换，原样透传。
 - 接入点连续失败 3 次后跳过 30 秒（`max_fails` / `cooldown_secs` 可调）。
 - 模型只在另一个协议存在时，请求会得到 `400` 并提示改用哪个 base_url。
+
+### 按时段调度（峰谷计费）
+
+部分厂商在特定时段打折（如 DeepSeek 的错峰价）。给候选接入点配一个**时间窗口**，
+窗口命中时该候选按窗口内的优先级插队，或者只在窗口内参与路由：
+
+```yaml
+# 所有时间窗口共用的时区；默认 Asia/Shanghai，也支持 UTC / IANA 名 / ±HH:MM
+schedule:
+  timezone: "Asia/Shanghai"
+
+models:
+  - name: deepseek-chat
+    upstream: deepseek-chat
+    instances:
+      # 谷时（00:00-08:00）deepseek 打折：这段时间它的生效优先级降到 0
+      - name: deepseek
+        priority: 10
+        windows:
+          - start: "00:00"
+            end: "08:00"
+            priority: 0
+      # 平时用另一个厂商
+      - name: glm
+        priority: 1
+```
+
+- 窗口是左闭右开 `[start, end)`，起晚于止视为跨天（如 `22:00`–`06:00`）。
+- `priority` 是窗口内生效的优先级；`only: true` 表示窗口外该候选不参与路由。
+- 判定按 `schedule.timezone`；进程运行中跨过时段边界自动生效，无需重启或重载。
 - 改配置后 1 秒内自动生效，在途流式请求不受影响。
 - 上游超时全局默认 120s，单个接入点只能调低；代理使用进程的 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
 - 内置端点的文档：MiniMax 编码套餐国内 <https://platform.minimaxi.com/docs/m-plan/other-tools>、国际 <https://platform.minimax.io/docs/m-plan/other-tools>。两边 Key 不通用，按套餐归属选择 `minimax-mplan-cn` / `minimax-mplan-global`。

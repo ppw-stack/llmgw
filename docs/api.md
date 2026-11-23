@@ -261,8 +261,14 @@ GET /admin/api/models
   "upstream": "MiniMax-M3.1-Flash",
   "strategy": "failover",
   "instances": [
-    {"instance": "minimax", "priority": 0, "weight": 100},
-    {"instance": "minimax-backup", "priority": 1, "weight": 100}
+    {"instance": "minimax", "priority": 0, "weight": 100, "windows": []},
+    {"instance": "minimax-backup", "priority": 1, "weight": 100, "windows": []}
+  ],
+  "timezone": "Asia/Shanghai",
+  "server_time": "2026-11-22T18:00:00Z",
+  "effective_candidates": [
+    {"instance": "minimax", "priority": 0, "base_priority": 0, "active": true},
+    {"instance": "minimax-backup", "priority": 1, "base_priority": 1, "active": true}
   ],
   "created_at": "2026-11-22T10:00:00Z",
   "updated_at": "2026-11-22T10:00:00Z"
@@ -270,6 +276,11 @@ GET /admin/api/models
 ```
 
 候选按 `priority` 升序返回；数字越小越优先，主实例失败后自动切到下一个。
+
+- `timezone` 是时间窗口的判定时区（对应 `config.yaml` 的 `schedule.timezone`）。
+- `server_time` 是计算生效顺序时的服务端时间。
+- `effective_candidates` 是**此刻**的候选顺序：`priority` 是当前生效的优先级，`base_priority` 是配置里的优先级，
+  `active` 表示该候选此刻是否参与路由，`window` 给出正在命中的时间窗口（如 `"00:00-08:00"`）。
 
 #### 创建 / 更新 / 删除
 
@@ -279,7 +290,7 @@ POST /admin/api/models
   "name": "claude-sonnet-4-5",
   "upstream": "glm-4.6",
   "strategy": "failover",
-  "instances": [{"instance": "glm", "priority": 0, "weight": 100}]
+  "instances": [{"instance": "glm", "priority": 0, "weight": 100, "windows": []}]
 }
 
 201 <model view>
@@ -294,6 +305,39 @@ DELETE /admin/api/models/1 → 204
 - 模型名重复返回 `409`。
 - `strategy` 目前只接受 `failover`。
 - 模型的 `upstream` 必须出现在**每个**候选接入点的 `models` 声明里，否则返回 `400`（报出是哪个接入点缺哪一项）。
+
+#### 时间窗口
+
+候选接入点可以带时间窗口，用于峰谷计费：窗口命中时该候选按窗口内的优先级插队，
+或者（`only`）只在窗口内参与路由。
+
+```
+POST /admin/api/models
+{
+  "name": "deepseek-chat",
+  "upstream": "deepseek-chat",
+  "strategy": "failover",
+  "instances": [
+    {
+      "instance": "deepseek",
+      "priority": 10,
+      "weight": 100,
+      "windows": [{"start": "00:00", "end": "08:00", "priority": 0}]
+    },
+    {
+      "instance": "glm",
+      "priority": 1,
+      "weight": 100,
+      "windows": [{"start": "00:00", "end": "08:00", "only": true}]
+    }
+  ]
+}
+```
+
+- `start` / `end` 是 24 小时制 `HH:MM`；`start` 晚于 `end` 表示跨天（如 `22:00` – `06:00`）。
+- `priority` 是窗口内生效的优先级（非负整数）；`only` 为 `true` 时表示窗口外该候选不参与路由。
+- 一个窗口至少要有 `priority` 或 `only` 之一，否则返回 `400`。
+- 判定按 `schedule.timezone`（默认 `Asia/Shanghai`）。
 
 ### 兼容接口
 

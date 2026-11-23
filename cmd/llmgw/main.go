@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -158,7 +159,7 @@ func main() {
 		go pruneHistory(ctx, st, logger, days)
 	}
 	warnInsecureDefaults(cfg, logger)
-	go watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
+	watchConfig(ctx, *configPath, logger, func(c *config.Config) error {
 		return reloadConfig(rt, st, boxCipher, srv, c)
 	})
 
@@ -442,36 +443,59 @@ func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *serv
 	return nil
 }
 
+// watchConfig watches the config file and applies it whenever its content
+// changes. It returns at once; the watcher stops when ctx is done.
+//
+// The baseline is taken here, in the caller's goroutine, and only the polling
+// loop runs in a goroutine of its own. Taking the baseline inside the
+// watcher would leave a blind spot: a file edited between the call and the
+// first poll would be compared against itself, so the edit would never be
+// applied.
+//
+// The content is fingerprinted instead of the modification time being
+// compared, because a filesystem with a coarse timestamp resolution can report
+// the same modification time for two different contents. A hot switch that
+// silently does nothing is worse than a reload that is one second late.
 func watchConfig(ctx context.Context, path string, log *slog.Logger, apply func(*config.Config) error) {
-	info, err := os.Stat(path)
+	sum, err := configFingerprint(path)
 	if err != nil {
 		return
 	}
-	lastMod := info.ModTime()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			info, err := os.Stat(path)
-			if err != nil || !info.ModTime().After(lastMod) {
-				continue
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cur, err := configFingerprint(path)
+				if err != nil || cur == sum {
+					continue
+				}
+				sum = cur
+				cfg, err := config.Load(path)
+				if err != nil {
+					log.Error("config reload failed; keeping previous config", "err", err)
+					continue
+				}
+				if err := apply(cfg); err != nil {
+					log.Error("config reload rejected; keeping previous config", "err", err)
+					continue
+				}
+				log.Info("config reloaded", "instances", len(cfg.Instances), "models", len(cfg.Models))
 			}
-			lastMod = info.ModTime()
-			cfg, err := config.Load(path)
-			if err != nil {
-				log.Error("config reload failed; keeping previous config", "err", err)
-				continue
-			}
-			if err := apply(cfg); err != nil {
-				log.Error("config reload rejected; keeping previous config", "err", err)
-				continue
-			}
-			log.Info("config reloaded", "instances", len(cfg.Instances), "models", len(cfg.Models))
 		}
+	}()
+}
+
+// configFingerprint is the fingerprint of the config file content.
+func configFingerprint(path string) ([sha256.Size]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
 	}
+	return sha256.Sum256(data), nil
 }
 
 func hostPort(addr string) string {

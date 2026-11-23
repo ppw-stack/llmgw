@@ -110,7 +110,9 @@ func TestWatchConfigClosesTheManagementSurface(t *testing.T) {
 	}
 	handler := srv.Handler()
 
-	go watchConfig(ctx, cfgPath, logger, func(c *config.Config) error {
+	// The watcher takes its baseline when it is armed, so the edits below,
+	// which land right after it was armed, are not missed.
+	watchConfig(ctx, cfgPath, logger, func(c *config.Config) error {
 		return reloadConfig(rt, st, box, srv, c)
 	})
 
@@ -176,7 +178,7 @@ func TestWatchConfigAppliesTheAdminWhitelist(t *testing.T) {
 	}
 	handler := srv.Handler()
 
-	go watchConfig(ctx, cfgPath, logger, func(c *config.Config) error {
+	watchConfig(ctx, cfgPath, logger, func(c *config.Config) error {
 		return reloadConfig(rt, st, box, srv, c)
 	})
 

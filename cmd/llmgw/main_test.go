@@ -21,24 +21,19 @@ import (
 	"github.com/pw/llmgw/internal/transport"
 )
 
-// testAPIKey returns the upstream key the test config carries. The
-// environment variable injects a real one; the fallback is an obviously
-// synthetic placeholder so no credential is stored in the repository.
+// testAPIKey returns the upstream key the test config carries. Set
+// LLMGW_TEST_API_KEY to inject a real one; without it the instance carries no
+// key at all, because the checks under test never look at it and no
+// credential literal belongs in the repository.
 func testAPIKey() string {
-	if v := strings.TrimSpace(os.Getenv("LLMGW_TEST_API_KEY")); v != "" {
-		return v
-	}
-	return "sk-test-placeholder-main"
+	return strings.TrimSpace(os.Getenv("LLMGW_TEST_API_KEY"))
 }
 
-// testAdminToken returns the admin token the test server accepts. The
-// environment variable injects a real one; the fallback is an obviously
-// synthetic placeholder so no credential is stored in the repository.
+// testAdminToken returns the admin token the test server accepts. Set
+// LLMGW_TEST_ADMIN_TOKEN to inject a real one; without it the server runs
+// without the legacy token, which these tests never present.
 func testAdminToken() string {
-	if v := strings.TrimSpace(os.Getenv("LLMGW_TEST_ADMIN_TOKEN")); v != "" {
-		return v
-	}
-	return "admin-token-placeholder"
+	return strings.TrimSpace(os.Getenv("LLMGW_TEST_ADMIN_TOKEN"))
 }
 
 // testConfig renders a config file whose management surface state is

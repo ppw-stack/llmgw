@@ -1,11 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { api } from '../api';
-import type { Instance, InstanceEndpoint, InstancePayload, InstancePreset, Model } from '../types';
+import type {
+  Instance,
+  InstanceEndpoint,
+  InstancePayload,
+  InstancePreset,
+  Model,
+  QuotaReport,
+  QuotaReports,
+  QuotaWindow,
+} from '../types';
 import { confirmAction } from '../utils/confirm';
 import { errorMessage } from '../utils/error';
 
 type InstanceMode = 'builtin' | 'custom';
+
+/** 额度轮询间隔与倒计时刷新间隔。 */
+const QUOTA_POLL_MS = 60_000;
+const QUOTA_TICK_MS = 30_000;
 
 /** 表单里的一行端点。 */
 interface EndpointRow {
@@ -21,6 +34,9 @@ interface InstanceForm {
   preset: string;
   apiKey: string;
   keyHint: string;
+  quotaAccessKeyId: string;
+  quotaSecretKey: string;
+  quotaSecretHint: string;
   endpoints: EndpointRow[];
   modelsText: string;
   maxFails: string;
@@ -36,11 +52,74 @@ const error = ref('');
 const editing = ref<InstanceForm | null>(null);
 const saving = ref(false);
 
+/** 上游套餐额度：按接入点 id 索引。 */
+const quotaReports = ref<QuotaReport[]>([]);
+const quotaError = ref('');
+/** 当前时间，用于倒计时。 */
+const now = ref(Date.now());
+
+let quotaTimer: number | undefined;
+let tickTimer: number | undefined;
+
 /** 当前有哪些对外模型引用了这个接入点。信息来自 /models，不额外落库。 */
 function usedBy(instanceName: string): string[] {
   return models.value
     .filter((m) => m.instances.some((c) => c.instance === instanceName))
     .map((m) => m.name);
+}
+
+/** 按接入点 id 索引额度报告。 */
+const quotaByID = computed<Record<number, QuotaReport>>(() => {
+  const map: Record<number, QuotaReport> = {};
+  for (const report of quotaReports.value) map[report.instance_id] = report;
+  return map;
+});
+
+/** 该接入点的额度窗口；没有额度接口的接入点返回空列表。 */
+function quotaWindows(inst: Instance): QuotaWindow[] {
+  const report = quotaByID.value[inst.id];
+  if (!report?.supported) return [];
+  return report.windows;
+}
+
+/** 该接入点的额度查询失败原因。 */
+function quotaMessage(inst: Instance): string {
+  const report = quotaByID.value[inst.id];
+  if (!report?.supported) return '';
+  return report.error ?? '';
+}
+
+/** 进度条宽度，限制在 0 到 100 之间。 */
+function quotaWidth(pct: number): string {
+  const value = Math.min(Math.max(pct, 0), 100);
+  return `${value}%`;
+}
+
+/** 进度条配色：七成以下正常，九成以上告急。 */
+function quotaLevel(pct: number): string {
+  if (pct >= 90) return 'danger';
+  if (pct >= 70) return 'warn';
+  return 'ok';
+}
+
+/** 已用百分比。 */
+function quotaPercent(pct: number): string {
+  return `${Math.round(pct)}%`;
+}
+
+/** 距窗口重置还有多久；上游没给重置时间时显示短横线。 */
+function quotaCountdown(resetsAt?: string): string {
+  if (!resetsAt) return '-';
+  const target = new Date(resetsAt).getTime();
+  if (Number.isNaN(target)) return '-';
+  const diff = target - now.value;
+  if (diff <= 0) return '即将重置';
+  const minutes = Math.floor(diff / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  if (hours > 0) return `${hours} 小时 ${minutes % 60} 分`;
+  return `${minutes % 60} 分`;
 }
 
 function presetLabel(p: InstancePreset): string {
@@ -56,6 +135,9 @@ const selectedPreset = computed<InstancePreset | null>(() => {
   if (form?.mode !== 'builtin') return null;
   return findPreset(form.preset);
 });
+
+/** 该预设需要单独配置额度查询凭证：火山方舟读套餐额度要用 Access Key 对。 */
+const needsQuotaCredential = computed<boolean>(() => selectedPreset.value?.quota?.kind === 'ark');
 
 /** 内置模式下只读展示的端点：优先取预设自带的地址。 */
 const builtinEndpoints = computed<InstanceEndpoint[]>(() => {
@@ -80,6 +162,9 @@ function newForm(): InstanceForm {
     preset: first ? first.id : '',
     apiKey: '',
     keyHint: '',
+    quotaAccessKeyId: '',
+    quotaSecretKey: '',
+    quotaSecretHint: '',
     endpoints: [{ protocol: 'openai', base_url: '' }],
     modelsText: '',
     maxFails: '3',
@@ -177,6 +262,17 @@ async function loadPresets() {
   }
 }
 
+/** 拉取各接入点的套餐额度。额度查询失败不影响接入点列表。 */
+async function loadQuota() {
+  try {
+    const res = await api<QuotaReports>('/quota');
+    quotaReports.value = res.reports ?? [];
+    quotaError.value = '';
+  } catch (e) {
+    quotaError.value = errorMessage(e);
+  }
+}
+
 async function load() {
   loading.value = true;
   error.value = '';
@@ -208,6 +304,9 @@ function openEdit(inst: Instance) {
     preset: inst.preset ?? '',
     apiKey: '',
     keyHint: inst.key_hint,
+    quotaAccessKeyId: inst.quota_credential?.access_key_id ?? '',
+    quotaSecretKey: '',
+    quotaSecretHint: inst.quota_credential?.secret_hint ?? '',
     endpoints: inst.endpoints.map((ep) => ({
       protocol: ep.protocol,
       base_url: ep.base_url,
@@ -259,6 +358,20 @@ async function save() {
   if (f.id === null || f.apiKey.trim()) {
     payload.api_key = f.apiKey.trim();
   }
+  // The quota credential is only submitted when the operator filled one in;
+  // an untouched field keeps the stored credential.
+  const quotaAccessKeyId = f.quotaAccessKeyId.trim();
+  const quotaSecretKey = f.quotaSecretKey.trim();
+  if (quotaAccessKeyId || quotaSecretKey) {
+    if (!quotaAccessKeyId || !quotaSecretKey) {
+      error.value = '额度查询凭证需要同时填写 Access Key ID 与 Secret Access Key';
+      return;
+    }
+    payload.quota_credential = {
+      access_key_id: quotaAccessKeyId,
+      secret_access_key: quotaSecretKey,
+    };
+  }
   payload.max_fails = maxFails;
   payload.cooldown_secs = cooldownSecs;
   payload.timeout_secs = timeoutSecs;
@@ -297,9 +410,35 @@ async function remove(inst: Instance) {
   }
 }
 
+/** 刷新列表与额度。 */
+async function refresh() {
+  await load();
+  await loadQuota();
+}
+
+/** 页面重新可见时立刻刷新额度。 */
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') void loadQuota();
+}
+
 onMounted(async () => {
   await loadPresets();
   await load();
+  await loadQuota();
+  quotaTimer = window.setInterval(() => {
+    // 页面在后台时不打扰上游。
+    if (document.visibilityState === 'visible') void loadQuota();
+  }, QUOTA_POLL_MS);
+  tickTimer = window.setInterval(() => {
+    now.value = Date.now();
+  }, QUOTA_TICK_MS);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+});
+
+onUnmounted(() => {
+  if (quotaTimer !== undefined) window.clearInterval(quotaTimer);
+  if (tickTimer !== undefined) window.clearInterval(tickTimer);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 
@@ -308,7 +447,7 @@ onMounted(async () => {
     <div class="section-head">
       <h2>上游接入点</h2>
       <div class="row">
-        <button class="ghost" @click="load">刷新</button>
+        <button class="ghost" @click="refresh">刷新</button>
         <button class="primary" @click="openCreate">新增接入点</button>
       </div>
     </div>
@@ -316,6 +455,7 @@ onMounted(async () => {
       上游接入点代表一个物理上游（厂商地址 + API Key）。模型在「模型」页引用接入点组成主备链路。
     </p>
     <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="quotaError" class="error">额度查询失败：{{ quotaError }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
     <div v-else-if="!instances.length" class="card muted">
@@ -368,6 +508,24 @@ onMounted(async () => {
       <div class="models">
         <span v-if="!inst.models.length" class="muted small">未声明支持的模型</span>
         <span v-for="model in inst.models" :key="model" class="tag">{{ model }}</span>
+      </div>
+
+      <div v-if="quotaWindows(inst).length || quotaMessage(inst)" class="quota">
+        <p v-if="quotaMessage(inst)" class="quota-error">{{ quotaMessage(inst) }}</p>
+        <div v-for="w in quotaWindows(inst)" :key="w.id" class="quota-row">
+          <span class="quota-label">{{ w.label }}</span>
+          <span class="quota-track">
+            <span
+              class="quota-fill"
+              :class="quotaLevel(w.used_pct)"
+              :style="{ width: quotaWidth(w.used_pct) }"
+            ></span>
+          </span>
+          <span class="quota-value">
+            已用 {{ quotaPercent(w.used_pct) }}
+            <span class="muted">{{ quotaCountdown(w.resets_at) }}</span>
+          </span>
+        </div>
       </div>
 
       <div v-if="usedBy(inst.name).length" class="row small muted">
@@ -441,6 +599,37 @@ onMounted(async () => {
               <a :href="selectedPreset.docs_url" target="_blank" rel="noreferrer">官方文档</a>
             </p>
           </div>
+
+          <template v-if="needsQuotaCredential">
+            <div class="field span-2">
+              <label for="instance-quota-ak">额度查询凭证 · Access Key ID</label>
+              <input
+                id="instance-quota-ak"
+                v-model="editing.quotaAccessKeyId"
+                autocomplete="off"
+                placeholder="AKLT..."
+              />
+              <p class="muted small">
+                火山方舟的套餐额度只在账号管控面上，需要火山引擎的 Access Key 对才能查询； 推理用的
+                API Key 不能读额度。
+              </p>
+            </div>
+            <div class="field span-2">
+              <label for="instance-quota-sk">
+                额度查询凭证 · Secret Access Key
+                <span v-if="editing.id !== null && editing.quotaSecretHint" class="muted small">
+                  留空保留现有 {{ editing.quotaSecretHint }}
+                </span>
+              </label>
+              <input
+                id="instance-quota-sk"
+                v-model="editing.quotaSecretKey"
+                type="password"
+                autocomplete="off"
+                :placeholder="editing.id === null ? '填写后即可显示套餐额度' : '留空则不修改'"
+              />
+            </div>
+          </template>
 
           <div v-if="editing.mode === 'builtin'" class="field span-2 readonly">
             <span class="field-caption">Base URL（只读）</span>

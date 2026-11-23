@@ -59,6 +59,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminLogs(w, r)
 	case path == "/usage":
 		s.adminUsage(w, r)
+	case path == "/quota":
+		s.adminQuota(w, r)
 	default:
 		writeAdminError(w, http.StatusNotFound, "unknown admin endpoint")
 	}

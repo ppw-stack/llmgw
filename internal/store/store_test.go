@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,9 +18,15 @@ import (
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
+	return testStoreAt(t, filepath.Join(t.TempDir(), "test.db"))
+}
+
+// testStoreAt opens a store on an existing database file.
+func testStoreAt(t *testing.T, path string) *Store {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"),
+	st, err := Open(ctx, path,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -118,6 +125,97 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("log row was not written")
+}
+
+// testQuotaCredentialValues are deliberately fake credential fixtures. They
+// only exercise the encrypt/store/read path and never match a real account.
+const (
+	testQuotaAccessKeyID     = "test-access-key-id"
+	testQuotaSecretAccessKey = "test-secret-access-key"
+)
+
+func TestInstanceQuotaCredentialRoundTrip(t *testing.T) {
+	st := testStore(t)
+	box, err := secret.New(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := encryptQuotaCredential(box, config.QuotaCredential{
+		AccessKeyID:     testQuotaAccessKeyID,
+		SecretAccessKey: testQuotaSecretAccessKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encrypted == "" {
+		t.Fatal("the credential was not encrypted")
+	}
+	if strings.Contains(encrypted, testQuotaSecretAccessKey) {
+		t.Fatal("the credential is stored in the clear")
+	}
+
+	if _, err := st.CreateInstance(InstanceSpec{
+		Name:                     "ark",
+		Preset:                   "ark-coding-plan-cn",
+		EncryptedQuotaCredential: encrypted,
+		Models:                   []string{"ark-code-latest"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	instances, _, err := st.Topology(box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances = %+v", instances)
+	}
+	if instances[0].QuotaCredential.AccessKeyID != testQuotaAccessKeyID ||
+		instances[0].QuotaCredential.SecretAccessKey != testQuotaSecretAccessKey {
+		t.Fatalf("credential = %+v", instances[0].QuotaCredential)
+	}
+}
+
+// TestInstanceQuotaCredentialColumnIsAdded checks that a database from
+// before the quota credential existed still opens and gains the column.
+func TestInstanceQuotaCredentialColumnIsAdded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec(`CREATE TABLE instances (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		preset TEXT NOT NULL DEFAULT '',
+		key_enc TEXT NOT NULL DEFAULT '',
+		endpoints_json TEXT NOT NULL DEFAULT '[]',
+		models_json TEXT NOT NULL DEFAULT '[]',
+		max_fails INTEGER NOT NULL DEFAULT 3,
+		cooldown_secs INTEGER NOT NULL DEFAULT 30,
+		timeout_secs INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := testStoreAt(t, path)
+	records, err := st.ListInstanceRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %+v", records)
+	}
+	if _, err := st.CreateInstance(InstanceSpec{Name: "ark", Models: []string{"ark-code-latest"}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestInstanceAndModelCRUD(t *testing.T) {

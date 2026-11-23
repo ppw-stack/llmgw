@@ -70,9 +70,15 @@ instances:
 
   # 火山方舟 Coding Plan（端点地址由程序内置：…/api/coding）。
   # 只有 /api/coding 系列地址才扣套餐额度，/api/v3 不扣额度而是另外计费。
+  #
+  # 套餐额度（5 小时 / 每周 / 每月）只在账号管控面上，推理用的 API Key 读不到，
+  # 需要另外填一对火山引擎访问密钥（控制台 → 访问控制 → API 访问密钥）。
   - name: ark-coding
     preset: ark-coding-plan-cn
     api_key: "${ARK_API_KEY}"
+    quota_credential:
+      access_key_id: "${VOLC_ACCESS_KEY_ID}"
+      secret_access_key: "${VOLC_SECRET_ACCESS_KEY}"
     models: [ark-code-latest, doubao-seed-2.1-pro]
 
   # 自定义端点：任意 code plan 都是「一个 Key + 1~2 个端点」。

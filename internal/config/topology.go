@@ -31,6 +31,22 @@ type Endpoint struct {
 	BaseURL  string `yaml:"base_url"`
 }
 
+// QuotaCredential is the extra credential some vendors need to read the
+// subscription quota of an instance.
+//
+// It is never used for inference: Volcengine, for example, publishes the plan
+// windows of a Coding Plan only on its account control plane, which asks for
+// an AccessKey pair instead of the inference key.
+type QuotaCredential struct {
+	AccessKeyID     string `yaml:"access_key_id" json:"access_key_id,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key" json:"secret_access_key,omitempty"`
+}
+
+// Empty reports whether the credential carries nothing.
+func (c QuotaCredential) Empty() bool {
+	return c.AccessKeyID == "" && c.SecretAccessKey == ""
+}
+
 // Instance is a physical upstream: one account plus the protocol entrances it
 // serves. It carries no routing strategy - the strategy belongs to the model
 // that uses the instance, because one instance may serve several models with
@@ -42,14 +58,15 @@ type Endpoint struct {
 // required, so a typo in a model's upstream name fails at configuration time
 // instead of at the first upstream call.
 type Instance struct {
-	Name         string     `yaml:"name"`
-	Preset       string     `yaml:"preset"`
-	APIKey       string     `yaml:"api_key"`
-	Endpoints    []Endpoint `yaml:"endpoints"`
-	Models       []string   `yaml:"models"`
-	MaxFails     int        `yaml:"max_fails"`
-	CooldownSecs int        `yaml:"cooldown_secs"`
-	TimeoutSecs  int        `yaml:"timeout_secs"`
+	Name            string          `yaml:"name"`
+	Preset          string          `yaml:"preset"`
+	APIKey          string          `yaml:"api_key"`
+	QuotaCredential QuotaCredential `yaml:"quota_credential"`
+	Endpoints       []Endpoint      `yaml:"endpoints"`
+	Models          []string        `yaml:"models"`
+	MaxFails        int             `yaml:"max_fails"`
+	CooldownSecs    int             `yaml:"cooldown_secs"`
+	TimeoutSecs     int             `yaml:"timeout_secs"`
 }
 
 // ModelInstance binds a model to one instance.
@@ -180,6 +197,14 @@ func NormalizeInstance(in *Instance) error {
 	}
 	in.Preset = strings.TrimSpace(in.Preset)
 	in.APIKey = strings.TrimSpace(in.APIKey)
+	in.QuotaCredential.AccessKeyID = strings.TrimSpace(in.QuotaCredential.AccessKeyID)
+	in.QuotaCredential.SecretAccessKey = strings.TrimSpace(in.QuotaCredential.SecretAccessKey)
+	if in.QuotaCredential.AccessKeyID != "" && in.QuotaCredential.SecretAccessKey == "" {
+		return fmt.Errorf("instance %q: quota_credential needs both access_key_id and secret_access_key", in.Name)
+	}
+	if in.QuotaCredential.SecretAccessKey != "" && in.QuotaCredential.AccessKeyID == "" {
+		return fmt.Errorf("instance %q: quota_credential needs both access_key_id and secret_access_key", in.Name)
+	}
 
 	if in.Preset != "" {
 		pr, ok := preset.Lookup(in.Preset)

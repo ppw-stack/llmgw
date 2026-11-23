@@ -26,6 +26,8 @@ export interface Instance {
   source: 'builtin' | 'custom';
   docs_url?: string;
   key_hint: string;
+  /** 额度查询凭证：火山方舟等厂商用它读取套餐额度 */
+  quota_credential?: QuotaCredentialView;
   endpoints: InstanceEndpoint[];
   /** 该接入点支持的上游模型名，模型引用它的前提 */
   models: string[];
@@ -43,6 +45,11 @@ export interface InstancePayload {
   preset?: string;
   /** 新建必填；编辑时留空表示保留原有 Key */
   api_key?: string;
+  /** 额度查询凭证：新建时可选，编辑时留空表示保留原有凭证 */
+  quota_credential?: {
+    access_key_id: string;
+    secret_access_key: string;
+  };
   /** 仅自定义端点模式提交 */
   endpoints?: InstanceEndpoint[];
   /** 必填：该接入点支持的上游模型名 */
@@ -63,6 +70,55 @@ export interface InstancePreset {
   openai_base_url: string;
   anthropic_base_url: string;
   models: string[];
+  /** 该预设的额度查询声明；没有则表示厂商不提供额度接口 */
+  quota?: PresetQuota;
+}
+
+/** 内置端点的额度查询声明 */
+export interface PresetQuota {
+  /** 额度接口的类型：opencode-go / minimax / ark */
+  kind: string;
+  /** 额度接口地址；ark 由网关自己寻址，没有该字段 */
+  url?: string;
+}
+
+/** 额度查询凭证的只读视图：密钥只回显掩码 */
+export interface QuotaCredentialView {
+  access_key_id?: string;
+  secret_hint?: string;
+}
+
+/** 套餐额度的一个窗口：5 小时、每周或每月 */
+export interface QuotaWindow {
+  /** 窗口标识：5h / weekly / monthly */
+  id: string;
+  /** 窗口的显示名 */
+  label: string;
+  /** 已用百分比，0 到 100 */
+  used_pct: number;
+  /** 窗口重置时间，RFC 3339；上游不返回时为空 */
+  resets_at?: string;
+  /** 窗口状态：ok / exhausted */
+  status?: string;
+}
+
+/** GET /admin/api/quota 中单个接入点的额度 */
+export interface QuotaReport {
+  instance_id: number;
+  instance: string;
+  preset?: string;
+  /** 该接入点的内置端点是否提供额度接口 */
+  supported: boolean;
+  windows: QuotaWindow[];
+  /** 查询上游的时间，RFC 3339 */
+  fetched_at?: string;
+  /** 查询失败的原因 */
+  error?: string;
+}
+
+/** GET /admin/api/quota 的响应 */
+export interface QuotaReports {
+  reports: QuotaReport[] | null;
 }
 
 /** 候选接入点的一个时间窗口 */

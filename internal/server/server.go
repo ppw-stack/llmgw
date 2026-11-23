@@ -18,6 +18,7 @@ import (
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/ingress"
+	"github.com/pw/llmgw/internal/quota"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/secret"
 	"github.com/pw/llmgw/internal/store"
@@ -37,6 +38,9 @@ type Options struct {
 	MaxBody        int64
 	Log            *slog.Logger
 	UI             http.Handler
+	// Quota asks the built-in providers about their subscription quota.
+	// Tests replace it to point at a local server.
+	Quota *quota.Service
 }
 
 type Server struct {
@@ -55,6 +59,7 @@ type Server struct {
 	limiter        *loginLimiter
 	keys           *keyCache
 	loginSem       chan struct{}
+	quota          *quota.Service
 }
 
 func New(o Options) (*Server, error) {
@@ -82,6 +87,10 @@ func New(o Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	quotaService := o.Quota
+	if quotaService == nil {
+		quotaService = quota.NewService()
+	}
 	return &Server{
 		router:         o.Router,
 		forwarder:      o.Forwarder,
@@ -98,6 +107,7 @@ func New(o Options) (*Server, error) {
 		limiter:        newLoginLimiter(5*time.Minute, 10, 10000),
 		keys:           cache,
 		loginSem:       make(chan struct{}, 4),
+		quota:          quotaService,
 	}, nil
 }
 

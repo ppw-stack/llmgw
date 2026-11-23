@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS instances (
     name            TEXT    NOT NULL UNIQUE,
     preset          TEXT    NOT NULL DEFAULT '',
     key_enc         TEXT    NOT NULL DEFAULT '',
+    quota_cred_enc  TEXT    NOT NULL DEFAULT '',
     endpoints_json  TEXT    NOT NULL DEFAULT '[]',
     models_json     TEXT    NOT NULL DEFAULT '[]',
     max_fails       INTEGER NOT NULL DEFAULT 3,
@@ -221,6 +222,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateInstanceModels(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate instance models: %w", err)
+	}
+	if err := migrateInstanceQuotaCredential(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance quota credential: %w", err)
 	}
 	if err := migrateModelInstanceWindows(ctx, db, log); err != nil {
 		db.Close()
@@ -438,6 +443,29 @@ func migrateInstanceModels(ctx context.Context, db *sql.DB, log *slog.Logger) er
 		}
 	}
 	return backfillInstanceModels(ctx, db, log)
+}
+
+// migrateInstanceQuotaCredential adds the column that holds the encrypted
+// quota credential. Existing deployments keep working: the column starts
+// empty, so an instance simply has no quota until the operator fills the
+// credential in.
+func migrateInstanceQuotaCredential(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
+	if err != nil {
+		return fmt.Errorf("read instances table columns: %w", err)
+	}
+	if len(cols) == 0 || cols["quota_cred_enc"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE instances ADD COLUMN quota_cred_enc TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add instances quota credential column: %w", err)
+	}
+	log.Info("added the quota credential column to instances")
+	return nil
 }
 
 // migrateModelInstanceWindows adds the time window column to the candidate

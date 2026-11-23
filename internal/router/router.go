@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	"github.com/pw/llmgw/internal/config"
 )
@@ -14,22 +15,30 @@ type Key struct {
 	Model    string
 }
 
-// Target is the single resolved upstream destination for a request.
+// Target is one resolved upstream candidate for a request. A model may have
+// several targets: they are ordered by priority and tried one after another
+// until one of them succeeds.
 type Target struct {
-	Provider      string
+	Instance      string
+	Model         string
+	Priority      int
+	Weight        int
 	Endpoint      string
 	Protocol      string
 	BaseURL       string
 	Version       string
 	UpstreamModel string
 	Key           string
+	Timeout       time.Duration
+	MaxFails      int
+	Cooldown      time.Duration
 }
 
 // Snapshot is an immutable routing table swapped atomically on reload.
 type Snapshot struct {
 	Version          uint64
 	Config           *config.Config
-	Index            map[Key]Target
+	Index            map[Key][]Target
 	ModelsByProtocol map[string][]string
 }
 
@@ -55,51 +64,54 @@ func (r *Router) Reload(cfg *config.Config) error {
 
 // Build compiles a snapshot without installing it.
 func Build(cfg *config.Config) (*Snapshot, error) {
-	idx := make(map[Key]Target)
+	eff, err := cfg.Effective()
+	if err != nil {
+		return nil, err
+	}
+	idx := make(map[Key][]Target)
 	models := map[string]map[string]struct{}{}
 
-	for pi := range cfg.Providers {
-		p := &cfg.Providers[pi]
-		eff, err := p.Effective()
-		if err != nil {
-			// Effective already names the provider in the error.
-			return nil, err
-		}
-		type endpoint struct {
-			protocol string
-			baseURL  string
-			version  string
-		}
-		endpoints := make([]endpoint, 0, 2)
-		if eff.OpenAIBaseURL != "" {
-			endpoints = append(endpoints, endpoint{protocol: config.ProtocolOpenAI, baseURL: eff.OpenAIBaseURL})
-		}
-		if eff.AnthropicBaseURL != "" {
-			endpoints = append(endpoints, endpoint{protocol: config.ProtocolAnthropic,
-				baseURL: eff.AnthropicBaseURL, version: config.DefaultAnthropicVersion})
-		}
-		for _, ep := range endpoints {
-			if models[ep.protocol] == nil {
-				models[ep.protocol] = map[string]struct{}{}
+	instances := make(map[string]config.EffectiveInstance, len(eff.Instances))
+	for _, inst := range eff.Instances {
+		instances[inst.Name] = inst
+	}
+	defaultTimeout := cfg.UpstreamTimeout.Value()
+
+	for _, m := range eff.Models {
+		for _, cand := range m.Instances {
+			inst, ok := instances[cand.Instance]
+			if !ok {
+				return nil, fmt.Errorf("model %q: instance %q does not exist", m.Name, cand.Instance)
 			}
-			for alias, upstream := range eff.Models {
-				k := Key{Protocol: ep.protocol, Model: alias}
-				if prev, dup := idx[k]; dup {
-					return nil, fmt.Errorf(
-						"model %q is declared twice for protocol %q: provider %q and provider %q; "+
-							"a model may belong to exactly one provider per protocol",
-						alias, ep.protocol, prev.Provider, p.Name)
+			timeout := inst.Timeout
+			if timeout <= 0 {
+				timeout = defaultTimeout
+			}
+			for _, ep := range inst.Endpoints {
+				version := ""
+				if ep.Protocol == config.ProtocolAnthropic {
+					version = config.DefaultAnthropicVersion
 				}
-				idx[k] = Target{
-					Provider:      p.Name,
-					Endpoint:      ep.protocol,
-					Protocol:      ep.protocol,
-					BaseURL:       ep.baseURL,
-					Version:       ep.version,
-					UpstreamModel: upstream,
-					Key:           eff.APIKey,
+				k := Key{Protocol: ep.Protocol, Model: m.Name}
+				idx[k] = append(idx[k], Target{
+					Instance:      inst.Name,
+					Model:         m.Name,
+					Priority:      cand.Priority,
+					Weight:        cand.Weight,
+					Endpoint:      ep.Protocol,
+					Protocol:      ep.Protocol,
+					BaseURL:       ep.BaseURL,
+					Version:       version,
+					UpstreamModel: m.Upstream,
+					Key:           inst.APIKey,
+					Timeout:       timeout,
+					MaxFails:      inst.MaxFails,
+					Cooldown:      time.Duration(inst.CooldownSecs) * time.Second,
+				})
+				if models[ep.Protocol] == nil {
+					models[ep.Protocol] = map[string]struct{}{}
 				}
-				models[ep.protocol][alias] = struct{}{}
+				models[ep.Protocol][m.Name] = struct{}{}
 			}
 		}
 	}
@@ -125,16 +137,22 @@ func (r *Router) Snapshot() *Snapshot { return r.snap.Load() }
 
 func (r *Router) Ready() bool { return r.snap.Load() != nil }
 
-// Resolve performs the only routing decision v1 has: a hash lookup.
-func (r *Router) Resolve(protocol, model string) (Target, error) {
+// Resolve returns the ordered candidate list of one model on one protocol.
+// The first entry is the primary upstream; the rest are fallbacks that are
+// tried when the previous ones fail.
+func (r *Router) Resolve(protocol, model string) ([]Target, error) {
 	snap := r.snap.Load()
 	if snap == nil {
-		return Target{}, &ModelNotFoundError{Model: model, Protocol: protocol, Hint: protocolHint(nil, protocol, model), Reason: "router is not ready"}
+		return nil, &ModelNotFoundError{Model: model, Protocol: protocol, Hint: protocolHint(nil, protocol, model), Reason: "router is not ready"}
 	}
 	if t, ok := snap.Index[Key{Protocol: protocol, Model: model}]; ok {
-		return t, nil
+		// Snapshot is a shared immutable routing table read lock-free by every
+		// request, so hand out a copy to keep callers from mutating it.
+		candidates := make([]Target, len(t))
+		copy(candidates, t)
+		return candidates, nil
 	}
-	return Target{}, &ModelNotFoundError{
+	return nil, &ModelNotFoundError{
 		Model:    model,
 		Protocol: protocol,
 		Hint:     protocolHint(snap, protocol, model),

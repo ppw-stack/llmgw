@@ -44,11 +44,17 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/keys/"):
 		s.adminKeyItem(w, r, id, strings.TrimPrefix(path, "/keys/"))
 	case path == "/providers":
-		s.adminProviders(w, r, id, "")
-	case strings.HasPrefix(path, "/providers/"):
-		s.adminProviders(w, r, id, strings.TrimPrefix(path, "/providers/"))
-	case path == "/provider-presets":
-		s.adminProviderPresets(w, r)
+		s.adminProviders(w, r)
+	case path == "/instances":
+		s.adminInstances(w, r, id, "")
+	case strings.HasPrefix(path, "/instances/"):
+		s.adminInstances(w, r, id, strings.TrimPrefix(path, "/instances/"))
+	case path == "/models":
+		s.adminModels(w, r, id, "")
+	case strings.HasPrefix(path, "/models/"):
+		s.adminModels(w, r, id, strings.TrimPrefix(path, "/models/"))
+	case path == "/provider-presets", path == "/instance-presets":
+		s.adminInstancePresets(w, r)
 	case path == "/logs":
 		s.adminLogs(w, r)
 	case path == "/usage":

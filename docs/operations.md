@@ -33,25 +33,69 @@ log:
   level: info
   format: json
 
-providers:
-  # 内置端点：只需 preset + API Key
+# 上游调用超时（全局默认，单个接入点只能调低）
+upstream_timeout: 120s
+
+# 上游接入点（物理层）：一个账号 + 它提供的协议入口 + 熔断参数
+instances:
+  # 内置端点：端点地址由程序内置，升级自动更新
   # 国内用 minimax-mplan-cn，国际用 minimax-mplan-global（两者 Key 不通用）
   - name: minimax-cn
     preset: minimax-mplan-cn
     api_key: "${MINIMAX_KEY}"
+    models: [MiniMax-M3.1-Flash]
 
-  # 自定义端点：一个 Key + 最多两个 base URL + 模型
+  # 同一个上游的第二个账号，作为主实例的备份
+  - name: minimax-cn-backup
+    preset: minimax-mplan-cn
+    api_key: "${MINIMAX_KEY_BACKUP}"
+    models: [MiniMax-M3.1-Flash]
+
+  # 自定义端点：一个 Key + 1~2 个端点
   - name: glm
     api_key: "${GLM_KEY}"
-    models:
-      - glm-4.6
-    openai_base_url: https://open.bigmodel.cn/api/coding/paas/v4
-    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
+    endpoints:
+      - protocol: openai
+        base_url: https://open.bigmodel.cn/api/coding/paas/v4
+      - protocol: anthropic
+        base_url: https://open.bigmodel.cn/api/anthropic
+    models: [glm-4.6]
 
   - name: deepseek
     api_key: "${DEEPSEEK_KEY}"
+    endpoints:
+      - protocol: openai
+        base_url: https://api.deepseek.com/v1
     models: [deepseek-chat]
-    openai_base_url: https://api.deepseek.com/v1
+
+# 模型（逻辑层）：对外名 + 上游名 + 候选接入点链
+models:
+  # 单实例
+  - name: MiniMax-M3.1-Flash
+    upstream: MiniMax-M3.1-Flash
+    strategy: failover
+    instances:
+      - name: minimax-cn
+
+  # 主备：主实例失败后自动切到备份
+  - name: MiniMax-M3.1-Flash[1m]
+    upstream: MiniMax-M3.1-Flash
+    strategy: failover
+    instances:
+      - name: minimax-cn
+        priority: 0
+      - name: minimax-cn-backup
+        priority: 1
+
+  - name: glm-4.6
+    upstream: glm-4.6
+    instances:
+      - name: glm
+
+  - name: deepseek-chat
+    upstream: deepseek-chat
+    instances:
+      - name: deepseek
 
 # 可选：用于成本估算，单位美元 / 百万 token
 pricing:
@@ -63,13 +107,15 @@ pricing:
 规则：
 
 - `api_key` 支持 `${VAR}` 展开；留空表示上游不需要鉴权（如本地 Ollama）。
-- `models` 支持多行与 `对外名=上游名` 别名；同一份模型同时注册到两个协议。
-- `base_url` 是上游的根，OpenAI 会拼 `/chat/completions`（通常以 `/v1` 结尾），Anthropic 会拼 `/v1/messages`（不要带 `/v1`）。
-- 自定义供应商至少填一个 base URL；只填一个就只开放对应协议。
-- 内置端点（`preset`）不能再填 base URL；URL 与默认模型由程序内置目录提供。
-- 同一协议内模型名重复会**拒绝启动**并打印冲突来源。
-- 超时固定 120s，代理走 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
-- 旧版 `keys + endpoints` 写法已移除，升级时需改成上述形状（数据库中的旧供应商会自动迁移，保留第一个 Key）。
+- 端点的 `base_url` 是上游的根：OpenAI 会拼 `/chat/completions`（通常以 `/v1` 结尾），Anthropic 会拼 `/v1/messages`（不要带 `/v1`）。
+- 自定义接入点至少填一个端点；只填一个就只开放对应协议。
+- 内置端点（`preset`）不能再填端点；地址由程序内置目录提供。
+- 模型名全局唯一，重复会**拒绝启动**。
+- 接入点的 `models` 必填；模型的上游名必须被每个候选接入点声明，否则拒绝启动。
+- `priority` 数字越小越优先；上游返回 5xx / 429 / 超时时自动切到下一个候选，4xx 不切换。
+- 熔断：接入点连续失败 `max_fails`（默认 3）次后跳过 `cooldown_secs`（默认 30 秒）。熔断状态在进程内，配置热重载不会清零。
+- 代理走 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
+- 旧的 `providers` 写法仍可用，加载时自动展开成一个接入点加若干模型；数据库中的旧供应商会在启动时自动迁移。
 
 ## 3. 首次启动
 
@@ -130,7 +176,7 @@ GET /metrics    Prometheus
 | `gw_request_duration_seconds` | 端到端延迟 |
 | `gw_ttft_seconds{protocol}` | 首 token 延迟 |
 | `gw_tokens_total{protocol,kind}` | token 消耗 |
-| `gw_upstream_errors_total{provider}` | 上游错误 |
+| `gw_upstream_errors_total{instance}` | 上游错误（按上游接入点） |
 | `gw_log_dropped_total` | 日志队列溢出丢条数 |
 
 `/metrics` 默认公开。公网部署时设置 `server.metrics_token`，之后需以
@@ -149,11 +195,13 @@ GET /metrics    Prometheus
 
 | 现象 | 排查 |
 |---|---|
-| `404 model_not_found` | 模型未在对应协议的端点中声明；查 `GET /admin/api/providers` |
+| `404 model_not_found` | 模型未声明；查 `GET /admin/api/models` |
 | `400 ... only available via the Anthropic endpoint` | 客户端 base_url 用错，改用 `/anthropic` |
 | `401 invalid gateway key` | Key 停用/删除；重新创建 |
 | `502 upstream unreachable` | 上游域名/DNS/代理问题；查看日志 `upstream_error` |
-| `504 upstream timeout` | 调大 provider `timeout`，或检查上游 |
+| `504 upstream timeout` | 调大 `upstream_timeout`，或调低该接入点的 `timeout_secs` |
+| `503 no upstream instance is currently available` | 所有候选接入点都在熔断冷却期内；看日志 `skip upstream instance in cooldown` |
+| 请求变慢且日志里有 `trying the next candidate` | 主接入点持续失败；检查主实例健康，或调低其 `timeout_secs` |
 | Anthropic 请求 400 `anthropic-version` | 网关固定发送 `2023-06-01`；确认上游支持该版本 |
 | 流式无输出 | 检查是否被中间反代缓冲；关闭 nginx `proxy_buffering` |
 

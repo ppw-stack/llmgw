@@ -25,7 +25,7 @@ function parseErrorMessage(body: unknown): string | null {
 /**
  * 调用管理台接口。
  *
- * @param path 相对 `/admin/api` 的路径，例如 `/providers`
+ * @param path 相对 `/admin/api` 的路径，例如 `/instances`
  * @param options 请求选项
  * @returns 解析后的 JSON；后端返回 204 时为 null
  */

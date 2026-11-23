@@ -1,3 +1,4 @@
+// Package observ defines the Prometheus metrics exposed by the gateway.
 package observ
 
 import (
@@ -28,10 +29,12 @@ var (
 		Help: "Tokens consumed, by protocol and kind.",
 	}, []string{"protocol", "kind"})
 
+	// UpstreamErrors counts upstream failures, by access-point instance and
+	// failure class.
 	UpstreamErrors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gw_upstream_errors_total",
-		Help: "Upstream failures, by provider and class.",
-	}, []string{"provider", "class"})
+		Help: "Upstream failures, by instance and class.",
+	}, []string{"instance", "class"})
 
 	LogDropped = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "gw_log_dropped_total",

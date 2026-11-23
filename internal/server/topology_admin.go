@@ -1,0 +1,764 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/preset"
+	"github.com/pw/llmgw/internal/router"
+	"github.com/pw/llmgw/internal/store"
+)
+
+// endpointInput is one protocol entrance of an instance.
+type endpointInput struct {
+	Protocol string `json:"protocol"`
+	BaseURL  string `json:"base_url"`
+}
+
+// instanceInput is the write form of an instance.
+type instanceInput struct {
+	Name         string          `json:"name"`
+	Preset       *string         `json:"preset"`
+	APIKey       *string         `json:"api_key"`
+	Endpoints    []endpointInput `json:"endpoints"`
+	Models       []string        `json:"models"`
+	MaxFails     *int            `json:"max_fails"`
+	CooldownSecs *int            `json:"cooldown_secs"`
+	TimeoutSecs  *int            `json:"timeout_secs"`
+}
+
+// instanceView is the read form of an instance.
+type instanceView struct {
+	ID           int64          `json:"id"`
+	Name         string         `json:"name"`
+	Preset       string         `json:"preset,omitempty"`
+	PresetName   string         `json:"preset_name,omitempty"`
+	Source       string         `json:"source"`
+	DocsURL      string         `json:"docs_url,omitempty"`
+	KeyHint      string         `json:"key_hint"`
+	Endpoints    []endpointView `json:"endpoints"`
+	Models       []string       `json:"models"`
+	MaxFails     int            `json:"max_fails"`
+	CooldownSecs int            `json:"cooldown_secs"`
+	TimeoutSecs  int            `json:"timeout_secs"`
+	CreatedAt    string         `json:"created_at"`
+	UpdatedAt    string         `json:"updated_at"`
+}
+
+type endpointView struct {
+	Protocol string `json:"protocol"`
+	BaseURL  string `json:"base_url"`
+}
+
+// modelInstanceInput binds a model to one instance.
+type modelInstanceInput struct {
+	Instance string `json:"instance"`
+	Priority int    `json:"priority"`
+	Weight   int    `json:"weight"`
+}
+
+// modelInput is the write form of a model.
+type modelInput struct {
+	Name      string               `json:"name"`
+	Upstream  string               `json:"upstream"`
+	Strategy  string               `json:"strategy"`
+	Instances []modelInstanceInput `json:"instances"`
+}
+
+// modelView is the read form of a model.
+type modelView struct {
+	ID        int64                `json:"id"`
+	Name      string               `json:"name"`
+	Upstream  string               `json:"upstream"`
+	Strategy  string               `json:"strategy"`
+	Instances []modelInstanceInput `json:"instances"`
+	CreatedAt string               `json:"created_at"`
+	UpdatedAt string               `json:"updated_at"`
+}
+
+func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
+	if rawID == "" {
+		switch r.Method {
+		case http.MethodGet:
+			s.listInstances(w, r)
+		case http.MethodPost:
+			s.createInstance(w, r, id)
+		default:
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+	instanceID, ok := parseID(rawID)
+	if !ok {
+		writeAdminError(w, http.StatusBadRequest, "invalid instance id")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		s.updateInstance(w, r, id, instanceID)
+	case http.MethodDelete:
+		s.deleteInstance(w, r, id, instanceID)
+	default:
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) adminModels(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
+	if rawID == "" {
+		switch r.Method {
+		case http.MethodGet:
+			s.listModels(w, r)
+		case http.MethodPost:
+			s.createModel(w, r, id)
+		default:
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+	modelID, ok := parseID(rawID)
+	if !ok {
+		writeAdminError(w, http.StatusBadRequest, "invalid model id")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		s.updateModel(w, r, id, modelID)
+	case http.MethodDelete:
+		s.deleteModel(w, r, id, modelID)
+	default:
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) adminInstancePresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, preset.All())
+}
+
+// ---- instances ----
+
+func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
+	records, err := s.store.ListInstanceRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	views := make([]instanceView, 0, len(records))
+	for _, rec := range records {
+		views = append(views, s.instanceView(rec))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) instanceView(rec store.InstanceRecord) instanceView {
+	view := instanceView{
+		ID:           rec.ID,
+		Name:         rec.Name,
+		Preset:       rec.Preset,
+		Source:       "custom",
+		KeyHint:      s.keyHint(rec.EncryptedKey),
+		Models:       append([]string{}, rec.Models...),
+		MaxFails:     rec.MaxFails,
+		CooldownSecs: rec.CooldownSecs,
+		TimeoutSecs:  rec.TimeoutSecs,
+		CreatedAt:    rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:    rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	for _, ep := range rec.Endpoints {
+		view.Endpoints = append(view.Endpoints, endpointView{Protocol: ep.Protocol, BaseURL: ep.BaseURL})
+	}
+	if view.Endpoints == nil {
+		view.Endpoints = []endpointView{}
+	}
+	if rec.Preset != "" {
+		view.Source = "builtin"
+		if pr, ok := preset.Lookup(rec.Preset); ok {
+			view.PresetName = pr.FamilyName + "（" + pr.VariantName + "）"
+			view.DocsURL = pr.DocsURL
+		}
+	}
+	return view
+}
+
+func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity) {
+	var in instanceInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	instance, err := in.toInstance("")
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(in.APIKeyString()) == "" {
+		writeAdminError(w, http.StatusBadRequest, "an upstream API key is required")
+		return
+	}
+
+	records, err := s.store.ListInstanceRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, rec := range records {
+		if rec.Name == instance.Name {
+			writeAdminError(w, http.StatusConflict, "instance name already exists")
+			return
+		}
+	}
+	instances, models, err := s.store.Topology(s.box)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	instances = append(instances, instance)
+	if err := s.validateTopology(instances, models); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	encrypted, err := s.encryptKey(instance.APIKey)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	rec, err := s.store.CreateInstance(store.InstanceSpec{
+		Name:         instance.Name,
+		Preset:       instance.Preset,
+		EncryptedKey: encrypted,
+		Endpoints:    instance.Endpoints,
+		Models:       instance.Models,
+		MaxFails:     instance.MaxFails,
+		CooldownSecs: instance.CooldownSecs,
+		TimeoutSecs:  instance.TimeoutSecs,
+	})
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.reloadTopology(); err != nil {
+		s.log.Error("reload topology after instance create", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "instance saved but routing reload failed: "+err.Error())
+		return
+	}
+	s.audit(r, id.Username, "instance.create", instance.Name, "success")
+	writeJSON(w, http.StatusCreated, s.instanceView(*rec))
+}
+
+func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
+	var in instanceInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	records, err := s.store.ListInstanceRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var existing *store.InstanceRecord
+	for i := range records {
+		if records[i].ID == instanceID {
+			existing = &records[i]
+			continue
+		}
+		if records[i].Name == strings.TrimSpace(in.Name) {
+			writeAdminError(w, http.StatusConflict, "instance name already exists")
+			return
+		}
+	}
+	if existing == nil {
+		writeAdminError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	if in.Preset != nil && strings.TrimSpace(*in.Preset) != existing.Preset {
+		writeAdminError(w, http.StatusBadRequest,
+			"preset cannot be changed; delete this instance and create a new one")
+		return
+	}
+
+	// An omitted or empty api_key means "keep the stored key".
+	encrypted := existing.EncryptedKey
+	if in.APIKey != nil && strings.TrimSpace(*in.APIKey) != "" {
+		encrypted, err = s.encryptKey(strings.TrimSpace(*in.APIKey))
+		if err != nil {
+			writeAdminError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	presetID := existing.Preset
+	instance, err := in.toInstance(presetID)
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	instances, models, err := s.store.Topology(s.box)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	replaced := make([]config.Instance, 0, len(instances))
+	for _, cur := range instances {
+		if cur.Name == existing.Name {
+			replaced = append(replaced, instance)
+			continue
+		}
+		replaced = append(replaced, cur)
+	}
+	if err := s.validateTopology(replaced, models); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.store.UpdateInstance(instanceID, store.InstanceSpec{
+		Name:         instance.Name,
+		Preset:       instance.Preset,
+		EncryptedKey: encrypted,
+		Endpoints:    instance.Endpoints,
+		Models:       instance.Models,
+		MaxFails:     instance.MaxFails,
+		CooldownSecs: instance.CooldownSecs,
+		TimeoutSecs:  instance.TimeoutSecs,
+	}); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeAdminError(w, status, err.Error())
+		return
+	}
+	if err := s.reloadTopology(); err != nil {
+		s.log.Error("reload topology after instance update", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "instance saved but routing reload failed: "+err.Error())
+		return
+	}
+	s.audit(r, id.Username, "instance.update", instance.Name, "success")
+	writeJSON(w, http.StatusOK, s.instanceView(store.InstanceRecord{
+		ID: instanceID,
+		InstanceSpec: store.InstanceSpec{
+			Name:         instance.Name,
+			Preset:       instance.Preset,
+			EncryptedKey: encrypted,
+			Endpoints:    instance.Endpoints,
+			Models:       instance.Models,
+			MaxFails:     instance.MaxFails,
+			CooldownSecs: instance.CooldownSecs,
+			TimeoutSecs:  instance.TimeoutSecs,
+		},
+		CreatedAt: existing.CreatedAt,
+		UpdatedAt: time.Now().UTC(),
+	}))
+}
+
+func (s *Server) deleteInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
+	if err := s.store.DeleteInstance(instanceID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "still used by") {
+			status = http.StatusConflict
+		}
+		writeAdminError(w, status, err.Error())
+		return
+	}
+	if err := s.reloadTopology(); err != nil {
+		s.log.Error("reload topology after instance delete", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "instance deleted but routing reload failed: "+err.Error())
+		return
+	}
+	s.audit(r, id.Username, "instance.delete", strconv.FormatInt(instanceID, 10), "success")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- models ----
+
+func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
+	records, err := s.store.ListModelRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, modelViews(records))
+}
+
+func modelViews(records []store.ModelRecord) []modelView {
+	views := make([]modelView, 0, len(records))
+	for _, rec := range records {
+		views = append(views, modelView{
+			ID:        rec.ID,
+			Name:      rec.Name,
+			Upstream:  rec.Upstream,
+			Strategy:  rec.Strategy,
+			Instances: modelInstanceViews(rec.Instances),
+			CreatedAt: rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			UpdatedAt: rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	return views
+}
+
+func modelInstanceViews(instances []store.ModelInstanceSpec) []modelInstanceInput {
+	out := make([]modelInstanceInput, 0, len(instances))
+	for _, mi := range instances {
+		out = append(out, modelInstanceInput{
+			Instance: mi.Instance,
+			Priority: mi.Priority,
+			Weight:   mi.Weight,
+		})
+	}
+	return out
+}
+
+func (s *Server) createModel(w http.ResponseWriter, r *http.Request, id *adminIdentity) {
+	var in modelInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	model, err := in.toModel()
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	records, err := s.store.ListModelRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, rec := range records {
+		if rec.Name == model.Name {
+			writeAdminError(w, http.StatusConflict, "model name already exists")
+			return
+		}
+	}
+	instances, models, err := s.store.Topology(s.box)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	models = append(models, model)
+	if err := s.validateTopology(instances, models); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	rec, err := s.store.CreateModel(store.ModelSpec{
+		Name:      model.Name,
+		Upstream:  model.Upstream,
+		Strategy:  model.Strategy,
+		Instances: modelInstanceSpecs(model.Instances),
+	})
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.reloadTopology(); err != nil {
+		s.log.Error("reload topology after model create", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "model saved but routing reload failed: "+err.Error())
+		return
+	}
+	s.audit(r, id.Username, "model.create", model.Name, "success")
+	writeJSON(w, http.StatusCreated, modelViews([]store.ModelRecord{*rec})[0])
+}
+
+func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminIdentity, modelID int64) {
+	var in modelInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	records, err := s.store.ListModelRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var existing *store.ModelRecord
+	for i := range records {
+		if records[i].ID == modelID {
+			existing = &records[i]
+			continue
+		}
+		if records[i].Name == strings.TrimSpace(in.Name) {
+			writeAdminError(w, http.StatusConflict, "model name already exists")
+			return
+		}
+	}
+	if existing == nil {
+		writeAdminError(w, http.StatusNotFound, "model not found")
+		return
+	}
+	model, err := in.toModel()
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	instances, models, err := s.store.Topology(s.box)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	replaced := make([]config.Model, 0, len(models))
+	for _, cur := range models {
+		if cur.Name == existing.Name {
+			replaced = append(replaced, model)
+			continue
+		}
+		replaced = append(replaced, cur)
+	}
+	if err := s.validateTopology(instances, replaced); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.store.UpdateModel(modelID, store.ModelSpec{
+		Name:      model.Name,
+		Upstream:  model.Upstream,
+		Strategy:  model.Strategy,
+		Instances: modelInstanceSpecs(model.Instances),
+	}); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeAdminError(w, status, err.Error())
+		return
+	}
+	if err := s.reloadTopology(); err != nil {
+		s.log.Error("reload topology after model update", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "model saved but routing reload failed: "+err.Error())
+		return
+	}
+	s.audit(r, id.Username, "model.update", model.Name, "success")
+	writeJSON(w, http.StatusOK, modelViews([]store.ModelRecord{{
+		ID: modelID,
+		ModelSpec: store.ModelSpec{
+			Name:      model.Name,
+			Upstream:  model.Upstream,
+			Strategy:  model.Strategy,
+			Instances: modelInstanceSpecs(model.Instances),
+		},
+		CreatedAt: existing.CreatedAt,
+		UpdatedAt: time.Now().UTC(),
+	}})[0])
+}
+
+func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, id *adminIdentity, modelID int64) {
+	if err := s.store.DeleteModel(modelID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeAdminError(w, status, err.Error())
+		return
+	}
+	if err := s.reloadTopology(); err != nil {
+		s.log.Error("reload topology after model delete", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "model deleted but routing reload failed: "+err.Error())
+		return
+	}
+	s.audit(r, id.Username, "model.delete", strconv.FormatInt(modelID, 10), "success")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- shared helpers ----
+
+// APIKeyString returns the submitted upstream key, if any.
+func (in instanceInput) APIKeyString() string {
+	if in.APIKey == nil {
+		return ""
+	}
+	return *in.APIKey
+}
+
+// toInstance validates one instance input. An empty preset keeps the stored
+// one.
+func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
+	if in.Preset != nil {
+		presetID = strings.TrimSpace(*in.Preset)
+	}
+	instance := config.Instance{
+		Name:   strings.TrimSpace(in.Name),
+		Preset: presetID,
+		APIKey: strings.TrimSpace(in.APIKeyString()),
+	}
+	for _, ep := range in.Endpoints {
+		instance.Endpoints = append(instance.Endpoints, config.Endpoint{
+			Protocol: strings.TrimSpace(ep.Protocol),
+			BaseURL:  strings.TrimSpace(ep.BaseURL),
+		})
+	}
+	for _, name := range in.Models {
+		instance.Models = append(instance.Models, strings.TrimSpace(name))
+	}
+	if in.MaxFails != nil {
+		instance.MaxFails = *in.MaxFails
+	}
+	if in.CooldownSecs != nil {
+		instance.CooldownSecs = *in.CooldownSecs
+	}
+	if in.TimeoutSecs != nil {
+		instance.TimeoutSecs = *in.TimeoutSecs
+	}
+	if err := config.NormalizeInstance(&instance); err != nil {
+		return config.Instance{}, err
+	}
+	return instance, nil
+}
+
+// toModel validates one model input.
+func (in modelInput) toModel() (config.Model, error) {
+	model := config.Model{
+		Name:     strings.TrimSpace(in.Name),
+		Upstream: strings.TrimSpace(in.Upstream),
+		Strategy: strings.TrimSpace(in.Strategy),
+	}
+	for _, mi := range in.Instances {
+		model.Instances = append(model.Instances, config.ModelInstance{
+			Name:     strings.TrimSpace(mi.Instance),
+			Priority: mi.Priority,
+			Weight:   mi.Weight,
+		})
+	}
+	if err := config.NormalizeModel(&model); err != nil {
+		return config.Model{}, err
+	}
+	return model, nil
+}
+
+func modelInstanceSpecs(instances []config.ModelInstance) []store.ModelInstanceSpec {
+	out := make([]store.ModelInstanceSpec, 0, len(instances))
+	for _, mi := range instances {
+		out = append(out, store.ModelInstanceSpec{
+			Instance: mi.Name,
+			Priority: mi.Priority,
+			Weight:   mi.Weight,
+		})
+	}
+	return out
+}
+
+// validateTopology checks that a prospective topology can be routed.
+func (s *Server) validateTopology(instances []config.Instance, models []config.Model) error {
+	snap := s.router.Snapshot()
+	if snap == nil {
+		return errors.New("router is not ready")
+	}
+	cfg := *snap.Config
+	cfg.Instances = instances
+	cfg.Models = models
+	_, err := router.Build(&cfg)
+	return err
+}
+
+// reloadTopology rebuilds the routing table from the database.
+func (s *Server) reloadTopology() error {
+	instances, models, err := s.store.Topology(s.box)
+	if err != nil {
+		return err
+	}
+	snap := s.router.Snapshot()
+	if snap == nil {
+		return errors.New("router is not ready")
+	}
+	cfg := *snap.Config
+	cfg.Instances = instances
+	cfg.Models = models
+	return s.router.Reload(&cfg)
+}
+
+func (s *Server) keyHint(enc string) string {
+	if enc == "" {
+		return ""
+	}
+	plain, err := s.box.Decrypt(enc)
+	if err != nil || len(plain) < 4 {
+		return "****"
+	}
+	return "****" + plain[len(plain)-4:]
+}
+
+func (s *Server) encryptKey(key string) (string, error) {
+	if strings.TrimSpace(key) == "" {
+		return "", nil
+	}
+	return s.box.Encrypt(strings.TrimSpace(key))
+}
+
+// providerCompatView is the legacy aggregated read model of /providers.
+type providerCompatView struct {
+	ID               int64    `json:"id"`
+	Name             string   `json:"name"`
+	Preset           string   `json:"preset"`
+	PresetName       string   `json:"preset_name,omitempty"`
+	Source           string   `json:"source"`
+	DocsURL          string   `json:"docs_url,omitempty"`
+	KeyHint          string   `json:"key_hint"`
+	Models           []string `json:"models"`
+	OpenAIBaseURL    string   `json:"openai_base_url"`
+	AnthropicBaseURL string   `json:"anthropic_base_url"`
+}
+
+// adminProviders keeps the legacy read-only view of the upstream topology so
+// existing scripts keep working. New clients use /instances and /models.
+func (s *Server) adminProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	records, err := s.store.ListInstanceRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	models, err := s.store.ListModelRecords()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	views := make([]providerCompatView, 0, len(records))
+	for _, rec := range records {
+		view := providerCompatView{
+			ID:      rec.ID,
+			Name:    rec.Name,
+			Preset:  rec.Preset,
+			Source:  "custom",
+			KeyHint: s.keyHint(rec.EncryptedKey),
+			Models:  []string{},
+		}
+		for _, ep := range rec.Endpoints {
+			switch ep.Protocol {
+			case config.ProtocolOpenAI:
+				view.OpenAIBaseURL = ep.BaseURL
+			case config.ProtocolAnthropic:
+				view.AnthropicBaseURL = ep.BaseURL
+			}
+		}
+		for _, m := range models {
+			for _, mi := range m.Instances {
+				if mi.Instance == rec.Name {
+					view.Models = append(view.Models, m.Name)
+					break
+				}
+			}
+		}
+		if rec.Preset != "" {
+			view.Source = "builtin"
+			if pr, ok := preset.Lookup(rec.Preset); ok {
+				view.PresetName = pr.FamilyName + "（" + pr.VariantName + "）"
+				view.DocsURL = pr.DocsURL
+			}
+		}
+		views = append(views, view)
+	}
+	writeJSON(w, http.StatusOK, views)
+}

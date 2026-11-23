@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -71,17 +72,37 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS providers (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    name              TEXT NOT NULL UNIQUE,
-    preset            TEXT NOT NULL DEFAULT '',
-    key_enc           TEXT NOT NULL DEFAULT '',
-    models_json       TEXT NOT NULL DEFAULT '{}',
-    openai_base_url   TEXT NOT NULL DEFAULT '',
-    anthropic_base_url TEXT NOT NULL DEFAULT '',
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS instances (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL UNIQUE,
+    preset          TEXT    NOT NULL DEFAULT '',
+    key_enc         TEXT    NOT NULL DEFAULT '',
+    endpoints_json  TEXT    NOT NULL DEFAULT '[]',
+    models_json     TEXT    NOT NULL DEFAULT '[]',
+    max_fails       INTEGER NOT NULL DEFAULT 3,
+    cooldown_secs   INTEGER NOT NULL DEFAULT 30,
+    timeout_secs    INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS models (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    upstream    TEXT    NOT NULL DEFAULT '',
+    strategy    TEXT    NOT NULL DEFAULT 'failover',
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_instances (
+    model_id    INTEGER NOT NULL,
+    instance_id INTEGER NOT NULL,
+    priority    INTEGER NOT NULL DEFAULT 0,
+    weight      INTEGER NOT NULL DEFAULT 100,
+    PRIMARY KEY (model_id, instance_id)
+);
+CREATE INDEX IF NOT EXISTS idx_model_instances_instance ON model_instances(instance_id);
 
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,6 +217,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate providers: %w", err)
 	}
+	if err := migrateInstanceModels(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance models: %w", err)
+	}
 	s := &Store{
 		db:   db,
 		logs: make(chan LogEntry, 8192),
@@ -214,30 +239,30 @@ func ensureDir(path string) error {
 	return os.MkdirAll(dir, 0o755)
 }
 
-// migrateProviders converts the pre-preset table (keys_enc + endpoints_json)
-// into the single-key, preset-aware shape. Extra keys, per-provider timeouts
-// and proxies are dropped with a warning instead of failing the upgrade.
+// migrateProviders converts the legacy providers table into the instance and
+// model tables. Two legacy shapes are accepted: the pre-preset one with
+// keys_enc/endpoints_json and the preset-aware one with models_json. The
+// legacy table is dropped afterwards, so the migration runs only once.
 func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
 	cols, err := tableColumns(ctx, db, "providers")
 	if err != nil {
 		return err
 	}
-	if !cols["endpoints_json"] {
+	if len(cols) == 0 {
 		return nil
 	}
 	if log == nil {
 		log = slog.Default()
 	}
 
-	type legacyRow struct {
-		id            int64
-		name          string
-		proxy         string
-		timeoutMS     int
-		keysJSON      string
-		endpointsJSON string
-		created       string
-		updated       string
+	var providers []migratedProvider
+	if cols["endpoints_json"] {
+		providers, err = readLegacyProviders(ctx, db, log)
+	} else {
+		providers, err = readPresetProviders(ctx, db)
+	}
+	if err != nil {
+		return err
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -246,64 +271,272 @@ func migrateProviders(ctx context.Context, db *sql.DB, log *slog.Logger) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE providers RENAME TO providers_legacy`); err != nil {
+	for _, mp := range providers {
+		inst, models, err := config.ExpandProvider(mp.provider)
+		if err != nil {
+			return err
+		}
+		if err := config.NormalizeInstance(&inst); err != nil {
+			return err
+		}
+		endpointsJSON, err := json.Marshal(inst.Endpoints)
+		if err != nil {
+			return err
+		}
+		modelsJSON, err := json.Marshal(inst.Models)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO instances(name, preset, key_enc, endpoints_json,
+			models_json, max_fails, cooldown_secs, timeout_secs, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			inst.Name, inst.Preset, mp.encryptedKey, string(endpointsJSON), string(modelsJSON),
+			inst.MaxFails, inst.CooldownSecs, inst.TimeoutSecs,
+			nowStamp(), nowStamp()); err != nil {
+			return err
+		}
+		var instanceID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM instances WHERE name = ?`, inst.Name).
+			Scan(&instanceID); err != nil {
+			return err
+		}
+		for _, m := range models {
+			if err := config.NormalizeModel(&m); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO models(name, upstream, strategy, created_at, updated_at)
+				VALUES(?,?,?,?,?)`,
+				m.Name, m.Upstream, m.Strategy, nowStamp(), nowStamp()); err != nil {
+				return err
+			}
+			var modelID int64
+			if err := tx.QueryRowContext(ctx, `SELECT id FROM models WHERE name = ?`, m.Name).
+				Scan(&modelID); err != nil {
+				return err
+			}
+			for _, mi := range m.Instances {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO model_instances(model_id, instance_id, priority, weight)
+					VALUES(?,?,?,?)`, modelID, instanceID, mi.Priority, mi.Weight); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE providers`); err != nil {
 		return err
 	}
-	// Re-run the schema: every other table already exists, so this only
-	// recreates providers in its new shape.
-	if _, err := tx.ExecContext(ctx, schema); err != nil {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
+	log.Info("migrated providers into instances and models", "count", len(providers))
+	return nil
+}
 
-	rows, err := tx.QueryContext(ctx, `SELECT id, name, proxy, timeout_ms, keys_enc, endpoints_json,
-		created_at, updated_at FROM providers_legacy ORDER BY id`)
+// migratedProvider is one row of the legacy providers table on its way to the
+// instance and model tables.
+type migratedProvider struct {
+	provider     config.Provider
+	encryptedKey string
+}
+
+// readLegacyProviders reads the pre-preset table shape.
+func readLegacyProviders(ctx context.Context, db *sql.DB, log *slog.Logger) ([]migratedProvider, error) {
+	type legacyRow struct {
+		id            int64
+		name          string
+		proxy         string
+		timeoutMS     int
+		keysJSON      string
+		endpointsJSON string
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, name, proxy, timeout_ms, keys_enc, endpoints_json
+		FROM providers ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []migratedProvider
+	for rows.Next() {
+		var r legacyRow
+		if err := rows.Scan(&r.id, &r.name, &r.proxy, &r.timeoutMS, &r.keysJSON, &r.endpointsJSON); err != nil {
+			return nil, err
+		}
+		spec, encryptedKey, err := convertLegacyProvider(r.name, r.proxy, r.timeoutMS, r.keysJSON, r.endpointsJSON, log)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, migratedProvider{
+			provider:     spec,
+			encryptedKey: encryptedKey,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// readPresetProviders reads the preset-aware table shape.
+func readPresetProviders(ctx context.Context, db *sql.DB) ([]migratedProvider, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name, preset, key_enc, models_json, openai_base_url, anthropic_base_url
+		FROM providers ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []migratedProvider
+	for rows.Next() {
+		var (
+			p          config.Provider
+			encrypted  string
+			modelsJSON string
+		)
+		if err := rows.Scan(&p.Name, &p.Preset, &encrypted, &modelsJSON,
+			&p.OpenAIBaseURL, &p.AnthropicBaseURL); err != nil {
+			return nil, err
+		}
+		models := config.Models{}
+		if modelsJSON != "" {
+			if err := json.Unmarshal([]byte(modelsJSON), &models); err != nil {
+				return nil, fmt.Errorf("provider %q: bad models: %w", p.Name, err)
+			}
+		}
+		p.Models = models
+		out = append(out, migratedProvider{provider: p, encryptedKey: encrypted})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// migrateInstanceModels adds the capability column and backfills it for rows
+// that predate it. Backfilling keeps an existing deployment routable without
+// asking the operator to re-enter every instance.
+func migrateInstanceModels(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
 	if err != nil {
 		return err
 	}
-	var legacy []legacyRow
+	if len(cols) == 0 {
+		return nil
+	}
+	if !cols["models_json"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE instances ADD COLUMN models_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return err
+		}
+	}
+	return backfillInstanceModels(ctx, db, log)
+}
+
+type pendingInstance struct {
+	id     int64
+	name   string
+	preset string
+}
+
+func backfillInstanceModels(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, name, preset FROM instances WHERE models_json = '' OR models_json = '[]'`)
+	if err != nil {
+		return err
+	}
+	var pending []pendingInstance
 	for rows.Next() {
-		var r legacyRow
-		if err := rows.Scan(&r.id, &r.name, &r.proxy, &r.timeoutMS,
-			&r.keysJSON, &r.endpointsJSON, &r.created, &r.updated); err != nil {
+		var p pendingInstance
+		if err := rows.Scan(&p.id, &p.name, &p.preset); err != nil {
 			rows.Close()
 			return err
 		}
-		legacy = append(legacy, r)
+		pending = append(pending, p)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return err
 	}
 	rows.Close()
+	if len(pending) == 0 {
+		return nil
+	}
 
-	for _, r := range legacy {
-		spec, err := convertLegacyProvider(r.name, r.proxy, r.timeoutMS, r.keysJSON, r.endpointsJSON, log)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, p := range pending {
+		names, err := instanceUpstreamNames(ctx, tx, p)
 		if err != nil {
 			return err
 		}
-		modelsJSON, err := json.Marshal(spec.Models)
+		if len(names) == 0 {
+			log.Warn("instance declares no models and none could be derived; "+
+				"set its models list before routing a model through it",
+				"instance", p.name)
+			continue
+		}
+		encoded, err := json.Marshal(names)
 		if err != nil {
 			return err
 		}
-		if spec.Models == nil {
-			modelsJSON = []byte("{}")
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO providers(id, name, preset, key_enc, models_json,
-			openai_base_url, anthropic_base_url, created_at, updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`,
-			r.id, spec.Name, spec.Preset, spec.EncryptedKey, string(modelsJSON),
-			spec.OpenAIBaseURL, spec.AnthropicBaseURL, r.created, r.updated); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE instances SET models_json = ? WHERE id = ?`, string(encoded), p.id); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DROP TABLE providers_legacy`); err != nil {
-		return err
+	return tx.Commit()
+}
+
+// instanceUpstreamNames unions the preset default models with the upstream
+// names the instance currently serves. Both matter: the preset describes the
+// account, the references describe what routing already relies on.
+func instanceUpstreamNames(ctx context.Context, tx *sql.Tx, p pendingInstance) ([]string, error) {
+	seen := map[string]bool{}
+	out := []string{}
+	if p.preset != "" {
+		names, err := config.PresetModels(p.preset)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: derive preset %q models: %w", p.name, p.preset, err)
+		}
+		for _, name := range names {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT m.upstream FROM models m
+		 JOIN model_instances mi ON mi.model_id = m.id
+		 WHERE mi.instance_id = ? ORDER BY m.upstream`, p.id)
+	if err != nil {
+		return nil, err
 	}
-	log.Info("migrated providers to the preset-aware schema", "count", len(legacy))
-	return nil
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	sort.Strings(out)
+	return out, nil
 }
 
 func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
@@ -372,20 +605,22 @@ func normalizeLegacyKey(k string) string {
 	return strings.ReplaceAll(k, "-", "")
 }
 
-// convertLegacyProvider turns one legacy row into the new provider shape. A
-// broken keys/endpoints payload fails the migration instead of silently
-// producing a provider without an upstream key.
+// convertLegacyProvider turns one legacy row into the provider shape the
+// instance/model migration understands. A broken keys/endpoints payload fails
+// the migration instead of silently producing a provider without an upstream
+// key.
 func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpointsJSON string,
-	log *slog.Logger) (ProviderSpec, error) {
-	spec := ProviderSpec{Name: name}
+	log *slog.Logger) (config.Provider, string, error) {
+	p := config.Provider{Name: name}
 	var keys []string
 	if keysJSON != "" {
 		if err := json.Unmarshal([]byte(keysJSON), &keys); err != nil {
-			return ProviderSpec{}, fmt.Errorf("decode legacy keys for provider %q: %w", name, err)
+			return config.Provider{}, "", fmt.Errorf("decode legacy keys for provider %q: %w", name, err)
 		}
 	}
+	encryptedKey := ""
 	if len(keys) > 0 {
-		spec.EncryptedKey = keys[0]
+		encryptedKey = keys[0]
 	}
 	if len(keys) > 1 {
 		log.Warn("provider migration: only the first upstream key is kept",
@@ -398,16 +633,16 @@ func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpoint
 	var endpoints []legacyEndpoint
 	if endpointsJSON != "" {
 		if err := json.Unmarshal([]byte(endpointsJSON), &endpoints); err != nil {
-			return ProviderSpec{}, fmt.Errorf("decode legacy endpoints for provider %q: %w", name, err)
+			return config.Provider{}, "", fmt.Errorf("decode legacy endpoints for provider %q: %w", name, err)
 		}
 	}
 	models := config.Models{}
 	for _, ep := range endpoints {
 		switch ep.Protocol {
 		case config.ProtocolOpenAI:
-			spec.OpenAIBaseURL = strings.TrimRight(ep.BaseURL, "/")
+			p.OpenAIBaseURL = strings.TrimRight(ep.BaseURL, "/")
 		case config.ProtocolAnthropic:
-			spec.AnthropicBaseURL = strings.TrimRight(ep.BaseURL, "/")
+			p.AnthropicBaseURL = strings.TrimRight(ep.BaseURL, "/")
 		}
 		for alias, upstream := range ep.Models {
 			if prev, ok := models[alias]; ok && prev != upstream {
@@ -419,9 +654,9 @@ func convertLegacyProvider(name, proxy string, timeoutMS int, keysJSON, endpoint
 		}
 	}
 	if len(models) > 0 {
-		spec.Models = models
+		p.Models = models
 	}
-	return spec, nil
+	return p, encryptedKey, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

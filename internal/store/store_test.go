@@ -737,3 +737,84 @@ func TestWeightColumnIsDropped(t *testing.T) {
 		t.Fatalf("priority = %d", records[0].Instances[0].Priority)
 	}
 }
+
+// TestInstanceSessionAffinityColumnsAreAdded covers the upgrade path from a
+// database that predates session_header and failover_statuses_json: the
+// columns are added with the historical defaults and the fields round-trip.
+func TestInstanceSessionAffinityColumnsAreAdded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE instances (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		preset TEXT NOT NULL DEFAULT '',
+		key_enc TEXT NOT NULL DEFAULT '',
+		endpoints_json TEXT NOT NULL DEFAULT '[]',
+		models_json TEXT NOT NULL DEFAULT '[]',
+		max_fails INTEGER NOT NULL DEFAULT 3,
+		cooldown_secs INTEGER NOT NULL DEFAULT 30,
+		timeout_secs INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := testStoreAt(t, path)
+	if _, err := st.CreateInstance(InstanceSpec{
+		Name:             "go",
+		Models:           []string{"glm-5.3-flash"},
+		SessionHeader:    "x-opencode-session",
+		FailoverStatuses: []int{402, 429},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := st.ListInstanceRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v", records)
+	}
+	if records[0].SessionHeader != "x-opencode-session" {
+		t.Fatalf("session header = %q", records[0].SessionHeader)
+	}
+	if len(records[0].FailoverStatuses) != 2 || records[0].FailoverStatuses[0] != 402 {
+		t.Fatalf("failover statuses = %v", records[0].FailoverStatuses)
+	}
+}
+
+// TestInstanceSessionHeaderFallsBackToPreset keeps instances created before
+// the column existed working: the preset supplies its required header.
+func TestInstanceSessionHeaderFallsBackToPreset(t *testing.T) {
+	st := testStore(t)
+	if _, err := st.CreateInstance(InstanceSpec{
+		Name:   "go",
+		Preset: "opencode-go",
+		Models: []string{"glm-5.3-flash"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	box, err := secret.New(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, _, err := st.Topology(box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances = %+v", instances)
+	}
+	if instances[0].SessionHeader != "x-opencode-session" {
+		t.Fatalf("session header = %q, want the preset default", instances[0].SessionHeader)
+	}
+}

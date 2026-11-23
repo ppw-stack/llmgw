@@ -67,6 +67,10 @@ instances:
     cooldown_secs: 30
     # 单实例超时（秒）；0 表示用上面的全局 upstream_timeout
     timeout_secs: 0
+    # 该厂商用 402 表示套餐额度耗尽。加上它之后，命中 402 会尝试下一个
+    # 候选并计入熔断，而不是直接把 402 透传给客户端。
+    # 默认始终可切换的状态码是 429 与 5xx，本列表只做追加。
+    failover_statuses: [402]
 
   # 同一个上游地址的两个账号，构成主备：
   # 两者都可以服务同一个模型，靠模型的 priority 决定谁先被调用。
@@ -78,12 +82,15 @@ instances:
     cooldown_secs: 30
 
   # OpenCode Go 订阅（端点地址由程序内置：opencode.ai/inference/go）。
-  # 上游强制要求每个请求带 x-opencode-session，缺失直接返回 400 MissingSessionID；
-  # 网关原样透传客户端请求头，自带会话头的客户端（Claude Code / Codex / ZCode / Pi）可直接用。
+  # 上游强制要求每个请求带 x-opencode-session，缺失直接返回 400 MissingSessionID。
+  # preset 自带 session_header，客户端没带时网关按对话前缀派生稳定值注入
+  # （客户端带了则原样透传），所以普通 OpenAI 客户端也能直接用。
   - name: opencode-go
     preset: opencode-go
     api_key: "${OPENCODE_GO_KEY}"
     models: [glm-5.3, kimi-k3]
+    # 可选：缺会话头等 400 也允许切换（默认 4xx 不切换）
+    # failover_statuses: [400]
 
   # 火山方舟 Coding Plan（端点地址由程序内置：…/api/coding）。
   # 只有 /api/coding 系列地址才扣套餐额度，/api/v3 不扣额度而是另外计费。

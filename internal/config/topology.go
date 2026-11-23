@@ -71,6 +71,17 @@ type Instance struct {
 	// private address. Without it, such an endpoint is rejected so a stolen
 	// admin session cannot use the gateway as an internal-network proxy.
 	AllowPrivateUpstream bool `yaml:"allow_private_upstream"`
+	// SessionHeader names a header the upstream requires for session
+	// affinity. OpenCode Go, for example, rejects requests without a stable
+	// x-opencode-session with "400 MissingSessionID". When the client does
+	// not send it, the gateway derives a value from the conversation prefix
+	// so prompt caching keeps working across turns.
+	SessionHeader string `yaml:"session_header"`
+	// FailoverStatuses lists extra upstream status codes that mean another
+	// candidate may still succeed. The defaults (429 and 5xx) always apply;
+	// this list only adds vendor-specific ones, such as MiniMax's 402 when
+	// the subscription window is exhausted.
+	FailoverStatuses []int `yaml:"failover_statuses"`
 }
 
 // ModelInstance binds a model to one concrete upstream model of one instance.
@@ -112,6 +123,11 @@ type EffectiveInstance struct {
 	// AllowPrivateUpstream mirrors the instance flag so the transport can
 	// re-check the resolved address right before dialing.
 	AllowPrivateUpstream bool
+	// SessionHeader mirrors the instance flag so the transport can inject a
+	// derived session value when the client did not send one.
+	SessionHeader string
+	// FailoverStatuses are the instance's extra retryable status codes.
+	FailoverStatuses []int
 }
 
 // EffectiveEndpoint is one protocol entrance of an instance.
@@ -222,6 +238,10 @@ func NormalizeInstance(in *Instance) error {
 	}
 	in.Preset = strings.TrimSpace(in.Preset)
 	in.APIKey = strings.TrimSpace(in.APIKey)
+	in.SessionHeader = strings.TrimSpace(in.SessionHeader)
+	if in.SessionHeader != "" && !validHeaderName(in.SessionHeader) {
+		return fmt.Errorf("instance %q: session_header %q is not a valid HTTP header name", in.Name, in.SessionHeader)
+	}
 	in.QuotaCredential.AccessKeyID = strings.TrimSpace(in.QuotaCredential.AccessKeyID)
 	in.QuotaCredential.SecretAccessKey = strings.TrimSpace(in.QuotaCredential.SecretAccessKey)
 	if in.QuotaCredential.AccessKeyID != "" && in.QuotaCredential.SecretAccessKey == "" {
@@ -246,6 +266,11 @@ func NormalizeInstance(in *Instance) error {
 			}
 		} else {
 			in.Endpoints = defaults
+		}
+		// A preset that needs session affinity ships the header name, so a
+		// deployment does not have to know the vendor quirk.
+		if in.SessionHeader == "" {
+			in.SessionHeader = pr.SessionHeader
 		}
 	} else if len(in.Endpoints) == 0 {
 		return fmt.Errorf("instance %q: at least one endpoint is required", in.Name)
@@ -287,7 +312,54 @@ func NormalizeInstance(in *Instance) error {
 	if in.TimeoutSecs < 0 {
 		return fmt.Errorf("instance %q: timeout_secs must not be negative", in.Name)
 	}
+	if err := normalizeFailoverStatuses(in); err != nil {
+		return err
+	}
 	return nil
+}
+
+// normalizeFailoverStatuses trims, de-duplicates and sorts the extra retryable
+// status codes of one instance. Only 4xx and 5xx make sense: a success or a
+// redirect never describes a failed attempt.
+func normalizeFailoverStatuses(in *Instance) error {
+	if len(in.FailoverStatuses) == 0 {
+		in.FailoverStatuses = nil
+		return nil
+	}
+	seen := make(map[int]bool, len(in.FailoverStatuses))
+	out := make([]int, 0, len(in.FailoverStatuses))
+	for _, code := range in.FailoverStatuses {
+		if code < 400 || code > 599 {
+			return fmt.Errorf("instance %q: failover_statuses must be HTTP error codes (400-599), got %d", in.Name, code)
+		}
+		if seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	sort.Ints(out)
+	in.FailoverStatuses = out
+	return nil
+}
+
+// validHeaderName reports whether name is an RFC 7230 token, which is what
+// net/http accepts as a request header name.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const tchar = "!#$%&'*+-.^_`|~"
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte(tchar, c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeModelNames trims, de-duplicates and sorts the upstream model names
@@ -385,6 +457,8 @@ func (c *Config) Effective() (Effective, error) {
 			MaxFails:             inst.MaxFails,
 			CooldownSecs:         inst.CooldownSecs,
 			AllowPrivateUpstream: inst.AllowPrivateUpstream,
+			SessionHeader:        inst.SessionHeader,
+			FailoverStatuses:     append([]int(nil), inst.FailoverStatuses...),
 		}
 		if eff.MaxFails <= 0 {
 			eff.MaxFails = DefaultMaxFails

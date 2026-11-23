@@ -36,6 +36,10 @@ type instanceInput struct {
 	TimeoutSecs     *int                  `json:"timeout_secs"`
 	// AllowPrivateUpstream opts an instance into loopback/private endpoints.
 	AllowPrivateUpstream bool `json:"allow_private_upstream"`
+	// SessionHeader is the header the upstream needs for session affinity.
+	SessionHeader *string `json:"session_header"`
+	// FailoverStatuses are extra upstream status codes treated as retryable.
+	FailoverStatuses []int `json:"failover_statuses"`
 }
 
 // quotaCredentialInput is the write form of the extra credential some
@@ -69,9 +73,13 @@ type instanceView struct {
 	CooldownSecs    int                  `json:"cooldown_secs"`
 	TimeoutSecs     int                  `json:"timeout_secs"`
 	// AllowPrivateUpstream is the instance's loopback/private opt-in.
-	AllowPrivateUpstream bool   `json:"allow_private_upstream"`
-	CreatedAt            string `json:"created_at"`
-	UpdatedAt            string `json:"updated_at"`
+	AllowPrivateUpstream bool `json:"allow_private_upstream"`
+	// SessionHeader mirrors the instance field.
+	SessionHeader string `json:"session_header,omitempty"`
+	// FailoverStatuses mirrors the instance field.
+	FailoverStatuses []int  `json:"failover_statuses"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 type endpointView struct {
@@ -330,6 +338,8 @@ func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanc
 		CooldownSecs:         rec.CooldownSecs,
 		TimeoutSecs:          rec.TimeoutSecs,
 		AllowPrivateUpstream: rec.AllowPrivateUpstream,
+		SessionHeader:        rec.SessionHeader,
+		FailoverStatuses:     append([]int{}, rec.FailoverStatuses...),
 		CreatedAt:            rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:            rec.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
@@ -355,6 +365,9 @@ func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanc
 		if pr, ok := preset.Lookup(rec.Preset); ok {
 			view.PresetName = pr.Label()
 			view.DocsURL = pr.DocsURL
+			if view.SessionHeader == "" {
+				view.SessionHeader = pr.SessionHeader
+			}
 		}
 	}
 	return view
@@ -419,6 +432,8 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		CooldownSecs:             instance.CooldownSecs,
 		TimeoutSecs:              instance.TimeoutSecs,
 		AllowPrivateUpstream:     instance.AllowPrivateUpstream,
+		SessionHeader:            instance.SessionHeader,
+		FailoverStatuses:         instance.FailoverStatuses,
 	})
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -520,6 +535,8 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		CooldownSecs:             instance.CooldownSecs,
 		TimeoutSecs:              instance.TimeoutSecs,
 		AllowPrivateUpstream:     instance.AllowPrivateUpstream,
+		SessionHeader:            instance.SessionHeader,
+		FailoverStatuses:         instance.FailoverStatuses,
 	}); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -547,6 +564,8 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 			CooldownSecs:             instance.CooldownSecs,
 			TimeoutSecs:              instance.TimeoutSecs,
 			AllowPrivateUpstream:     instance.AllowPrivateUpstream,
+			SessionHeader:            instance.SessionHeader,
+			FailoverStatuses:         instance.FailoverStatuses,
 		},
 		CreatedAt: existing.CreatedAt,
 		UpdatedAt: time.Now().UTC(),
@@ -828,6 +847,10 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 		Preset:               presetID,
 		APIKey:               strings.TrimSpace(in.APIKeyString()),
 		AllowPrivateUpstream: in.AllowPrivateUpstream,
+		FailoverStatuses:     in.FailoverStatuses,
+	}
+	if in.SessionHeader != nil {
+		instance.SessionHeader = strings.TrimSpace(*in.SessionHeader)
 	}
 	if in.QuotaCredential != nil {
 		instance.QuotaCredential = config.QuotaCredential{

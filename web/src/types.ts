@@ -33,6 +33,10 @@ export interface Instance {
   models: string[];
   /** 是否放行指向 loopback / 内网 / 云元数据地址的上游 */
   allow_private_upstream: boolean;
+  /** 上游要求会话粘性时使用的请求头名（内置端点会自带） */
+  session_header?: string;
+  /** 除 429 / 5xx 之外，额外触发候选切换的状态码 */
+  failover_statuses: number[];
   max_fails: number;
   cooldown_secs: number;
   timeout_secs: number;
@@ -63,6 +67,13 @@ export interface InstancePayload {
    * 不带就会把已放行的内网上游悄悄关掉。
    */
   allow_private_upstream?: boolean;
+  /** 会话头名；空字符串表示按内置端点的默认值处理 */
+  session_header?: string;
+  /**
+   * 额外触发候选切换的状态码（400-599）。
+   * 后端按「追加」处理：429 与 5xx 始终可切换，这里只补厂商特有的。
+   */
+  failover_statuses?: number[];
   max_fails?: number;
   cooldown_secs?: number;
   timeout_secs?: number;

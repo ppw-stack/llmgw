@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS instances (
     endpoints_json  TEXT    NOT NULL DEFAULT '[]',
     models_json     TEXT    NOT NULL DEFAULT '[]',
     allow_private   INTEGER NOT NULL DEFAULT 0,
+    session_header  TEXT    NOT NULL DEFAULT '',
+    failover_statuses_json TEXT NOT NULL DEFAULT '[]',
     max_fails       INTEGER NOT NULL DEFAULT 3,
     cooldown_secs   INTEGER NOT NULL DEFAULT 30,
     timeout_secs    INTEGER NOT NULL DEFAULT 0,
@@ -234,6 +236,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateInstanceAllowPrivate(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate instance allow_private: %w", err)
+	}
+	if err := migrateInstanceSessionAffinity(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance session affinity: %w", err)
 	}
 	if err := migrateModelInstanceWindows(ctx, db, log); err != nil {
 		db.Close()
@@ -557,6 +563,38 @@ func migrateInstanceAllowPrivate(ctx context.Context, db *sql.DB, log *slog.Logg
 		return fmt.Errorf("add instances allow_private column: %w", err)
 	}
 	log.Info("added the allow_private column to instances")
+	return nil
+}
+
+// migrateInstanceSessionAffinity adds the two instance columns that describe
+// vendor-specific request behaviour: the session header an upstream requires
+// and the extra status codes that mean "another candidate may succeed".
+// Existing rows keep the old behaviour: no header, no extra codes.
+func migrateInstanceSessionAffinity(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
+	if err != nil {
+		return fmt.Errorf("read instances table columns: %w", err)
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	if !cols["session_header"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE instances ADD COLUMN session_header TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add instances session_header column: %w", err)
+		}
+		log.Info("added the session_header column to instances")
+	}
+	if !cols["failover_statuses_json"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE instances ADD COLUMN failover_statuses_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("add instances failover_statuses_json column: %w", err)
+		}
+		log.Info("added the failover_statuses_json column to instances")
+	}
 	return nil
 }
 

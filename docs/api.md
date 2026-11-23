@@ -213,12 +213,16 @@ GET /admin/api/instances
   "cooldown_secs": 30,
   "timeout_secs": 0,
   "allow_private_upstream": false,
+  "session_header": "x-opencode-session",
+  "failover_statuses": [402],
   "created_at": "2026-11-22T10:00:00Z",
   "updated_at": "2026-11-22T10:00:00Z"
 }]
 ```
 
 上游 Key 只返回末四位掩码，永不返回明文。`timeout_secs` 为 `0` 表示使用全局 `upstream_timeout`。`models` 是该接入点**声明支持的上游模型名**（必填），不是"当前被哪些模型引用"——后者由客户端从 `GET /admin/api/models` 自行 join。
+
+`session_header` 是上游要求会话粘性时使用的请求头名（OpenCode Go 的 `x-opencode-session`）。内置端点由 preset 自带，创建时可省略。`failover_statuses` 是**额外**触发候选切换的状态码，默认的 `429` 与 `5xx` 始终生效，本列表只做追加。
 
 #### 创建
 
@@ -282,13 +286,16 @@ PUT /admin/api/instances/1
   "name": "minimax",
   "api_key": "sk-new-...",
   "max_fails": 5,
-  "cooldown_secs": 15
+  "cooldown_secs": 15,
+  "failover_statuses": [402]
 }
 ```
 
 - 省略 `api_key` 或传空字符串：保留现有上游 Key。
 - 传非空 `api_key`：整体替换。
 - 省略 `preset`：沿用现有值；显式传入不同的 preset 返回 `400`（需删除重建）。
+- `session_header` 传空字符串：内置端点回落到 preset 自带的头名，自定义端点表示不注入。
+- `failover_statuses` 是整体替换；取值范围 `400-599`，超出返回 `400`。
 - 内置端点的端点由 preset 决定，不接受自定义端点。
 - `models` 必填，更新时整体替换。
 - `allow_private_upstream` **省略即关闭**：这个开关一旦放行内网地址就相当于把网关

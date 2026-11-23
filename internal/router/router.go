@@ -37,6 +37,10 @@ type Target struct {
 	// AllowPrivate reports whether the instance may dial a loopback or
 	// private address.
 	AllowPrivate bool
+	// SessionHeader is the header the upstream needs for session affinity.
+	SessionHeader string
+	// FailoverStatuses are the instance's extra retryable status codes.
+	FailoverStatuses []int
 }
 
 // Snapshot is an immutable routing table swapped atomically on reload.
@@ -109,20 +113,22 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 				}
 				k := Key{Protocol: ep.Protocol, Model: m.Name}
 				idx[k] = append(idx[k], Target{
-					Instance:      inst.Name,
-					Model:         m.Name,
-					Priority:      cand.Priority,
-					Endpoint:      ep.Protocol,
-					Protocol:      ep.Protocol,
-					BaseURL:       ep.BaseURL,
-					Version:       version,
-					UpstreamModel: cand.Upstream,
-					Key:           inst.APIKey,
-					Timeout:       timeout,
-					MaxFails:      inst.MaxFails,
-					Cooldown:      time.Duration(inst.CooldownSecs) * time.Second,
-					Windows:       cand.Windows,
-					AllowPrivate:  inst.AllowPrivateUpstream,
+					Instance:         inst.Name,
+					Model:            m.Name,
+					Priority:         cand.Priority,
+					Endpoint:         ep.Protocol,
+					Protocol:         ep.Protocol,
+					BaseURL:          ep.BaseURL,
+					Version:          version,
+					UpstreamModel:    cand.Upstream,
+					Key:              inst.APIKey,
+					Timeout:          timeout,
+					MaxFails:         inst.MaxFails,
+					Cooldown:         time.Duration(inst.CooldownSecs) * time.Second,
+					Windows:          cand.Windows,
+					AllowPrivate:     inst.AllowPrivateUpstream,
+					SessionHeader:    inst.SessionHeader,
+					FailoverStatuses: append([]int(nil), inst.FailoverStatuses...),
 				})
 				if models[ep.Protocol] == nil {
 					models[ep.Protocol] = map[string]struct{}{}

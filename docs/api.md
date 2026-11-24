@@ -496,7 +496,7 @@ GET /admin/api/logs?limit=100&key_id=1&model=glm-4.6&since=2026-11-22T00:00:00Z
   "ingress_protocol":"openai", "model":"glm-4.6",
   "provider":"glm", "endpoint":"openai", "upstream_model":"glm-4.6",
   "status":200, "latency_ms":812, "ttft_ms":245,
-  "prompt_tokens":120, "completion_tokens":300, "cost_usd":0.00042,
+  "prompt_tokens":120, "completion_tokens":300,
   "usage_estimated":false, "error_code":""
 }]
 ```
@@ -511,9 +511,9 @@ GET /admin/api/logs?limit=100&key_id=1&model=glm-4.6&since=2026-11-22T00:00:00Z
 GET /admin/api/usage?days=7
 200 {
   "daily": [{"day":"2026-11-22","requests":120,"prompt_tokens":10000,
-             "completion_tokens":22000,"cost_usd":0.31}],
-  "by_model": [{"model":"glm-4.6","requests":90,"cost_usd":0.25}],
-  "by_key": [{"key_id":1,"name":"laptop","requests":80,"cost_usd":0.22}]
+             "completion_tokens":22000}],
+  "by_model": [{"model":"glm-4.6","requests":90}],
+  "by_key": [{"key_id":1,"name":"laptop","requests":80}]
 }
 ```
 

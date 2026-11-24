@@ -53,14 +53,13 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 func (d Duration) Value() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Server    Server           `yaml:"server"`
-	Database  Database         `yaml:"database"`
-	Log       Log              `yaml:"log"`
-	Schedule  Schedule         `yaml:"schedule"`
-	Instances []Instance       `yaml:"instances"`
-	Models    []Model          `yaml:"models"`
-	Providers []Provider       `yaml:"providers"`
-	Pricing   map[string]Price `yaml:"pricing"`
+	Server    Server     `yaml:"server"`
+	Database  Database   `yaml:"database"`
+	Log       Log        `yaml:"log"`
+	Schedule  Schedule   `yaml:"schedule"`
+	Instances []Instance `yaml:"instances"`
+	Models    []Model    `yaml:"models"`
+	Providers []Provider `yaml:"providers"`
 
 	// UpstreamTimeout bounds non-streaming upstream calls and the idle gap of
 	// a streaming response. An instance may lower it, never raise it.
@@ -214,12 +213,6 @@ func (m Models) List() []string {
 	return out
 }
 
-type Price struct {
-	InputPerMTok     float64 `yaml:"input_per_mtok"`
-	OutputPerMTok    float64 `yaml:"output_per_mtok"`
-	CacheReadPerMTok float64 `yaml:"cache_read_per_mtok"`
-}
-
 func defaults() *Config {
 	c := &Config{}
 	c.Server.Addr = ":8080"
@@ -265,6 +258,10 @@ func Load(path string) (*Config, error) {
 		if strings.Contains(err.Error(), "config.Instance") {
 			msg = fmt.Errorf("%w; an instance accepts name, api_key, preset and a list of "+
 				"endpoints ({protocol, base_url})", msg)
+		}
+		if strings.Contains(err.Error(), "field pricing not found in type config.Config") {
+			msg = fmt.Errorf("%w; the optional pricing section was removed because the gateway "+
+				"no longer estimates request cost, so delete it from the config file", msg)
 		}
 		return nil, msg
 	}

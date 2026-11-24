@@ -204,12 +204,3 @@ models:
         priority: 1
         # only: true 表示这个候选只在窗口内参与路由，窗口外直接跳过；
         # 完整示例见 docs/routing.md 的「按时段调度候选」一节。
-
-# 可选。USD per million tokens，仅用于成本估算。
-pricing:
-  MiniMax-M3.1-Flash:
-    input_per_mtok: 0.3
-    output_per_mtok: 1.2
-  glm-4.6:
-    input_per_mtok: 0.6
-    output_per_mtok: 2.2

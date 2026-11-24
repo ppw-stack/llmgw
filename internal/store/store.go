@@ -48,7 +48,6 @@ CREATE TABLE IF NOT EXISTS request_logs (
     completion_tokens INTEGER NOT NULL,
     cache_read_tokens INTEGER NOT NULL,
     cache_write_tokens INTEGER NOT NULL,
-    cost_usd          REAL    NOT NULL,
     usage_estimated   INTEGER NOT NULL,
     error_code        TEXT    NOT NULL DEFAULT ''
 );
@@ -64,7 +63,6 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     requests          INTEGER NOT NULL DEFAULT 0,
     prompt_tokens     INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
-    cost_usd          REAL    NOT NULL DEFAULT 0,
     PRIMARY KEY (day, api_key_id, model, provider)
 );
 
@@ -172,7 +170,6 @@ type LogEntry struct {
 	CompletionTokens int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
-	CostUSD          float64
 	UsageEstimated   bool
 	ErrorCode        string
 }
@@ -193,7 +190,6 @@ type LogRow struct {
 	TTFTMS           int64     `json:"ttft_ms"`
 	PromptTokens     int64     `json:"prompt_tokens"`
 	CompletionTokens int64     `json:"completion_tokens"`
-	CostUSD          float64   `json:"cost_usd"`
 	UsageEstimated   bool      `json:"usage_estimated"`
 	ErrorCode        string    `json:"error_code"`
 }
@@ -263,6 +259,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateModelMetadata(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate model metadata: %w", err)
+	}
+	if err := migrateDropCostColumns(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate drop cost columns: %w", err)
 	}
 	restrictFile(path)
 	for _, suffix := range []string{"-wal", "-shm"} {
@@ -688,6 +688,31 @@ func migrateAPIKeySecret(ctx context.Context, db *sql.DB, log *slog.Logger) erro
 	}
 	if log != nil {
 		log.Info("added the key_enc column to api_keys")
+	}
+	return nil
+}
+
+// migrateDropCostColumns removes the obsolete cost_usd columns. The gateway no
+// longer estimates request cost, so both the per-request log and the daily
+// aggregate drop the column.
+func migrateDropCostColumns(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	changed := false
+	for _, table := range []string{"request_logs", "usage_daily"} {
+		cols, err := tableColumns(ctx, db, table)
+		if err != nil {
+			return fmt.Errorf("read %s table columns: %w", table, err)
+		}
+		if !cols["cost_usd"] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE `+table+` DROP COLUMN cost_usd`); err != nil {
+			return fmt.Errorf("drop %s.cost_usd column: %w", table, err)
+		}
+		changed = true
+	}
+	if changed && log != nil {
+		log.Info("dropped the obsolete cost_usd columns")
 	}
 	return nil
 }
@@ -1139,21 +1164,20 @@ func (s *Store) writeBatch(batch []LogEntry) error {
 	insertLog, err := tx.PrepareContext(ctx, `INSERT INTO request_logs(
 		ts, request_id, api_key_id, ingress_protocol, model, provider, endpoint,
 		upstream_model, status, latency_ms, ttft_ms, prompt_tokens, completion_tokens,
-		cache_read_tokens, cache_write_tokens, cost_usd, usage_estimated, error_code)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		cache_read_tokens, cache_write_tokens, usage_estimated, error_code)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer insertLog.Close()
 
 	upsertUsage, err := tx.PrepareContext(ctx, `INSERT INTO usage_daily(
-		day, api_key_id, model, provider, requests, prompt_tokens, completion_tokens, cost_usd)
-		VALUES(?,?,?,?,1,?,?,?)
+		day, api_key_id, model, provider, requests, prompt_tokens, completion_tokens)
+		VALUES(?,?,?,?,1,?,?)
 		ON CONFLICT(day, api_key_id, model, provider) DO UPDATE SET
 		  requests = requests + 1,
 		  prompt_tokens = prompt_tokens + excluded.prompt_tokens,
-		  completion_tokens = completion_tokens + excluded.completion_tokens,
-		  cost_usd = cost_usd + excluded.cost_usd`)
+		  completion_tokens = completion_tokens + excluded.completion_tokens`)
 	if err != nil {
 		return err
 	}
@@ -1166,12 +1190,12 @@ func (s *Store) writeBatch(batch []LogEntry) error {
 			ts.Format(time.RFC3339Nano), e.RequestID, e.APIKeyID, e.IngressProtocol,
 			e.Model, e.Provider, e.Endpoint, e.UpstreamModel, e.Status,
 			e.LatencyMS, e.TTFTMS, e.PromptTokens, e.CompletionTokens,
-			e.CacheReadTokens, e.CacheWriteTokens, e.CostUSD, boolInt(e.UsageEstimated),
+			e.CacheReadTokens, e.CacheWriteTokens, boolInt(e.UsageEstimated),
 			e.ErrorCode); err != nil {
 			return err
 		}
 		if _, err := upsertUsage.ExecContext(ctx, day, e.APIKeyID, e.Model, e.Provider,
-			e.PromptTokens, e.CompletionTokens, e.CostUSD); err != nil {
+			e.PromptTokens, e.CompletionTokens); err != nil {
 			return err
 		}
 	}
@@ -1290,7 +1314,7 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 	rows, err := s.db.Query(`SELECT l.id, l.ts, l.request_id, l.api_key_id,
 		COALESCE(k.name, ''), l.ingress_protocol,
 		l.model, l.provider, l.endpoint, l.upstream_model, l.status, l.latency_ms, l.ttft_ms,
-		l.prompt_tokens, l.completion_tokens, l.cost_usd, l.usage_estimated, l.error_code
+		l.prompt_tokens, l.completion_tokens, l.usage_estimated, l.error_code
 		FROM request_logs l LEFT JOIN api_keys k ON k.id = l.api_key_id
 		WHERE l.ts >= ? AND (? = 0 OR l.api_key_id = ?) AND (? = '' OR l.model = ?)
 		ORDER BY l.id DESC LIMIT ?`,
@@ -1307,7 +1331,7 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.KeyName, &r.IngressProtocol,
 			&r.Model, &r.Provider, &r.Endpoint, &r.UpstreamModel, &r.Status,
 			&r.LatencyMS, &r.TTFTMS, &r.PromptTokens, &r.CompletionTokens,
-			&r.CostUSD, &estimated, &r.ErrorCode); err != nil {
+			&estimated, &r.ErrorCode); err != nil {
 			return nil, err
 		}
 		r.TS, _ = time.Parse(time.RFC3339Nano, ts)
@@ -1318,24 +1342,21 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 }
 
 type UsageDay struct {
-	Day              string  `json:"day"`
-	Requests         int64   `json:"requests"`
-	PromptTokens     int64   `json:"prompt_tokens"`
-	CompletionTokens int64   `json:"completion_tokens"`
-	CostUSD          float64 `json:"cost_usd"`
+	Day              string `json:"day"`
+	Requests         int64  `json:"requests"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
 }
 
 type UsageByModel struct {
-	Model    string  `json:"model"`
-	Requests int64   `json:"requests"`
-	CostUSD  float64 `json:"cost_usd"`
+	Model    string `json:"model"`
+	Requests int64  `json:"requests"`
 }
 
 type UsageByKey struct {
-	KeyID    int64   `json:"key_id"`
-	Name     string  `json:"name"`
-	Requests int64   `json:"requests"`
-	CostUSD  float64 `json:"cost_usd"`
+	KeyID    int64  `json:"key_id"`
+	Name     string `json:"name"`
+	Requests int64  `json:"requests"`
 }
 
 type UsageReport struct {
@@ -1352,14 +1373,14 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	rep := &UsageReport{}
 
 	rows, err := s.db.Query(`SELECT day, SUM(requests), SUM(prompt_tokens),
-		SUM(completion_tokens), SUM(cost_usd) FROM usage_daily
+		SUM(completion_tokens) FROM usage_daily
 		WHERE day >= ? GROUP BY day ORDER BY day`, since)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var d UsageDay
-		if err := rows.Scan(&d.Day, &d.Requests, &d.PromptTokens, &d.CompletionTokens, &d.CostUSD); err != nil {
+		if err := rows.Scan(&d.Day, &d.Requests, &d.PromptTokens, &d.CompletionTokens); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1367,14 +1388,14 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(`SELECT model, SUM(requests), SUM(cost_usd)
+	rows, err = s.db.Query(`SELECT model, SUM(requests)
 		FROM usage_daily WHERE day >= ? GROUP BY model ORDER BY SUM(requests) DESC`, since)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var m UsageByModel
-		if err := rows.Scan(&m.Model, &m.Requests, &m.CostUSD); err != nil {
+		if err := rows.Scan(&m.Model, &m.Requests); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1382,7 +1403,7 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(`SELECT u.api_key_id, COALESCE(k.name, ''), SUM(u.requests), SUM(u.cost_usd)
+	rows, err = s.db.Query(`SELECT u.api_key_id, COALESCE(k.name, ''), SUM(u.requests)
 		FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.api_key_id
 		WHERE u.day >= ? GROUP BY u.api_key_id ORDER BY SUM(u.requests) DESC`, since)
 	if err != nil {
@@ -1390,7 +1411,7 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	}
 	for rows.Next() {
 		var k UsageByKey
-		if err := rows.Scan(&k.KeyID, &k.Name, &k.Requests, &k.CostUSD); err != nil {
+		if err := rows.Scan(&k.KeyID, &k.Name, &k.Requests); err != nil {
 			rows.Close()
 			return nil, err
 		}

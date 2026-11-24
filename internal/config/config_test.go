@@ -239,6 +239,20 @@ func TestLegacyProviderFormIsRejectedWithHint(t *testing.T) {
 	}
 }
 
+func TestPricingSectionIsRejectedWithHint(t *testing.T) {
+	t.Parallel()
+	body := minimal + `
+pricing:
+  m:
+    input_per_mtok: 0.3
+    output_per_mtok: 1.2
+`
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "pricing section was removed") {
+		t.Fatalf("expected pricing hint, got %v", err)
+	}
+}
+
 // ---- instance + model form ----
 
 const topologyConfig = `

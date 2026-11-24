@@ -265,14 +265,12 @@ export interface UsageDay {
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;
-  cost_usd: number;
 }
 
 /** GET /admin/api/usage 中按模型聚合的用量 */
 export interface UsageByModel {
   model: string;
   requests: number;
-  cost_usd: number;
 }
 
 /** GET /admin/api/usage 中按网关 Key 聚合的用量 */
@@ -280,7 +278,6 @@ export interface UsageByKey {
   key_id: number;
   name: string;
   requests: number;
-  cost_usd: number;
 }
 
 /**
@@ -312,7 +309,6 @@ export interface LogEntry {
   ttft_ms: number;
   prompt_tokens: number;
   completion_tokens: number;
-  cost_usd: number;
   usage_estimated: boolean;
   error_code: string;
 }

@@ -57,13 +57,6 @@ export function formatNumber(n: number | null | undefined): string {
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
-/** 格式化美元金额。 */
-export function formatUSD(n: number | null | undefined): string {
-  if (!n) return '$0';
-  if (n < 0.01) return '$' + n.toFixed(6);
-  return '$' + n.toFixed(4);
-}
-
 /** 格式化时间，非法输入原样返回。 */
 export function formatTime(value: string | null | undefined): string {
   if (!value) return '-';

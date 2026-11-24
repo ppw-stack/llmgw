@@ -22,11 +22,13 @@ async function load() {
 }
 
 const totals = computed(() => {
-  const t = { requests: 0, prompt: 0, completion: 0 };
+  const t = { requests: 0, prompt: 0, completion: 0, cacheRead: 0, cacheWrite: 0 };
   for (const d of report.value.daily ?? []) {
     t.requests += d.requests;
     t.prompt += d.prompt_tokens;
     t.completion += d.completion_tokens;
+    t.cacheRead += d.cache_read_tokens;
+    t.cacheWrite += d.cache_write_tokens;
   }
   return t;
 });
@@ -70,6 +72,11 @@ onMounted(() => {
       <div class="card stat">
         <span class="muted">输出 tokens</span>
         <strong>{{ formatNumber(totals.completion) }}</strong>
+      </div>
+      <div class="card stat">
+        <span class="muted">缓存读 tokens</span>
+        <strong>{{ formatNumber(totals.cacheRead) }}</strong>
+        <span class="muted small">写入 {{ formatNumber(totals.cacheWrite) }}</span>
       </div>
     </div>
 

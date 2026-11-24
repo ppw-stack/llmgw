@@ -181,7 +181,7 @@ GET /metrics    Prometheus（需 server.metrics_token，否则接口关闭）
 | `gw_requests_total{protocol,status}` | 请求量与状态码分布 |
 | `gw_request_duration_seconds` | 端到端延迟 |
 | `gw_ttft_seconds{protocol}` | 首 token 延迟 |
-| `gw_tokens_total{protocol,kind}` | token 消耗 |
+| `gw_tokens_total{protocol,kind}` | token 消耗；`kind` 为 `prompt`、`completion`、`cache_read`、`cache_write` |
 | `gw_upstream_errors_total{instance}` | 上游错误（按上游接入点） |
 | `gw_log_dropped_total` | 日志队列溢出丢条数 |
 
@@ -191,7 +191,7 @@ GET /metrics    Prometheus（需 server.metrics_token，否则接口关闭）
 
 ### 判断 prompt 缓存命中
 
-请求日志页的「缓存」列直接显示每次请求：`命中 X%`（附读/写 token）、`写入 N`、`未命中`，或 `-`（上游未返回 usage，信息不可用）。
+请求日志页的「缓存」列直接显示每次请求：`命中 X%`（附读/写 token）、`写入 N`、`未命中`，或 `-`（上游未返回 usage，信息不可用）。概览页会汇总所选区间的缓存读/写 token；按日累计从升级后开始，升级前的历史行为 0。
 
 也可以直接查库做聚合：
 

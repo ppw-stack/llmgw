@@ -441,11 +441,14 @@ GET /admin/api/logs?limit=100&key_id=1&model=glm-4.6&since=2026-11-22T00:00:00Z
 GET /admin/api/usage?days=7
 200 {
   "daily": [{"day":"2026-11-22","requests":120,"prompt_tokens":10000,
-             "completion_tokens":22000}],
+             "completion_tokens":22000,
+             "cache_read_tokens":4000,"cache_write_tokens":0}],
   "by_model": [{"model":"glm-4.6","requests":90}],
   "by_key": [{"key_id":1,"name":"laptop","requests":80}]
 }
 ```
+
+`cache_read_tokens` / `cache_write_tokens` 按日累计。`usage_daily` 的缓存列从升级后开始累计，升级前的历史行保持 0；历史请求日志中的原始值仍可通过 `/admin/api/logs` 按时间范围查询。
 
 ## 套餐额度
 

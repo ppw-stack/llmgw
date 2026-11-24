@@ -1,5 +1,14 @@
 # Local test environment: gateway + deterministic mock upstream.
 # Credentials here are test-only; never reuse them in production.
+#
+# The topology below mirrors the production deployment (same instance names,
+# same candidate chains, same session/failover settings) so a local run
+# exercises the real routing shape. Every upstream points at the mock, and
+# the mock's api_key switches the behaviour it plays:
+#
+#   mock-upstream-key      normal answer
+#   mock-quota             402 Payment Required (exhausted plan window)
+#   mock-session-required  400 MissingSessionID unless x-opencode-session is sent
 
 server:
   addr: ":8080"
@@ -37,60 +46,111 @@ log:
 schedule:
   timezone: "Asia/Shanghai"
 
+# 四个接入点与生产同名，端点全部指向 mock。
 instances:
-  - name: mock
-    api_key: "mock-upstream-key"
+  # 生产：MiniMax 编码套餐（国内）。用 mock-quota 复现「5 小时窗口打满」。
+  # failover_statuses: [402] 让它命中后切到下一个候选，而不是直接透传。
+  - name: minimax
+    api_key: "mock-quota"
     allow_private_upstream: true
     endpoints:
       - protocol: openai
         base_url: http://mock:8000
       - protocol: anthropic
         base_url: http://mock:8000
-    models: [gpt-test, claude-test, gpt-upstream-name]
-  # 同一个 mock 的第二个接入点，用来演示时间窗口：在 00:00-08:00
-  # 它接管 gpt-windowed，其他时段由 mock 接管。
-  - name: mock-night
-    api_key: "mock-upstream-key"
-    allow_private_upstream: true
-    endpoints:
-      - protocol: openai
-        base_url: http://mock:8000
-      - protocol: anthropic
-        base_url: http://mock:8000
-    models: [gpt-test, claude-test, gpt-upstream-name]
+    models: [MiniMax-M3, MiniMax-M3.1-Flash, minimax-m3.1-flash]
+    # 生产里把这台的冷却调到了 1 小时（额度耗尽后不要每 5 分钟重试）
+    max_fails: 3
+    cooldown_secs: 3600
+    failover_statuses: [402]
 
+  # 生产：火山方舟 Coding Plan。mock 正常应答。
+  - name: fangzhou
+    api_key: "mock-upstream-key"
+    allow_private_upstream: true
+    endpoints:
+      - protocol: openai
+        base_url: http://mock:8000
+      - protocol: anthropic
+        base_url: http://mock:8000
+    models: [deepseek-v4.1-flash, glm-5.3-flash]
+
+  # 生产：OpenCode Go。mock-session-required 复现「缺 x-opencode-session 就 400」。
+  # 网关在客户端没带该头时按对话前缀派生稳定值注入，所以普通调用应当成功；
+  # 万一仍被拒，failover_statuses: [400] 允许切到下一个候选。
+  - name: opencode-go
+    api_key: "mock-session-required"
+    allow_private_upstream: true
+    session_header: x-opencode-session
+    endpoints:
+      - protocol: openai
+        base_url: http://mock:8000
+      - protocol: anthropic
+        base_url: http://mock:8000
+    models:
+      [deepseek-v4.1-flash, glm-5.3-flash, kimi-k3, minimax-m3, MiniMax-M3.1-Flash, minimax-m3.1-flash]
+    failover_statuses: [400]
+
+  # 生产：自定义接入点（内网 magpie）。测试环境同样走内网 mock，
+  # 上游模型名保留 workbuddy/ 前缀，验证候选级 upstream 的映射。
+  - name: workbuddy
+    api_key: "mock-upstream-key"
+    allow_private_upstream: true
+    endpoints:
+      - protocol: openai
+        base_url: http://mock:8000
+      - protocol: anthropic
+        base_url: http://mock:8000
+    models: [workbuddy/deepseek-v4.1-flash, workbuddy/glm-5.3-flash]
+
+# 对外模型与候选链与生产一致。
 models:
-  - name: gpt-test
+  # 生产：opencode-go p0 → workbuddy p1 → fangzhou p2
+  - name: deepseek-v4.1-flash
     instances:
-      - name: mock
-        upstream: gpt-test
-  - name: claude-test
-    instances:
-      - name: mock
-        upstream: claude-test
-  - name: gpt-alias
-    instances:
-      - name: mock
-        upstream: gpt-upstream-name
-  # 时间窗口示例：北京时间 00:00-08:00 命中 mock-night（生效优先级 0），
-  # 其他时段按基础优先级走 mock。请求日志里的「上游接入点」会变化。
-  - name: gpt-windowed
-    instances:
-      - name: mock
-        upstream: gpt-test
+      - name: opencode-go
+        upstream: deepseek-v4.1-flash
+        priority: 0
+      - name: workbuddy
+        upstream: workbuddy/deepseek-v4.1-flash
         priority: 1
-      - name: mock-night
-        upstream: gpt-test
-        priority: 10
-        windows:
-          - start: "00:00"
-            end: "08:00"
-            priority: 0
+      - name: fangzhou
+        upstream: deepseek-v4.1-flash
+        priority: 2
+
+  # 生产：minimax p0 → opencode-go p1。
+  # minimax 在测试环境固定返回 402，所以这条链每次都会走到 opencode-go，
+  # 正好验证「402 触发切换 + 会话头注入」两个行为。
+  - name: MiniMax-M3.1-Flash
+    instances:
+      - name: minimax
+        upstream: MiniMax-M3.1-Flash
+        priority: 0
+      - name: opencode-go
+        upstream: MiniMax-M3.1-Flash
+        priority: 1
+
+  # 生产：fangzhou 与 workbuddy 同为 p0，平局按写入顺序取 fangzhou；
+  # opencode-go 为 p1 备选。
+  - name: glm-5.3-flash
+    instances:
+      - name: fangzhou
+        upstream: glm-5.3-flash
+        priority: 0
+      - name: workbuddy
+        upstream: workbuddy/glm-5.3-flash
+        priority: 0
+      - name: opencode-go
+        upstream: glm-5.3-flash
+        priority: 1
 
 pricing:
-  gpt-test:
-    input_per_mtok: 1
-    output_per_mtok: 2
-  claude-test:
-    input_per_mtok: 3
-    output_per_mtok: 15
+  MiniMax-M3.1-Flash:
+    input_per_mtok: 0.3
+    output_per_mtok: 1.2
+  deepseek-v4.1-flash:
+    input_per_mtok: 0.15
+    output_per_mtok: 0.6
+  glm-5.3-flash:
+    input_per_mtok: 0.6
+    output_per_mtok: 2.2

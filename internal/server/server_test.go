@@ -112,10 +112,6 @@ func setupConfigServer(t *testing.T, cap *capture, upstreamHandler http.HandlerF
 				},
 			},
 		},
-		Pricing: map[string]config.Price{
-			"gpt-test":    {InputPerMTok: 1, OutputPerMTok: 2},
-			"claude-test": {InputPerMTok: 3, OutputPerMTok: 15},
-		},
 	}
 	if mutate != nil {
 		mutate(cfg)
@@ -256,9 +252,6 @@ func TestOpenAINonStream(t *testing.T) {
 	}
 	if row.PromptTokens != 10 || row.CompletionTokens != 5 {
 		t.Fatalf("usage: %+v", row)
-	}
-	if row.CostUSD <= 0 {
-		t.Fatalf("expected cost, got %v", row.CostUSD)
 	}
 }
 

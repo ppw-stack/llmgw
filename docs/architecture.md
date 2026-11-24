@@ -49,7 +49,6 @@ internal/transport/        转发、SSE 透传、usage 嗅探、失败分类
 internal/auth/             网关 Key 生成、bcrypt 密码、会话令牌
 internal/clientip/         可信代理下解析真实客户端 IP
 internal/store/            SQLite schema、仓储、异步日志写入
-internal/usage/            价格表与成本计算
 internal/server/           mux、中间件、数据面 handler、管理 REST API
 internal/webui/            内嵌的 Vite 构建产物（go:embed）
 internal/observ/           metrics、日志
@@ -69,7 +68,7 @@ web/                       Vue 3 + Vite 控制台源码
    - 非流式：读完整响应 → 解析 usage → 写回客户端。
    - 流式：逐行读取上游 SSE，边转发边嗅探 usage，每个事件 flush。
 9. **失败切换**：连接失败、超时、`5xx`、`429` 时换下一个候选重试；`4xx` 原样透传。流式响应一旦拿到上游响应头即锁定该上游。
-10. **收尾**：记录耗时、TTFT、token、成本；写入异步队列；更新 metrics。
+10. **收尾**：记录耗时、TTFT、token；写入异步队列；更新 metrics。
 
 ## 4. 关键实现约束
 

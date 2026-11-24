@@ -422,9 +422,14 @@ GET /admin/api/logs?limit=100&key_id=1&model=glm-4.6&since=2026-11-22T00:00:00Z
   "provider":"glm", "endpoint":"openai", "upstream_model":"glm-4.6",
   "status":200, "latency_ms":812, "ttft_ms":245,
   "prompt_tokens":120, "completion_tokens":300,
+  "cache_read_tokens":1024, "cache_write_tokens":0,
   "usage_estimated":false, "error_code":""
 }]
 ```
+
+`cache_read_tokens` 是上游 prompt 缓存复用的 token，大于 0 表示命中；`cache_write_tokens` 是本次写入缓存的 token，不算命中。`usage_estimated` 为 `true` 时上游没有返回 usage，两个缓存字段不可用。
+
+两种入口的 token 语义不同：Anthropic 的 `prompt_tokens`（`input_tokens`）不含缓存 token，总输入为 `prompt_tokens + cache_read_tokens + cache_write_tokens`；OpenAI 的 `prompt_tokens` 已包含 cached tokens。
 
 响应 body 不入库；错误原因只记录分类码（`client_canceled`、`upstream_timeout`、`upstream_5xx` 等）。
 

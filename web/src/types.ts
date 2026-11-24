@@ -289,6 +289,8 @@ export interface LogEntry {
   ttft_ms: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   usage_estimated: boolean;
   error_code: string;
 }

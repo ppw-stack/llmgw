@@ -53,10 +53,20 @@ func (u *usageAcc) observeLine(protocol string, line []byte) {
 		if r := gjson.GetBytes(payload, "usage"); r.Exists() && r.IsObject() {
 			u.prompt = r.Get("prompt_tokens").Int()
 			u.completion = r.Get("completion_tokens").Int()
-			u.cacheRead = r.Get("prompt_tokens_details.cached_tokens").Int()
+			u.cacheRead = openAICacheRead(r)
 			u.seen = true
 		}
 	}
+}
+
+// openAICacheRead reads the cached prompt tokens from the two usage shapes
+// OpenAI-compatible upstreams use: the OpenAI nested counter and the
+// DeepSeek-style flat counter.
+func openAICacheRead(usage gjson.Result) int64 {
+	if v := usage.Get("prompt_tokens_details.cached_tokens").Int(); v > 0 {
+		return v
+	}
+	return usage.Get("prompt_cache_hit_tokens").Int()
 }
 
 // observeBody extracts usage from a non-streaming JSON response.
@@ -77,7 +87,7 @@ func (u *usageAcc) observeBody(protocol string, body []byte) {
 		if r := gjson.GetBytes(body, "usage"); r.Exists() && r.IsObject() {
 			u.prompt = r.Get("prompt_tokens").Int()
 			u.completion = r.Get("completion_tokens").Int()
-			u.cacheRead = r.Get("prompt_tokens_details.cached_tokens").Int()
+			u.cacheRead = openAICacheRead(r)
 			u.seen = true
 		}
 	}

@@ -189,6 +189,8 @@ type LogRow struct {
 	TTFTMS           int64     `json:"ttft_ms"`
 	PromptTokens     int64     `json:"prompt_tokens"`
 	CompletionTokens int64     `json:"completion_tokens"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
 	UsageEstimated   bool      `json:"usage_estimated"`
 	ErrorCode        string    `json:"error_code"`
 }
@@ -1287,7 +1289,8 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 	rows, err := s.db.Query(`SELECT l.id, l.ts, l.request_id, l.api_key_id,
 		COALESCE(k.name, ''), l.ingress_protocol,
 		l.model, l.provider, l.endpoint, l.upstream_model, l.status, l.latency_ms, l.ttft_ms,
-		l.prompt_tokens, l.completion_tokens, l.usage_estimated, l.error_code
+		l.prompt_tokens, l.completion_tokens, l.cache_read_tokens, l.cache_write_tokens,
+		l.usage_estimated, l.error_code
 		FROM request_logs l LEFT JOIN api_keys k ON k.id = l.api_key_id
 		WHERE l.ts >= ? AND (? = 0 OR l.api_key_id = ?) AND (? = '' OR l.model = ?)
 		ORDER BY l.id DESC LIMIT ?`,
@@ -1304,6 +1307,7 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.KeyName, &r.IngressProtocol,
 			&r.Model, &r.Provider, &r.Endpoint, &r.UpstreamModel, &r.Status,
 			&r.LatencyMS, &r.TTFTMS, &r.PromptTokens, &r.CompletionTokens,
+			&r.CacheReadTokens, &r.CacheWriteTokens,
 			&estimated, &r.ErrorCode); err != nil {
 			return nil, err
 		}

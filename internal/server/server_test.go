@@ -219,7 +219,7 @@ func TestOpenAINonStream(t *testing.T) {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("unexpected upstream path %q", r.URL.Path)
 		}
-		_, _ = io.WriteString(w, `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		_, _ = io.WriteString(w, `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":6}}}`)
 	}, []string{"up-1"})
 
 	resp := post(t, gw.URL+"/openai/v1/chat/completions", key,
@@ -250,7 +250,7 @@ func TestOpenAINonStream(t *testing.T) {
 	if row.Model != "gpt-test" || row.UpstreamModel != "gpt-upstream" {
 		t.Fatalf("log row: %+v", row)
 	}
-	if row.PromptTokens != 10 || row.CompletionTokens != 5 {
+	if row.PromptTokens != 10 || row.CompletionTokens != 5 || row.CacheReadTokens != 6 {
 		t.Fatalf("usage: %+v", row)
 	}
 }
@@ -303,7 +303,7 @@ func TestAnthropicStream(t *testing.T) {
 		flusher.Flush()
 		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
 		flusher.Flush()
-		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9,\"cache_read_input_tokens\":13}}\n\n")
 		flusher.Flush()
 		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 		flusher.Flush()
@@ -337,7 +337,7 @@ func TestAnthropicStream(t *testing.T) {
 	}
 
 	row := waitLog(t, st)
-	if row.PromptTokens != 11 || row.CompletionTokens != 9 {
+	if row.PromptTokens != 11 || row.CompletionTokens != 9 || row.CacheReadTokens != 13 {
 		t.Fatalf("anthropic usage: %+v", row)
 	}
 }

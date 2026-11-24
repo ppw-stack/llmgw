@@ -111,6 +111,7 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 		TS: time.Now(), RequestID: "req-1", APIKeyID: 1, IngressProtocol: "openai",
 		Model: "m", Provider: "p", Endpoint: "openai", UpstreamModel: "m",
 		Status: 200, PromptTokens: 3, CompletionTokens: 4,
+		CacheReadTokens: 5, CacheWriteTokens: 6,
 	}) {
 		t.Fatal("enqueue rejected")
 	}
@@ -118,7 +119,8 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 	for time.Now().Before(deadline) {
 		rows, err := st.Logs(LogFilter{Limit: 10})
 		if err == nil && len(rows) == 1 {
-			if rows[0].PromptTokens != 3 || rows[0].CompletionTokens != 4 {
+			if rows[0].PromptTokens != 3 || rows[0].CompletionTokens != 4 ||
+				rows[0].CacheReadTokens != 5 || rows[0].CacheWriteTokens != 6 {
 				t.Fatalf("unexpected row: %+v", rows[0])
 			}
 			return

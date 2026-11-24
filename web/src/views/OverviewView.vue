@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { api, formatNumber, formatUSD } from '../api';
+import { api, formatNumber } from '../api';
 import type { UsageReport } from '../types';
 import { errorMessage } from '../utils/error';
 
@@ -22,12 +22,11 @@ async function load() {
 }
 
 const totals = computed(() => {
-  const t = { requests: 0, prompt: 0, completion: 0, cost: 0 };
+  const t = { requests: 0, prompt: 0, completion: 0 };
   for (const d of report.value.daily ?? []) {
     t.requests += d.requests;
     t.prompt += d.prompt_tokens;
     t.completion += d.completion_tokens;
-    t.cost += d.cost_usd;
   }
   return t;
 });
@@ -72,10 +71,6 @@ onMounted(() => {
         <span class="muted">输出 tokens</span>
         <strong>{{ formatNumber(totals.completion) }}</strong>
       </div>
-      <div class="card stat">
-        <span class="muted">估算成本</span>
-        <strong>{{ formatUSD(totals.cost) }}</strong>
-      </div>
     </div>
 
     <div class="card">
@@ -103,7 +98,6 @@ onMounted(() => {
             <tr>
               <th>模型</th>
               <th class="num">请求</th>
-              <th class="num">成本</th>
             </tr>
           </thead>
           <tbody>
@@ -112,10 +106,9 @@ onMounted(() => {
                 <code>{{ m.model }}</code>
               </td>
               <td class="num">{{ formatNumber(m.requests) }}</td>
-              <td class="num">{{ formatUSD(m.cost_usd) }}</td>
             </tr>
             <tr v-if="!report.by_model?.length">
-              <td colspan="3" class="muted">暂无数据</td>
+              <td colspan="2" class="muted">暂无数据</td>
             </tr>
           </tbody>
         </table>
@@ -128,17 +121,15 @@ onMounted(() => {
             <tr>
               <th>Key</th>
               <th class="num">请求</th>
-              <th class="num">成本</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="k in report.by_key ?? []" :key="k.key_id">
               <td>{{ k.name || '#' + k.key_id }}</td>
               <td class="num">{{ formatNumber(k.requests) }}</td>
-              <td class="num">{{ formatUSD(k.cost_usd) }}</td>
             </tr>
             <tr v-if="!report.by_key?.length">
-              <td colspan="3" class="muted">暂无数据</td>
+              <td colspan="2" class="muted">暂无数据</td>
             </tr>
           </tbody>
         </table>

@@ -82,7 +82,7 @@ POST /admin/api/keys
 {
   "id": 1,
   "name": "laptop",
-  "key": "sk-gw-3f9c...",      // 仅此一次返回明文
+  "key": "sk-gw-3f9c...",      // 明文；之后可在列表回显
   "prefix": "sk-gw-3f9",
   "enabled": true,
   "created_at": "2026-11-22T10:00:00Z"
@@ -93,9 +93,13 @@ POST /admin/api/keys
 
 ```
 GET /admin/api/keys
-200 [{ "id":1, "name":"laptop", "prefix":"sk-gw-3f9", "enabled":true,
-       "last_used_at":"...", "created_at":"..." }]
+200 [{ "id":1, "name":"laptop", "prefix":"sk-gw-3f9", "key":"sk-gw-3f9c...",
+       "enabled":true, "last_used_at":"...", "created_at":"..." }]
 ```
+
+- `name` 由创建时填写，留空记为 `default`。
+- `key` 是解密后的完整明文，用于控制台回显；密文用 AES-256-GCM 存储。
+- 该版本之前创建的 Key 只有哈希、没有密文，响应中不带 `key`，列表只能展示前缀。
 
 ### 启停
 
@@ -413,7 +417,7 @@ POST /admin/api/models
 ```
 GET /admin/api/logs?limit=100&key_id=1&model=glm-4.6&since=2026-11-22T00:00:00Z
 200 [{
-  "id": 1024, "ts":"...", "request_id":"...", "api_key_id":1,
+  "id": 1024, "ts":"...", "request_id":"...", "api_key_id":1, "key_name":"laptop",
   "ingress_protocol":"openai", "model":"glm-4.6",
   "provider":"glm", "endpoint":"openai", "upstream_model":"glm-4.6",
   "status":200, "latency_ms":812, "ttft_ms":245,

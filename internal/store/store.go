@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     prefix       TEXT    NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
     created_at   TEXT    NOT NULL,
-    last_used_at TEXT
+    last_used_at TEXT,
+    key_enc      TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -148,6 +149,10 @@ type APIKey struct {
 	Enabled    bool       `json:"enabled"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// EncryptedKey 是回显用的密文，只在校验与管理台列表里短暂出现，不参与鉴权。
+	EncryptedKey string `json:"-"`
+	// Key 是解密后的明文，仅在管理台列表响应中回显；旧 Key 没有密文时为空。
+	Key string `json:"key,omitempty"`
 }
 
 type LogEntry struct {
@@ -176,6 +181,7 @@ type LogRow struct {
 	TS               time.Time `json:"ts"`
 	RequestID        string    `json:"request_id"`
 	APIKeyID         int64     `json:"api_key_id"`
+	KeyName          string    `json:"key_name"`
 	IngressProtocol  string    `json:"ingress_protocol"`
 	Model            string    `json:"model"`
 	Provider         string    `json:"provider"`
@@ -248,6 +254,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateModelInstanceWeight(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate model instance weight: %w", err)
+	}
+	if err := migrateAPIKeySecret(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate api key secret: %w", err)
 	}
 	restrictFile(path)
 	for _, suffix := range []string{"-wal", "-shm"} {
@@ -634,6 +644,27 @@ func migrateModelInstanceWeight(ctx context.Context, db *sql.DB, log *slog.Logge
 	return nil
 }
 
+// migrateAPIKeySecret adds the column that keeps a decryptable copy of each
+// gateway key, so the console can show a key again after creation. Keys made
+// before the column existed stay hash-only and cannot be echoed.
+func migrateAPIKeySecret(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(ctx, db, "api_keys")
+	if err != nil {
+		return fmt.Errorf("read api_keys table columns: %w", err)
+	}
+	if len(cols) == 0 || cols["key_enc"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE api_keys ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add api_keys key_enc column: %w", err)
+	}
+	if log != nil {
+		log.Info("added the key_enc column to api_keys")
+	}
+	return nil
+}
+
 type pendingInstance struct {
 	id     int64
 	name   string
@@ -917,11 +948,11 @@ func (s *Store) KeyRecords() ([]KeyRecord, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) CreateKey(name, hash, prefix string) (*APIKey, error) {
+func (s *Store) CreateKey(name, hash, prefix, encrypted string) (*APIKey, error) {
 	now := time.Now().UTC()
 	res, err := s.db.Exec(
-		`INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at) VALUES(?,?,?,1,?)`,
-		name, hash, prefix, now.Format(time.RFC3339Nano))
+		`INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, key_enc) VALUES(?,?,?,1,?,?)`,
+		name, hash, prefix, now.Format(time.RFC3339Nano), encrypted)
 	if err != nil {
 		return nil, err
 	}
@@ -931,7 +962,7 @@ func (s *Store) CreateKey(name, hash, prefix string) (*APIKey, error) {
 
 func (s *Store) ListKeys() ([]APIKey, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, prefix, enabled, created_at, last_used_at
+		`SELECT id, name, prefix, enabled, created_at, last_used_at, key_enc
 		 FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -943,7 +974,8 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 		var enabled int
 		var created string
 		var last sql.NullString
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &enabled, &created, &last); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &enabled, &created, &last,
+			&k.EncryptedKey); err != nil {
 			return nil, err
 		}
 		k.Enabled = enabled == 1
@@ -1228,12 +1260,13 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 	if since.IsZero() {
 		since = time.Now().Add(-24 * time.Hour)
 	}
-	rows, err := s.db.Query(`SELECT id, ts, request_id, api_key_id, ingress_protocol,
-		model, provider, endpoint, upstream_model, status, latency_ms, ttft_ms,
-		prompt_tokens, completion_tokens, cost_usd, usage_estimated, error_code
-		FROM request_logs
-		WHERE ts >= ? AND (? = 0 OR api_key_id = ?) AND (? = '' OR model = ?)
-		ORDER BY id DESC LIMIT ?`,
+	rows, err := s.db.Query(`SELECT l.id, l.ts, l.request_id, l.api_key_id,
+		COALESCE(k.name, ''), l.ingress_protocol,
+		l.model, l.provider, l.endpoint, l.upstream_model, l.status, l.latency_ms, l.ttft_ms,
+		l.prompt_tokens, l.completion_tokens, l.cost_usd, l.usage_estimated, l.error_code
+		FROM request_logs l LEFT JOIN api_keys k ON k.id = l.api_key_id
+		WHERE l.ts >= ? AND (? = 0 OR l.api_key_id = ?) AND (? = '' OR l.model = ?)
+		ORDER BY l.id DESC LIMIT ?`,
 		since.UTC().Format(time.RFC3339Nano), f.KeyID, f.KeyID, f.Model, f.Model, f.Limit)
 	if err != nil {
 		return nil, err
@@ -1244,7 +1277,7 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 		var r LogRow
 		var ts string
 		var estimated int
-		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.IngressProtocol,
+		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.KeyName, &r.IngressProtocol,
 			&r.Model, &r.Provider, &r.Endpoint, &r.UpstreamModel, &r.Status,
 			&r.LatencyMS, &r.TTFTMS, &r.PromptTokens, &r.CompletionTokens,
 			&r.CostUSD, &estimated, &r.ErrorCode); err != nil {
@@ -1308,7 +1341,7 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	rows.Close()
 
 	rows, err = s.db.Query(`SELECT model, SUM(requests), SUM(cost_usd)
-		FROM usage_daily WHERE day >= ? GROUP BY model ORDER BY SUM(cost_usd) DESC`, since)
+		FROM usage_daily WHERE day >= ? GROUP BY model ORDER BY SUM(requests) DESC`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -1324,7 +1357,7 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 
 	rows, err = s.db.Query(`SELECT u.api_key_id, COALESCE(k.name, ''), SUM(u.requests), SUM(u.cost_usd)
 		FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.api_key_id
-		WHERE u.day >= ? GROUP BY u.api_key_id ORDER BY SUM(u.cost_usd) DESC`, since)
+		WHERE u.day >= ? GROUP BY u.api_key_id ORDER BY SUM(u.requests) DESC`, since)
 	if err != nil {
 		return nil, err
 	}

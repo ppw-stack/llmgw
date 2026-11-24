@@ -106,6 +106,21 @@ function addCandidate(form: ModelForm) {
   form.candidates.push({ instance: '', upstream: '', priority: '0', windows: [] });
 }
 
+/**
+ * 按优先级重排表单里的候选，和实际路由顺序保持一致。
+ *
+ * 只在打开弹窗和优先级输入失焦后调用：输入过程中不移动行，避免光标跳走。
+ */
+function sortCandidates(form: ModelForm) {
+  const rank = (row: CandidateRow): number => parseCount(row.priority) ?? Number.MAX_SAFE_INTEGER;
+  form.candidates.sort((a, b) => rank(a) - rank(b));
+}
+
+/** 优先级输入完成后的重排入口，供模板使用。 */
+function onPriorityChange() {
+  if (editing.value) sortCandidates(editing.value);
+}
+
 function removeCandidate(form: ModelForm, index: number) {
   if (form.candidates.length <= 1) return;
   form.candidates.splice(index, 1);
@@ -186,11 +201,13 @@ function openEdit(m: Model) {
       only: Boolean(w.only),
     })),
   }));
-  editing.value = {
+  const form: ModelForm = {
     id: m.id,
     name: m.name,
     candidates: rows.length ? rows : [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
+  sortCandidates(form);
+  editing.value = form;
 }
 
 async function save() {
@@ -440,6 +457,7 @@ onUnmounted(() => {
                   type="text"
                   inputmode="numeric"
                   placeholder="优先级"
+                  @change="onPriorityChange"
                 />
                 <button
                   class="ghost danger"

@@ -85,28 +85,25 @@ onMounted(() => {
 
     <div class="card">
       <div class="row">
-        <label class="visually-hidden" for="key-name">Key 名称</label>
-        <input
-          id="key-name"
-          v-model="name"
-          placeholder="Key 名称，例如 laptop"
-          @keyup.enter="create"
-        />
+        <label class="nowrap" for="key-name">Key 名称</label>
+        <input id="key-name" v-model="name" placeholder="例如 laptop" @keyup.enter="create" />
         <button class="primary" @click="create">创建 Key</button>
       </div>
+      <p class="muted small">留空时名称记为 default。</p>
       <p v-if="error" class="error">{{ error }}</p>
     </div>
 
     <div v-if="created" class="card secret">
       <div class="row space-between">
-        <strong>新 Key 已创建，只显示这一次</strong>
+        <strong>新 Key 已创建</strong>
         <button class="ghost" @click="created = null">关闭</button>
       </div>
+      <p class="muted small">{{ created.name }}</p>
       <div class="row">
         <code class="secret-value">{{ created.key }}</code>
         <button class="ghost" @click="copy(created.key)">复制</button>
       </div>
-      <p class="muted">请立即保存；关闭后无法再次查看。</p>
+      <p class="muted">已保存，可随时在下方列表中回显并复制。</p>
     </div>
 
     <div class="card">
@@ -115,7 +112,7 @@ onMounted(() => {
         <thead>
           <tr>
             <th>名称</th>
-            <th>前缀</th>
+            <th>Key</th>
             <th>状态</th>
             <th>创建时间</th>
             <th>最后使用</th>
@@ -126,7 +123,11 @@ onMounted(() => {
           <tr v-for="k in keys" :key="k.id">
             <td>{{ k.name }}</td>
             <td>
-              <code>{{ k.prefix }}…</code>
+              <div v-if="k.key" class="row">
+                <code class="secret-value">{{ k.key }}</code>
+                <button class="ghost" @click="copy(k.key)">复制</button>
+              </div>
+              <span v-else class="muted small">{{ k.prefix }}…（旧 Key 仅存前缀）</span>
             </td>
             <td>
               <span class="badge" :class="k.enabled ? 'ok' : 'off'">

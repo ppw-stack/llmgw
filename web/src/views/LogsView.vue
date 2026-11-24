@@ -54,6 +54,7 @@ onMounted(() => {
         <thead>
           <tr>
             <th>时间</th>
+            <th>令牌</th>
             <th>协议</th>
             <th>模型</th>
             <th>端点</th>
@@ -68,6 +69,7 @@ onMounted(() => {
         <tbody>
           <tr v-for="r in rows" :key="r.id">
             <td class="muted nowrap">{{ formatTime(r.ts) }}</td>
+            <td>{{ r.key_name || '#' + r.api_key_id }}</td>
             <td>
               <span class="badge" :class="r.ingress_protocol">{{ r.ingress_protocol }}</span>
             </td>
@@ -87,7 +89,7 @@ onMounted(() => {
             <td class="num">{{ formatUSD(r.cost_usd) }}</td>
           </tr>
           <tr v-if="!rows.length">
-            <td colspan="10" class="muted">暂无日志</td>
+            <td colspan="11" class="muted">暂无日志</td>
           </tr>
         </tbody>
       </table>

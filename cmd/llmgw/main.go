@@ -111,7 +111,7 @@ func main() {
 
 	adminUsername := ensureAdmin(cfg, st, logger)
 	adminToken := legacyAdminToken(cfg, st, logger)
-	bootstrapKey(st, logger)
+	bootstrapKey(st, boxCipher, logger)
 
 	forwarder := transport.NewWithTimeout(rt, st, logger, cfg.UpstreamTimeout.Value())
 	// Refuse to dial loopback and private addresses unless an instance opted in
@@ -289,7 +289,7 @@ func legacyAdminToken(cfg *config.Config, st *store.Store, log *slog.Logger) str
 }
 
 // bootstrapKey creates the first gateway key so the binary is usable at once.
-func bootstrapKey(st *store.Store, log *slog.Logger) {
+func bootstrapKey(st *store.Store, box *secret.Box, log *slog.Logger) {
 	n, err := st.CountKeys()
 	if err != nil {
 		log.Error("count gateway keys", "err", err)
@@ -303,12 +303,17 @@ func bootstrapKey(st *store.Store, log *slog.Logger) {
 		log.Error("generate gateway key", "err", err)
 		return
 	}
-	if _, err := st.CreateKey("bootstrap", hash, prefix); err != nil {
+	encrypted, err := box.Encrypt(plain)
+	if err != nil {
+		log.Error("encrypt gateway key", "err", err)
+		return
+	}
+	if _, err := st.CreateKey("bootstrap", hash, prefix, encrypted); err != nil {
 		log.Error("create gateway key", "err", err)
 		return
 	}
 	fmt.Printf("[BOOTSTRAP] first gateway key: %s\n", plain)
-	fmt.Printf("[BOOTSTRAP] save it now; it is not shown again\n")
+	fmt.Printf("[BOOTSTRAP] you can view it again in the console key list\n")
 }
 
 // masterKey returns the AES key used to encrypt upstream provider keys.

@@ -223,6 +223,8 @@ export interface GatewayKey {
   name: string;
   prefix: string;
   enabled: boolean;
+  /** 完整 Key，仅在管理台列表回显；旧版本创建的 Key 没有该字段 */
+  key?: string;
   created_at: string;
   last_used_at?: string;
 }

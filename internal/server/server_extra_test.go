@@ -66,6 +66,29 @@ func TestCreatedKeyWorksImmediately(t *testing.T) {
 		t.Fatal("no key returned")
 	}
 
+	// The console echoes the key back in the list instead of showing it once.
+	listResp := adminRequest(t, http.MethodGet, gw.URL+"/admin/api/keys", "")
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d", listResp.StatusCode)
+	}
+	var listed []struct {
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	var echoed string
+	for _, k := range listed {
+		if k.Name == "new" {
+			echoed = k.Key
+		}
+	}
+	if echoed != created.Key {
+		t.Fatalf("listed keys = %+v, want new key echoed", listed)
+	}
+
 	// The in-memory cache must serve the new key without a restart.
 	call := post(t, gw.URL+"/openai/v1/chat/completions", created.Key,
 		`{"model":"gpt-test","messages":[]}`)

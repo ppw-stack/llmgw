@@ -79,6 +79,18 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 		if keys == nil {
 			keys = []store.APIKey{}
 		}
+		for i := range keys {
+			if keys[i].EncryptedKey == "" {
+				continue
+			}
+			plain, err := s.box.Decrypt(keys[i].EncryptedKey)
+			if err != nil {
+				// 不因单个 Key 解不开就整页失败：列表照常返回，只隐藏这一条。
+				s.log.Warn("decrypt gateway key for echo", "id", keys[i].ID, "err", err)
+				continue
+			}
+			keys[i].Key = plain
+		}
 		writeJSON(w, http.StatusOK, keys)
 
 	case http.MethodPost:
@@ -97,7 +109,12 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 			writeAdminError(w, http.StatusInternalServerError, "cannot generate key")
 			return
 		}
-		k, err := s.store.CreateKey(in.Name, hash, prefix)
+		encrypted, err := s.box.Encrypt(plain)
+		if err != nil {
+			writeAdminError(w, http.StatusInternalServerError, "cannot encrypt key")
+			return
+		}
+		k, err := s.store.CreateKey(in.Name, hash, prefix, encrypted)
 		if err != nil {
 			writeAdminError(w, http.StatusInternalServerError, err.Error())
 			return

@@ -150,7 +150,7 @@ func setupConfigServer(t *testing.T, cap *capture, upstreamHandler http.HandlerF
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateKey("test", hash, prefix); err != nil {
+	if _, err := st.CreateKey("test", hash, prefix, ""); err != nil {
 		t.Fatal(err)
 	}
 

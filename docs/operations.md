@@ -141,11 +141,13 @@ pricing:
 [BOOTSTRAP] also written to ./data/admin-password.txt
 ```
 
-若数据库中没有网关 Key，会生成一个并以如下形式打印一次：
+若数据库中没有网关 Key，会生成一个并以如下形式打印：
 
 ```
-[BOOTSTRAP] first gateway key: sk-gw-xxxxxxxx   (save it now; it is not shown again)
+[BOOTSTRAP] first gateway key: sk-gw-xxxxxxxx
 ```
+
+该 Key 也会加密入库，登录控制台后可在「网关 Key」页回显并复制。
 
 浏览器打开 `http://<host>:8080/`，用用户名与密码登录；登录成功后下发 HttpOnly 会话 Cookie，默认 12 小时过期。
 

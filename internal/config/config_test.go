@@ -240,6 +240,7 @@ func TestLegacyProviderFormIsRejectedWithHint(t *testing.T) {
 }
 
 func TestPricingSectionIsRejectedWithHint(t *testing.T) {
+	t.Parallel()
 	body := minimal + `
 pricing:
   m:

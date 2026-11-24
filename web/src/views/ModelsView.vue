@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue';
 import { api } from '../api';
-import type { Instance, Model, ModelInstance, ModelPayload, TimeWindow } from '../types';
+import type {
+  Instance,
+  Model,
+  ModelInstance,
+  ModelMetadata,
+  ModelMetadataOverride,
+  ModelPayload,
+  TimeWindow,
+} from '../types';
 import { confirmAction } from '../utils/confirm';
 import { errorMessage } from '../utils/error';
 
@@ -21,10 +29,36 @@ interface CandidateRow {
   windows: WindowRow[];
 }
 
+/** 支持按协议覆盖元数据的协议名。 */
+type ProtocolName = 'openai' | 'anthropic';
+
+const protocolNames: ProtocolName[] = ['openai', 'anthropic'];
+const protocolLabels: Record<ProtocolName, string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+};
+
+/** 表单里某个协议的元数据覆盖，空字符串表示继承通用值。 */
+interface ProtocolMetadataForm {
+  contextLength: string;
+  maxOutputTokens: string;
+  capabilities: string;
+}
+
+/** 表单里的模型元数据。 */
+interface MetadataForm {
+  displayName: string;
+  contextLength: string;
+  maxOutputTokens: string;
+  capabilities: string;
+  protocols: Record<ProtocolName, ProtocolMetadataForm>;
+}
+
 /** 新增 / 编辑模型的表单状态。 */
 interface ModelForm {
   id: number | null;
   name: string;
+  metadata: MetadataForm;
   candidates: CandidateRow[];
 }
 
@@ -98,8 +132,131 @@ function newForm(): ModelForm {
   return {
     id: null,
     name: '',
+    metadata: newMetadataForm(),
     candidates: [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
+}
+
+function emptyProtocolMetadata(): ProtocolMetadataForm {
+  return { contextLength: '', maxOutputTokens: '', capabilities: '' };
+}
+
+function newMetadataForm(): MetadataForm {
+  return {
+    displayName: '',
+    contextLength: '',
+    maxOutputTokens: '',
+    capabilities: '',
+    protocols: {
+      openai: emptyProtocolMetadata(),
+      anthropic: emptyProtocolMetadata(),
+    },
+  };
+}
+
+/** 后端数字字段到表单文本，0 / 未设置都显示为空。 */
+function countText(value: number | undefined): string {
+  return value ? String(value) : '';
+}
+
+function capabilitiesText(values: string[] | undefined): string {
+  return (values ?? []).join(', ');
+}
+
+function toMetadataForm(meta: ModelMetadata | undefined): MetadataForm {
+  const form = newMetadataForm();
+  if (!meta) return form;
+  form.displayName = meta.display_name ?? '';
+  form.contextLength = countText(meta.context_length);
+  form.maxOutputTokens = countText(meta.max_output_tokens);
+  form.capabilities = capabilitiesText(meta.capabilities);
+  for (const protocol of protocolNames) {
+    const override = meta.protocols?.[protocol];
+    if (!override) continue;
+    const row = form.protocols[protocol];
+    row.contextLength = countText(override.context_length);
+    row.maxOutputTokens = countText(override.max_output_tokens);
+    row.capabilities = capabilitiesText(override.capabilities);
+  }
+  return form;
+}
+
+/** 逗号分隔的能力标签，去空、去重并统一小写。 */
+function parseCapabilities(raw: string): string[] {
+  const out: string[] = [];
+  for (const part of raw.split(',')) {
+    const value = part.trim().toLowerCase();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * 解析可选的非负整数。undefined 表示留空；null 表示格式错误，并在页面上
+ * 留下错误提示。
+ */
+function optionalCount(raw: string, label: string): number | null | undefined {
+  const text = raw.trim();
+  if (!text) return undefined;
+  const value = Number(text);
+  if (!Number.isInteger(value) || value < 0) {
+    error.value = `${label}必须是非负整数`;
+    return null;
+  }
+  return value;
+}
+
+/** 把表单转换成接口要的元数据；没有填写时返回空对象。 */
+function buildMetadata(form: MetadataForm): ModelMetadata | null {
+  const meta: ModelMetadata = {};
+  const displayName = form.displayName.trim();
+  if (displayName) meta.display_name = displayName;
+
+  const contextLength = optionalCount(form.contextLength, '上下文长度');
+  if (contextLength === null) return null;
+  if (contextLength !== undefined) meta.context_length = contextLength;
+
+  const maxOutputTokens = optionalCount(form.maxOutputTokens, '最大输出');
+  if (maxOutputTokens === null) return null;
+  if (maxOutputTokens !== undefined) meta.max_output_tokens = maxOutputTokens;
+
+  const capabilities = parseCapabilities(form.capabilities);
+  if (capabilities.length) meta.capabilities = capabilities;
+
+  const protocols: Record<string, ModelMetadataOverride> = {};
+  for (const protocol of protocolNames) {
+    const row = form.protocols[protocol];
+    const label = protocolLabels[protocol];
+    const override: ModelMetadataOverride = {};
+
+    const context = optionalCount(row.contextLength, `${label} 上下文长度`);
+    if (context === null) return null;
+    if (context !== undefined) override.context_length = context;
+
+    const output = optionalCount(row.maxOutputTokens, `${label} 最大输出`);
+    if (output === null) return null;
+    if (output !== undefined) override.max_output_tokens = output;
+
+    const caps = parseCapabilities(row.capabilities);
+    if (caps.length) override.capabilities = caps;
+
+    if (Object.keys(override).length) protocols[protocol] = override;
+  }
+  if (Object.keys(protocols).length) meta.protocols = protocols;
+  return meta;
+}
+
+/** 模型卡片上的元数据摘要。 */
+function metadataSummary(m: Model): string {
+  const meta = m.metadata;
+  if (!meta) return '';
+  const parts: string[] = [];
+  if (meta.display_name) parts.push(meta.display_name);
+  if (meta.context_length) parts.push(`上下文 ${meta.context_length.toLocaleString('en-US')}`);
+  if (meta.max_output_tokens) parts.push(`输出 ${meta.max_output_tokens.toLocaleString('en-US')}`);
+  if (meta.capabilities?.length) parts.push(meta.capabilities.join(' / '));
+  if (meta.protocols && Object.keys(meta.protocols).length) parts.push('含按协议覆盖');
+  return parts.join(' · ');
 }
 
 function addCandidate(form: ModelForm) {
@@ -204,6 +361,7 @@ function openEdit(m: Model) {
   const form: ModelForm = {
     id: m.id,
     name: m.name,
+    metadata: toMetadataForm(m.metadata),
     candidates: rows.length ? rows : [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
   sortCandidates(form);
@@ -284,6 +442,9 @@ async function save() {
     strategy: 'failover',
     instances: list,
   };
+  const metadata = buildMetadata(f.metadata);
+  if (metadata === null) return;
+  if (Object.keys(metadata).length) payload.metadata = metadata;
 
   saving.value = true;
   error.value = '';
@@ -373,6 +534,11 @@ onUnmounted(() => {
         <span>{{ effectiveSummary(m) }}</span>
       </p>
 
+      <p v-if="metadataSummary(m)" class="small">
+        <span class="muted">元数据：</span>
+        <span>{{ metadataSummary(m) }}</span>
+      </p>
+
       <div class="endpoint-list">
         <div v-for="(c, index) in sortedCandidates(m)" :key="c.instance" class="endpoint-line">
           <span class="badge" :class="index === 0 ? 'ok' : 'off'">
@@ -411,6 +577,91 @@ onUnmounted(() => {
             <p class="muted small">
               时间窗口按 config.yaml 里的 schedule.timezone 判定（默认 Asia/Shanghai）。
             </p>
+          </div>
+
+          <div class="field span-2">
+            <span class="field-caption">模型元数据（可选）</span>
+            <p class="muted small">
+              填写后会通过 /openai/v1/models 与 /anthropic/v1/models
+              返回给客户端；留空的字段回退到内置预设的官方参数。
+              能力标签用逗号分隔，推荐：tools、vision、video、audio、reasoning、json、cache、search、doc。
+            </p>
+
+            <div class="field">
+              <label for="model-metadata-display-name">显示名称</label>
+              <input
+                id="model-metadata-display-name"
+                v-model="editing.metadata.displayName"
+                placeholder="例如 GLM-5.3"
+              />
+            </div>
+
+            <div class="field">
+              <label for="model-metadata-context">上下文长度（tokens）</label>
+              <input
+                id="model-metadata-context"
+                v-model="editing.metadata.contextLength"
+                type="text"
+                inputmode="numeric"
+                placeholder="例如 1048576"
+              />
+            </div>
+
+            <div class="field">
+              <label for="model-metadata-max-output">最大输出（tokens）</label>
+              <input
+                id="model-metadata-max-output"
+                v-model="editing.metadata.maxOutputTokens"
+                type="text"
+                inputmode="numeric"
+                placeholder="例如 131072"
+              />
+            </div>
+
+            <div class="field">
+              <label for="model-metadata-capabilities">能力标签</label>
+              <input
+                id="model-metadata-capabilities"
+                v-model="editing.metadata.capabilities"
+                placeholder="tools, reasoning, vision"
+              />
+            </div>
+
+            <p class="muted small">
+              按协议覆盖：留空表示继承上面的通用值。同一模型在 OpenAI 与 Anthropic
+              端点能力不同（例如 thinking）时使用。
+            </p>
+            <details v-for="protocol in protocolNames" :key="protocol" class="metadata-protocol">
+              <summary>{{ protocolLabels[protocol] }}</summary>
+              <div class="field">
+                <label :for="`model-metadata-${protocol}-context`">上下文长度（tokens）</label>
+                <input
+                  :id="`model-metadata-${protocol}-context`"
+                  v-model="editing.metadata.protocols[protocol].contextLength"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="继承"
+                />
+              </div>
+              <div class="field">
+                <label :for="`model-metadata-${protocol}-max-output`">最大输出（tokens）</label>
+                <input
+                  :id="`model-metadata-${protocol}-max-output`"
+                  v-model="editing.metadata.protocols[protocol].maxOutputTokens"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="继承"
+                />
+              </div>
+              <div class="field">
+                <label :for="`model-metadata-${protocol}-capabilities`">能力标签</label>
+                <input
+                  :id="`model-metadata-${protocol}-capabilities`"
+                  v-model="editing.metadata.protocols[protocol].capabilities"
+                  placeholder="继承"
+                />
+              </div>
+            </details>
           </div>
 
           <div class="field span-2">

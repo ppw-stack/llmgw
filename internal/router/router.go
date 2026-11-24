@@ -1,3 +1,5 @@
+// Package router compiles immutable routing snapshots and resolves models to
+// ordered upstream candidates.
 package router
 
 import (
@@ -7,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/modelmeta"
 )
 
 // Key identifies a routing entry: a model name inside one protocol.
@@ -43,12 +46,21 @@ type Target struct {
 	FailoverStatuses []int
 }
 
+// ModelInfo is one model visible on a protocol endpoint together with the
+// metadata advertised to clients.
+type ModelInfo struct {
+	Name     string
+	Metadata modelmeta.Metadata
+}
+
 // Snapshot is an immutable routing table swapped atomically on reload.
 type Snapshot struct {
 	Version          uint64
 	Config           *config.Config
 	Index            map[Key][]Target
 	ModelsByProtocol map[string][]string
+	// InfosByProtocol carries the same models with their effective metadata.
+	InfosByProtocol map[string][]ModelInfo
 	// ByModel holds the candidate chain of every model, independent of the
 	// protocol. The console uses it to show which candidate is in charge
 	// right now.
@@ -85,6 +97,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 	}
 	idx := make(map[Key][]Target)
 	models := map[string]map[string]struct{}{}
+	infos := map[string]map[string]ModelInfo{}
 
 	instances := make(map[string]config.EffectiveInstance, len(eff.Instances))
 	for _, inst := range eff.Instances {
@@ -134,6 +147,15 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					models[ep.Protocol] = map[string]struct{}{}
 				}
 				models[ep.Protocol][m.Name] = struct{}{}
+				if infos[ep.Protocol] == nil {
+					infos[ep.Protocol] = map[string]ModelInfo{}
+				}
+				if _, ok := infos[ep.Protocol][m.Name]; !ok {
+					infos[ep.Protocol][m.Name] = ModelInfo{
+						Name:     m.Name,
+						Metadata: m.Metadata.For(ep.Protocol),
+					}
+				}
 			}
 		}
 	}
@@ -146,6 +168,16 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 		}
 		sort.Strings(list)
 		modelsByProtocol[proto] = list
+	}
+
+	infosByProtocol := make(map[string][]ModelInfo, len(infos))
+	for proto, set := range infos {
+		list := make([]ModelInfo, 0, len(set))
+		for _, info := range set {
+			list = append(list, info)
+		}
+		sort.Slice(list, func(a, b int) bool { return list[a].Name < list[b].Name })
+		infosByProtocol[proto] = list
 	}
 
 	// The candidate chain of a model is protocol specific: an instance that
@@ -170,6 +202,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 		Config:           cfg,
 		Index:            idx,
 		ModelsByProtocol: modelsByProtocol,
+		InfosByProtocol:  infosByProtocol,
 		ByModel:          byModel,
 		Location:         location,
 	}, nil
@@ -274,6 +307,21 @@ func (e *NoAvailableTargetError) Error() string {
 		msg += " (" + e.Reason + ")"
 	}
 	return msg
+}
+
+// ModelInfos returns the models visible on one protocol's endpoint together
+// with their effective metadata.
+func (r *Router) ModelInfos(protocol string) []ModelInfo {
+	snap := r.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	// Snapshot is shared by every request, so hand out a copy to keep
+	// callers from mutating the immutable routing table.
+	infos := snap.InfosByProtocol[protocol]
+	out := make([]ModelInfo, len(infos))
+	copy(out, infos)
+	return out
 }
 
 // ModelList returns the models visible on one protocol's endpoint.

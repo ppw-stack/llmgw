@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/modelmeta"
 	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/secret"
 )
@@ -59,6 +60,7 @@ type ModelInstanceSpec struct {
 type ModelSpec struct {
 	Name      string
 	Strategy  string
+	Metadata  modelmeta.Metadata
 	Instances []ModelInstanceSpec
 }
 
@@ -244,7 +246,7 @@ func (s *Store) CountModels() (int, error) {
 }
 
 func (s *Store) ListModelRecords() ([]ModelRecord, error) {
-	rows, err := s.db.Query(`SELECT m.id, m.name, m.strategy, m.created_at, m.updated_at,
+	rows, err := s.db.Query(`SELECT m.id, m.name, m.strategy, m.metadata_json, m.created_at, m.updated_at,
 		i.name, mi.upstream, mi.priority, mi.windows_json
 		FROM models m
 		LEFT JOIN model_instances mi ON mi.model_id = m.id
@@ -260,14 +262,21 @@ func (s *Store) ListModelRecords() ([]ModelRecord, error) {
 			rec      ModelRecord
 			created  string
 			updated  string
+			metadata string
 			instName sql.NullString
 			upstream sql.NullString
 			priority sql.NullInt64
 			windows  sql.NullString
 		)
-		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Strategy, &created, &updated,
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Strategy, &metadata, &created, &updated,
 			&instName, &upstream, &priority, &windows); err != nil {
 			return nil, err
+		}
+		if metadata != "" && metadata != "{}" {
+			if err := json.Unmarshal([]byte(metadata), &rec.Metadata); err != nil {
+				return nil, fmt.Errorf("model %q: bad metadata: %w", rec.Name, err)
+			}
+			rec.Metadata.Normalize()
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -307,8 +316,12 @@ func (s *Store) CreateModel(spec ModelSpec) (*ModelRecord, error) {
 	}
 	defer tx.Rollback()
 	now := nowStamp()
-	res, err := tx.Exec(`INSERT INTO models(name, strategy, created_at, updated_at)
-		VALUES(?,?,?,?)`, spec.Name, spec.Strategy, now, now)
+	metadataJSON, err := marshalMetadata(spec.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	res, err := tx.Exec(`INSERT INTO models(name, strategy, metadata_json, created_at, updated_at)
+		VALUES(?,?,?,?,?)`, spec.Name, spec.Strategy, metadataJSON, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -330,8 +343,12 @@ func (s *Store) UpdateModel(id int64, spec ModelSpec) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE models SET name=?, strategy=?, updated_at=? WHERE id=?`,
-		spec.Name, spec.Strategy, nowStamp(), id)
+	metadataJSON, err := marshalMetadata(spec.Metadata)
+	if err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE models SET name=?, strategy=?, metadata_json=?, updated_at=? WHERE id=?`,
+		spec.Name, spec.Strategy, metadataJSON, nowStamp(), id)
 	if err != nil {
 		return err
 	}
@@ -438,6 +455,7 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 		m := config.Model{
 			Name:     rec.Name,
 			Strategy: rec.Strategy,
+			Metadata: rec.Metadata,
 		}
 		for _, mi := range rec.Instances {
 			m.Instances = append(m.Instances, config.ModelInstance{
@@ -492,6 +510,7 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 		spec := ModelSpec{
 			Name:     m.Name,
 			Strategy: m.Strategy,
+			Metadata: m.Metadata,
 		}
 		for _, mi := range m.Instances {
 			spec.Instances = append(spec.Instances, ModelInstanceSpec{
@@ -514,6 +533,20 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 func nowTime(stamp string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, stamp)
 	return t
+}
+
+// marshalMetadata renders the optional metadata for storage. A zero value is
+// stored as an empty object so old and new databases look the same.
+func marshalMetadata(meta modelmeta.Metadata) (string, error) {
+	if meta.IsZero() {
+		return "{}", nil
+	}
+	meta.Normalize()
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return "", fmt.Errorf("marshal model metadata: %w", err)
+	}
+	return string(raw), nil
 }
 
 // encryptQuotaCredential encrypts the quota credential of an instance. An

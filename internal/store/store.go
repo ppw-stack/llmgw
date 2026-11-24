@@ -90,11 +90,12 @@ CREATE TABLE IF NOT EXISTS instances (
 );
 
 CREATE TABLE IF NOT EXISTS models (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL UNIQUE,
-    strategy    TEXT    NOT NULL DEFAULT 'failover',
-    created_at  TEXT    NOT NULL,
-    updated_at  TEXT    NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL UNIQUE,
+    strategy      TEXT    NOT NULL DEFAULT 'failover',
+    metadata_json TEXT    NOT NULL DEFAULT '{}',
+    created_at    TEXT    NOT NULL,
+    updated_at    TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS model_instances (
@@ -254,6 +255,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateAPIKeySecret(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate api key secret: %w", err)
+	}
+	if err := migrateModelMetadata(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate model metadata: %w", err)
 	}
 	if err := migrateDropCostColumns(ctx, db, log); err != nil {
 		db.Close()
@@ -605,6 +610,28 @@ func migrateInstanceSessionAffinity(ctx context.Context, db *sql.DB, log *slog.L
 		}
 		log.Info("added the failover_statuses_json column to instances")
 	}
+	return nil
+}
+
+// migrateModelMetadata adds the optional metadata column to the model table.
+// Rows that predate it keep an empty object, so the model-list endpoints keep
+// their minimal shape.
+func migrateModelMetadata(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "models")
+	if err != nil {
+		return fmt.Errorf("read models table columns: %w", err)
+	}
+	if len(cols) == 0 || cols["metadata_json"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE models ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return fmt.Errorf("add models metadata_json column: %w", err)
+	}
+	log.Info("added the metadata_json column to models")
 	return nil
 }
 

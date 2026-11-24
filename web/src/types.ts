@@ -278,6 +278,8 @@ export interface LogEntry {
   ts: string;
   request_id: string;
   api_key_id: number;
+  /** 调用令牌名称；Key 已删除时为空 */
+  key_name: string;
   ingress_protocol: string;
   model: string;
   provider: string;

@@ -413,7 +413,7 @@ POST /admin/api/models
 ```
 GET /admin/api/logs?limit=100&key_id=1&model=glm-4.6&since=2026-11-22T00:00:00Z
 200 [{
-  "id": 1024, "ts":"...", "request_id":"...", "api_key_id":1,
+  "id": 1024, "ts":"...", "request_id":"...", "api_key_id":1, "key_name":"laptop",
   "ingress_protocol":"openai", "model":"glm-4.6",
   "provider":"glm", "endpoint":"openai", "upstream_model":"glm-4.6",
   "status":200, "latency_ms":812, "ttft_ms":245,

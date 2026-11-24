@@ -176,6 +176,7 @@ type LogRow struct {
 	TS               time.Time `json:"ts"`
 	RequestID        string    `json:"request_id"`
 	APIKeyID         int64     `json:"api_key_id"`
+	KeyName          string    `json:"key_name"`
 	IngressProtocol  string    `json:"ingress_protocol"`
 	Model            string    `json:"model"`
 	Provider         string    `json:"provider"`
@@ -1228,12 +1229,13 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 	if since.IsZero() {
 		since = time.Now().Add(-24 * time.Hour)
 	}
-	rows, err := s.db.Query(`SELECT id, ts, request_id, api_key_id, ingress_protocol,
-		model, provider, endpoint, upstream_model, status, latency_ms, ttft_ms,
-		prompt_tokens, completion_tokens, cost_usd, usage_estimated, error_code
-		FROM request_logs
-		WHERE ts >= ? AND (? = 0 OR api_key_id = ?) AND (? = '' OR model = ?)
-		ORDER BY id DESC LIMIT ?`,
+	rows, err := s.db.Query(`SELECT l.id, l.ts, l.request_id, l.api_key_id,
+		COALESCE(k.name, ''), l.ingress_protocol,
+		l.model, l.provider, l.endpoint, l.upstream_model, l.status, l.latency_ms, l.ttft_ms,
+		l.prompt_tokens, l.completion_tokens, l.cost_usd, l.usage_estimated, l.error_code
+		FROM request_logs l LEFT JOIN api_keys k ON k.id = l.api_key_id
+		WHERE l.ts >= ? AND (? = 0 OR l.api_key_id = ?) AND (? = '' OR l.model = ?)
+		ORDER BY l.id DESC LIMIT ?`,
 		since.UTC().Format(time.RFC3339Nano), f.KeyID, f.KeyID, f.Model, f.Model, f.Limit)
 	if err != nil {
 		return nil, err
@@ -1244,7 +1246,7 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 		var r LogRow
 		var ts string
 		var estimated int
-		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.IngressProtocol,
+		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.KeyName, &r.IngressProtocol,
 			&r.Model, &r.Provider, &r.Endpoint, &r.UpstreamModel, &r.Status,
 			&r.LatencyMS, &r.TTFTMS, &r.PromptTokens, &r.CompletionTokens,
 			&r.CostUSD, &estimated, &r.ErrorCode); err != nil {
@@ -1308,7 +1310,7 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	rows.Close()
 
 	rows, err = s.db.Query(`SELECT model, SUM(requests), SUM(cost_usd)
-		FROM usage_daily WHERE day >= ? GROUP BY model ORDER BY SUM(cost_usd) DESC`, since)
+		FROM usage_daily WHERE day >= ? GROUP BY model ORDER BY SUM(requests) DESC`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -1324,7 +1326,7 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 
 	rows, err = s.db.Query(`SELECT u.api_key_id, COALESCE(k.name, ''), SUM(u.requests), SUM(u.cost_usd)
 		FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.api_key_id
-		WHERE u.day >= ? GROUP BY u.api_key_id ORDER BY SUM(u.cost_usd) DESC`, since)
+		WHERE u.day >= ? GROUP BY u.api_key_id ORDER BY SUM(u.requests) DESC`, since)
 	if err != nil {
 		return nil, err
 	}

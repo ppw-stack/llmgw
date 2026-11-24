@@ -166,6 +166,24 @@ models:
       - name: glm
         upstream: glm-4.6
 
+  # 可选：对外模型元数据。控制台「模型」编辑页可以填写同样的内容。
+  # 填写的字段会通过 /openai/v1/models 与 /anthropic/v1/models 返回给客户端；
+  # 留空的字段回退到内置端点声明的官方参数（自定义接入点不兜底）。
+  - name: glm-5.3
+    strategy: failover
+    metadata:
+      display_name: GLM-5.3
+      context_length: 1048576
+      max_output_tokens: 131072
+      capabilities: [tools, reasoning, json, cache]
+      # 同一模型在不同协议端点上能力不同时，按协议整体覆盖。
+      protocols:
+        anthropic:
+          capabilities: [tools, reasoning, thinking, cache]
+    instances:
+      - name: opencode-go
+        upstream: glm-5.3
+
   # 时间窗口（峰谷计费）：厂商在特定时段打折时，让便宜的候选在那段时间插队。
   # 时间按上面的 schedule.timezone 判定，窗口是左闭右开 [start, end)，
   # 起晚于止视为跨天（如 "22:00" - "06:00"）。

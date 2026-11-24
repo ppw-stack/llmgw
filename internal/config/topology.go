@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pw/llmgw/internal/modelmeta"
 	"github.com/pw/llmgw/internal/preset"
 )
 
@@ -99,9 +100,12 @@ type ModelInstance struct {
 // Model is a logical model. It owns the strategy and the ordered candidate
 // list of the instance + upstream model pairs that serve it.
 type Model struct {
-	Name      string          `yaml:"name"`
-	Strategy  string          `yaml:"strategy"`
-	Instances []ModelInstance `yaml:"instances"`
+	Name     string `yaml:"name"`
+	Strategy string `yaml:"strategy"`
+	// Metadata is the optional description advertised on the model-list
+	// endpoints. It is never derived from the upstream model.
+	Metadata  modelmeta.Metadata `yaml:"metadata,omitempty"`
+	Instances []ModelInstance    `yaml:"instances"`
 }
 
 // Effective is the routing-ready topology: instances with their keys and
@@ -113,7 +117,10 @@ type Effective struct {
 
 // EffectiveInstance is one instance in its routing-ready form.
 type EffectiveInstance struct {
-	Name         string
+	Name string
+	// Preset is the built-in endpoint the instance was created from. It is
+	// used to fill model metadata from the compiled-in catalog.
+	Preset       string
 	APIKey       string
 	Endpoints    []EffectiveEndpoint
 	Models       []string
@@ -138,8 +145,11 @@ type EffectiveEndpoint struct {
 
 // EffectiveModel is one model in its routing-ready form.
 type EffectiveModel struct {
-	Name      string
-	Strategy  string
+	Name     string
+	Strategy string
+	// Metadata is the explicit metadata merged with the built-in preset
+	// defaults of the candidate chain.
+	Metadata  modelmeta.Metadata
 	Instances []EffectiveModelInstance
 }
 
@@ -401,6 +411,7 @@ func NormalizeModel(in *Model) error {
 		return fmt.Errorf("model %q: strategy %q is not supported yet (only %q)",
 			in.Name, in.Strategy, StrategyFailover)
 	}
+	in.Metadata.Normalize()
 	if len(in.Instances) == 0 {
 		return fmt.Errorf("model %q: at least one instance is required", in.Name)
 	}
@@ -452,6 +463,7 @@ func (c *Config) Effective() (Effective, error) {
 
 		eff := EffectiveInstance{
 			Name:                 inst.Name,
+			Preset:               inst.Preset,
 			APIKey:               inst.APIKey,
 			Models:               append([]string(nil), inst.Models...),
 			MaxFails:             inst.MaxFails,
@@ -496,6 +508,10 @@ func (c *Config) Effective() (Effective, error) {
 	}
 
 	seenModel := make(map[string]bool, len(c.Models))
+	instancesByName := make(map[string]EffectiveInstance, len(out.Instances))
+	for _, inst := range out.Instances {
+		instancesByName[inst.Name] = inst
+	}
 	for i := range c.Models {
 		m := &c.Models[i]
 		if m.Name == "" {
@@ -510,7 +526,7 @@ func (c *Config) Effective() (Effective, error) {
 		if strategy == "" {
 			strategy = StrategyFailover
 		}
-		eff := EffectiveModel{Name: m.Name, Strategy: strategy}
+		eff := EffectiveModel{Name: m.Name, Strategy: strategy, Metadata: m.Metadata}
 		for _, mi := range m.Instances {
 			if !known[mi.Name] {
 				return Effective{}, fmt.Errorf("model %q: instance %q does not exist", m.Name, mi.Name)
@@ -542,9 +558,26 @@ func (c *Config) Effective() (Effective, error) {
 		sort.SliceStable(eff.Instances, func(a, b int) bool {
 			return eff.Instances[a].Priority < eff.Instances[b].Priority
 		})
+		eff.Metadata = eff.Metadata.Merge(presetMetadata(eff.Instances, instancesByName))
 		out.Models = append(out.Models, eff)
 	}
 	return out, nil
+}
+
+// presetMetadata resolves the compiled-in defaults of the first candidate that
+// references a built-in preset. Custom instances never contribute defaults:
+// the same upstream name may be served through a proxy with lower limits.
+func presetMetadata(candidates []EffectiveModelInstance, instances map[string]EffectiveInstance) modelmeta.Metadata {
+	for _, cand := range candidates {
+		inst, ok := instances[cand.Instance]
+		if !ok || inst.Preset == "" {
+			continue
+		}
+		if meta, ok := preset.ModelMetadata(cand.Upstream); ok {
+			return meta
+		}
+	}
+	return modelmeta.Metadata{}
 }
 
 // ExpandProvider turns the legacy single-upstream provider into an instance

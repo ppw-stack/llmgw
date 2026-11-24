@@ -195,10 +195,29 @@ export interface EffectiveCandidate {
 }
 
 /** GET /admin/api/models 中的单个模型 */
+/** 按协议覆盖的模型元数据。留空的字段表示继承通用值。 */
+export interface ModelMetadataOverride {
+  context_length?: number;
+  max_output_tokens?: number;
+  capabilities?: string[];
+}
+
+/** 模型对外声明的可选元数据，用于 /models 接口与控制台展示。 */
+export interface ModelMetadata {
+  display_name?: string;
+  context_length?: number;
+  max_output_tokens?: number;
+  capabilities?: string[];
+  /** 按协议覆盖，key 为 openai / anthropic。 */
+  protocols?: Record<string, ModelMetadataOverride>;
+}
+
 export interface Model {
   id: number;
   name: string;
   strategy: 'failover';
+  /** 自定义元数据；为空时回退到内置预设的官方参数。 */
+  metadata?: ModelMetadata;
   instances: ModelInstance[];
   /** 时间窗口使用的时区 */
   timezone: string;
@@ -214,6 +233,7 @@ export interface Model {
 export interface ModelPayload {
   name: string;
   strategy: string;
+  metadata?: ModelMetadata;
   instances: ModelInstance[];
 }
 

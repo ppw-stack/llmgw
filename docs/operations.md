@@ -74,6 +74,17 @@ models:
   # 单接入点单模型
   - name: MiniMax-M3.1-Flash
     strategy: failover
+    # 可选：对外声明的元数据，通过 /openai/v1/models 与 /anthropic/v1/models
+    # 返回给客户端。留空的字段回退到内置端点的官方参数。
+    metadata:
+      display_name: MiniMax M3.1 Flash
+      context_length: 1000000
+      max_output_tokens: 512000
+      capabilities: [tools, reasoning, vision, video]
+      # 同一模型在某个协议端点上的能力不同时，按协议整体覆盖。
+      protocols:
+        anthropic:
+          capabilities: [tools, reasoning, thinking, vision, video]
     instances:
       - name: minimax-cn
         upstream: MiniMax-M3.1-Flash
@@ -120,6 +131,40 @@ models:
 - 熔断：接入点连续失败 `max_fails`（默认 3）次后跳过 `cooldown_secs`（默认 30 秒）。熔断状态在进程内，配置热重载不会清零。
 - 代理走 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
 - 旧的 `providers` 写法仍可用，加载时自动展开成一个接入点加若干模型；数据库中的旧供应商会在启动时自动迁移。
+
+### 模型元数据与预设兜底
+
+模型可以声明 `metadata`，它是可选的，整体替换：
+
+| 字段 | 含义 |
+|---|---|
+| `display_name` | 客户端展示的名称 |
+| `context_length` | 上下文窗口（输入 + 输出 token 上限） |
+| `max_output_tokens` | 单次最大输出 token 数 |
+| `capabilities` | 能力标签：`tools` / `vision` / `video` / `audio` / `reasoning` / `json` / `cache` / `search` / `doc` |
+| `protocols` | 按 `openai` / `anthropic` 覆盖前三个字段 |
+
+- 未填写的字段按候选链顺序回退到内置端点的官方参数；自定义接入点不兜底。
+- 显式值优先；`capabilities` 留空表示继承，非空表示整体替换（不追加）。
+- 控制台的「模型」编辑页与 `POST/PUT /admin/api/models` 使用同一套字段。
+
+内置兜底数据集（按厂商官方文档核实，2026-11-24；厂商调整后需要同步更新 `internal/preset/catalog.go`）：
+
+| 上游模型 | 上下文 | 最大输出 | 能力 |
+|---|---|---|---|
+| `glm-5.3` | 1,048,576 | 131,072 | tools, reasoning, json, cache |
+| `glm-5.3-flash` | 1,048,576 | 131,072 | tools, reasoning, json, cache, vision, video, doc |
+| `kimi-k3` / `kimi-k3.1-pro` | 1,048,576 | 131,072 | tools, reasoning, json, cache, vision, video |
+| `deepseek-v4-pro` | 1,048,576 | 393,216 | tools, reasoning, json, cache |
+| `MiniMax-M3.1-Flash` | 1,000,000 | 512,000 | tools, reasoning, vision, video |
+| `mimo-v2.6-pro` | 1,048,576 | 131,072 | tools, reasoning, json, cache, search, vision, video, audio |
+| `LongCat-2.5` | 1,048,576 | 262,144 | tools, reasoning, vision, video |
+| `doubao-seed-2.1-pro` | 262,144 | 262,144 | tools, reasoning, json, cache, vision, video |
+| `doubao-seed-evolving` | 1,048,576 | 262,144 | tools, reasoning, json, cache, doc, vision, video |
+| `ark-code-latest` | — | — | 控制台动态别名，参数随所选模型变化，不提供兜底 |
+
+`kimi-k3` 系列官方允许把输出上限设到 1,048,576，但默认是 131,072；兜底采用默认值，避免客户端按最大值预留预算。
+`MiniMax-M3.1-Flash` 官方只公布了上下文窗口，512,000 的输出上限来自 models.dev。
 
 ## 3. 首次启动
 

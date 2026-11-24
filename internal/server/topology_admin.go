@@ -12,6 +12,7 @@ import (
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/discovery"
+	"github.com/pw/llmgw/internal/modelmeta"
 	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
@@ -108,6 +109,7 @@ type timeWindowInput struct {
 type modelInput struct {
 	Name      string               `json:"name"`
 	Strategy  string               `json:"strategy"`
+	Metadata  modelmeta.Metadata   `json:"metadata,omitempty"`
 	Instances []modelInstanceInput `json:"instances"`
 }
 
@@ -116,6 +118,7 @@ type modelView struct {
 	ID        int64                `json:"id"`
 	Name      string               `json:"name"`
 	Strategy  string               `json:"strategy"`
+	Metadata  modelmeta.Metadata   `json:"metadata,omitempty"`
 	Instances []modelInstanceInput `json:"instances"`
 	// Timezone is the timezone the time windows are evaluated in.
 	Timezone string `json:"timezone"`
@@ -611,6 +614,7 @@ func (s *Server) modelViews(records []store.ModelRecord) []modelView {
 			ID:         rec.ID,
 			Name:       rec.Name,
 			Strategy:   rec.Strategy,
+			Metadata:   rec.Metadata,
 			Instances:  modelInstanceViews(rec.Instances),
 			Timezone:   s.scheduleTimezone(),
 			ServerTime: now.UTC().Format(time.RFC3339),
@@ -714,6 +718,7 @@ func (s *Server) createModel(w http.ResponseWriter, r *http.Request, id *adminId
 	rec, err := s.store.CreateModel(store.ModelSpec{
 		Name:      model.Name,
 		Strategy:  model.Strategy,
+		Metadata:  model.Metadata,
 		Instances: modelInstanceSpecs(model.Instances),
 	})
 	if err != nil {
@@ -781,6 +786,7 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminId
 	if err := s.store.UpdateModel(modelID, store.ModelSpec{
 		Name:      model.Name,
 		Strategy:  model.Strategy,
+		Metadata:  model.Metadata,
 		Instances: modelInstanceSpecs(model.Instances),
 	}); err != nil {
 		status := http.StatusInternalServerError
@@ -801,6 +807,7 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, id *adminId
 		ModelSpec: store.ModelSpec{
 			Name:      model.Name,
 			Strategy:  model.Strategy,
+			Metadata:  model.Metadata,
 			Instances: modelInstanceSpecs(model.Instances),
 		},
 		CreatedAt: existing.CreatedAt,
@@ -889,6 +896,7 @@ func (in modelInput) toModel() (config.Model, error) {
 	model := config.Model{
 		Name:     strings.TrimSpace(in.Name),
 		Strategy: strings.TrimSpace(in.Strategy),
+		Metadata: in.Metadata,
 	}
 	for _, mi := range in.Instances {
 		model.Instances = append(model.Instances, config.ModelInstance{

@@ -132,7 +132,13 @@ models:
 
   # 生产：fangzhou 与 workbuddy 同为 p0，平局按写入顺序取 fangzhou；
   # opencode-go 为 p1 备选。
+  # metadata 用来验证 /openai/v1/models 与 /anthropic/v1/models 的扩展字段。
   - name: glm-5.3-flash
+    metadata:
+      display_name: GLM-5.3-Flash
+      context_length: 1048576
+      max_output_tokens: 131072
+      capabilities: [tools, reasoning, json, cache, vision, video, doc]
     instances:
       - name: fangzhou
         upstream: glm-5.3-flash

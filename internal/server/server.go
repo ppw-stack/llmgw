@@ -202,6 +202,7 @@ func (s *Server) Handler() http.Handler {
 		s.handleChat(w, r, config.ProtocolAnthropic)
 	})
 	mux.HandleFunc("/openai/v1/models", s.handleModels)
+	mux.HandleFunc("/anthropic/v1/models", s.handleAnthropicModels)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
@@ -503,13 +504,83 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		Object  string `json:"object"`
 		Created int64  `json:"created"`
 		OwnedBy string `json:"owned_by"`
+		// The fields below are extensions over the OpenAI shape. They are
+		// omitted entirely when the operator declared no metadata, so the
+		// minimal response stays byte-compatible with before.
+		DisplayName     string   `json:"display_name,omitempty"`
+		ContextLength   int      `json:"context_length,omitempty"`
+		MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
+		Capabilities    []string `json:"capabilities,omitempty"`
 	}
 	out := struct {
 		Object string  `json:"object"`
 		Data   []model `json:"data"`
-	}{Object: "list"}
-	for _, m := range s.router.ModelList(config.ProtocolOpenAI) {
-		out.Data = append(out.Data, model{ID: m, Object: "model", OwnedBy: "llmgw"})
+	}{Object: "list", Data: []model{}}
+	for _, info := range s.router.ModelInfos(config.ProtocolOpenAI) {
+		out.Data = append(out.Data, model{
+			ID:              info.Name,
+			Object:          "model",
+			OwnedBy:         "llmgw",
+			DisplayName:     info.Metadata.DisplayName,
+			ContextLength:   info.Metadata.ContextLength,
+			MaxOutputTokens: info.Metadata.MaxOutputTokens,
+			Capabilities:    info.Metadata.Capabilities,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleAnthropicModels serves the Anthropic-shaped model list. Anthropic
+// clients read type/id/display_name; the size and capability fields are the
+// same gateway extensions as on the OpenAI endpoint.
+func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		ingress.WriteError(w, config.ProtocolAnthropic, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	key, ok := s.authenticate(w, r, config.ProtocolAnthropic)
+	if !ok {
+		return
+	}
+	release, ok := s.reserveKey(w, r, key, config.ProtocolAnthropic)
+	if !ok {
+		return
+	}
+	defer release()
+	type model struct {
+		Type            string   `json:"type"`
+		ID              string   `json:"id"`
+		DisplayName     string   `json:"display_name"`
+		CreatedAt       string   `json:"created_at,omitempty"`
+		ContextLength   int      `json:"context_length,omitempty"`
+		MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
+		Capabilities    []string `json:"capabilities,omitempty"`
+	}
+	out := struct {
+		Data    []model `json:"data"`
+		HasMore bool    `json:"has_more"`
+		FirstID string  `json:"first_id,omitempty"`
+		LastID  string  `json:"last_id,omitempty"`
+	}{Data: []model{}}
+	for _, info := range s.router.ModelInfos(config.ProtocolAnthropic) {
+		display := info.Metadata.DisplayName
+		if display == "" {
+			display = info.Name
+		}
+		out.Data = append(out.Data, model{
+			Type:            "model",
+			ID:              info.Name,
+			DisplayName:     display,
+			ContextLength:   info.Metadata.ContextLength,
+			MaxOutputTokens: info.Metadata.MaxOutputTokens,
+			Capabilities:    info.Metadata.Capabilities,
+		})
+	}
+	if len(out.Data) > 0 {
+		out.FirstID = out.Data[0].ID
+		out.LastID = out.Data[len(out.Data)-1].ID
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

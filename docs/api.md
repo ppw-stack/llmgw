@@ -325,6 +325,14 @@ GET /admin/api/models
   "id": 1,
   "name": "MiniMax-M3.1-Flash",
   "strategy": "failover",
+  "metadata": {
+    "context_length": 1000000,
+    "max_output_tokens": 512000,
+    "capabilities": ["tools", "reasoning", "vision", "video"],
+    "protocols": {
+      "anthropic": {"capabilities": ["tools", "reasoning", "thinking"]}
+    }
+  },
   "instances": [
     {"instance": "minimax", "upstream": "MiniMax-M3.1-Flash", "priority": 0, "windows": []},
     {"instance": "minimax-backup", "upstream": "MiniMax-M3.1-Flash", "priority": 1, "windows": []}
@@ -355,6 +363,12 @@ POST /admin/api/models
 {
   "name": "claude-sonnet-4-5",
   "strategy": "failover",
+  "metadata": {
+    "display_name": "Claude Sonnet 4.5",
+    "context_length": 200000,
+    "max_output_tokens": 64000,
+    "capabilities": ["tools", "reasoning", "vision"]
+  },
   "instances": [{"instance": "glm", "upstream": "glm-4.6", "priority": 0, "windows": []}]
 }
 
@@ -371,6 +385,22 @@ DELETE /admin/api/models/1 → 204
 - 同一个模型不能重复引用同一个接入点。
 - 模型名重复返回 `409`。
 - `strategy` 目前只接受 `failover`。
+
+`metadata` 是可选字段，整体替换：
+
+| 字段 | 含义 |
+|---|---|
+| `display_name` | 客户端展示的名称，为空时客户端回退到模型 ID |
+| `context_length` | 上下文窗口（输入 + 输出 token 上限） |
+| `max_output_tokens` | 单次最大输出 token 数 |
+| `capabilities` | 能力标签，推荐 `tools` / `vision` / `video` / `audio` / `reasoning` / `json` / `cache` / `search` / `doc` |
+| `protocols` | 按协议覆盖 `context_length` / `max_output_tokens` / `capabilities`，键为 `openai` 或 `anthropic` |
+
+元数据的解析规则：
+
+- 未填写的字段回退到内置预设的官方参数（按候选链从高优先级到低优先级，取第一个「接入点引用了内置预设且该上游模型有官方数据」的候选）。自定义接入点不参与兜底。
+- 显式值永远优先。`capabilities` 留空表示继承，填写后整体替换（不是追加）。
+- 内置预设的 `ark-code-latest` 是控制台动态别名，参数随所选模型变化，因此没有固定兜底值。
 
 #### 时间窗口
 
@@ -403,6 +433,51 @@ POST /admin/api/models
 - `priority` 是窗口内生效的优先级（非负整数）；`only` 为 `true` 时表示窗口外该候选不参与路由。
 - 一个窗口至少要有 `priority` 或 `only` 之一，否则返回 `400`。
 - 判定按 `schedule.timezone`（默认 `Asia/Shanghai`）。
+
+### 对外模型列表（数据面）
+
+这两个接口属于数据面，使用网关 Key，不属于 `/admin/api`。客户端读取模型列表时保持对应协议的官方形状，未配置元数据时不出现扩展字段。
+
+```
+GET /openai/v1/models
+Authorization: Bearer sk-gw-...
+
+{
+  "object": "list",
+  "data": [{
+    "id": "glm-5.3",
+    "object": "model",
+    "created": 0,
+    "owned_by": "llmgw",
+    "display_name": "GLM-5.3",
+    "context_length": 1048576,
+    "max_output_tokens": 131072,
+    "capabilities": ["tools", "reasoning", "json", "cache"]
+  }]
+}
+
+GET /anthropic/v1/models
+Authorization: Bearer sk-gw-...
+
+{
+  "data": [{
+    "type": "model",
+    "id": "glm-5.3",
+    "display_name": "GLM-5.3",
+    "context_length": 1048576,
+    "max_output_tokens": 131072,
+    "capabilities": ["tools", "reasoning", "json", "cache"]
+  }],
+  "has_more": false,
+  "first_id": "glm-5.3",
+  "last_id": "glm-5.3"
+}
+```
+
+- OpenAI 入口在原生四字段（`id` / `object` / `created` / `owned_by`）之后追加扩展字段；Anthropic 入口在官方字段之后追加同样的扩展字段。
+- `display_name` / `context_length` / `max_output_tokens` / `capabilities` 都可能省略，客户端必须容忍字段缺失。
+- 元数据按协议展开：同一个模型在 `protocols` 里声明的覆盖值只出现在对应入口。
+- 两个入口都要求网关 Key，并受该 Key 的请求预算约束。
 
 ### 兼容接口
 

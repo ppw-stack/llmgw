@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     requests          INTEGER NOT NULL DEFAULT 0,
     prompt_tokens     INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, api_key_id, model, provider)
 );
 
@@ -190,6 +192,8 @@ type LogRow struct {
 	TTFTMS           int64     `json:"ttft_ms"`
 	PromptTokens     int64     `json:"prompt_tokens"`
 	CompletionTokens int64     `json:"completion_tokens"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
 	UsageEstimated   bool      `json:"usage_estimated"`
 	ErrorCode        string    `json:"error_code"`
 }
@@ -263,6 +267,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateDropCostColumns(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate drop cost columns: %w", err)
+	}
+	if err := migrateUsageDailyCache(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate usage daily cache columns: %w", err)
 	}
 	restrictFile(path)
 	for _, suffix := range []string{"-wal", "-shm"} {
@@ -713,6 +721,38 @@ func migrateDropCostColumns(ctx context.Context, db *sql.DB, log *slog.Logger) e
 	}
 	if changed && log != nil {
 		log.Info("dropped the obsolete cost_usd columns")
+	}
+	return nil
+}
+
+// migrateUsageDailyCache adds the cache token counters to the daily usage
+// table. Existing rows keep zero: the columns accumulate from the next
+// request batch, and no historical backfill is attempted.
+func migrateUsageDailyCache(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	cols, err := tableColumns(ctx, db, "usage_daily")
+	if err != nil {
+		return fmt.Errorf("read usage_daily table columns: %w", err)
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	if !cols["cache_read_tokens"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE usage_daily ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add usage_daily cache_read_tokens column: %w", err)
+		}
+		if log != nil {
+			log.Info("added the cache_read_tokens column to usage_daily")
+		}
+	}
+	if !cols["cache_write_tokens"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE usage_daily ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add usage_daily cache_write_tokens column: %w", err)
+		}
+		if log != nil {
+			log.Info("added the cache_write_tokens column to usage_daily")
+		}
 	}
 	return nil
 }
@@ -1172,12 +1212,15 @@ func (s *Store) writeBatch(batch []LogEntry) error {
 	defer insertLog.Close()
 
 	upsertUsage, err := tx.PrepareContext(ctx, `INSERT INTO usage_daily(
-		day, api_key_id, model, provider, requests, prompt_tokens, completion_tokens)
-		VALUES(?,?,?,?,1,?,?)
+		day, api_key_id, model, provider, requests, prompt_tokens, completion_tokens,
+		cache_read_tokens, cache_write_tokens)
+		VALUES(?,?,?,?,1,?,?,?,?)
 		ON CONFLICT(day, api_key_id, model, provider) DO UPDATE SET
 		  requests = requests + 1,
 		  prompt_tokens = prompt_tokens + excluded.prompt_tokens,
-		  completion_tokens = completion_tokens + excluded.completion_tokens`)
+		  completion_tokens = completion_tokens + excluded.completion_tokens,
+		  cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+		  cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens`)
 	if err != nil {
 		return err
 	}
@@ -1195,7 +1238,7 @@ func (s *Store) writeBatch(batch []LogEntry) error {
 			return err
 		}
 		if _, err := upsertUsage.ExecContext(ctx, day, e.APIKeyID, e.Model, e.Provider,
-			e.PromptTokens, e.CompletionTokens); err != nil {
+			e.PromptTokens, e.CompletionTokens, e.CacheReadTokens, e.CacheWriteTokens); err != nil {
 			return err
 		}
 	}
@@ -1314,7 +1357,8 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 	rows, err := s.db.Query(`SELECT l.id, l.ts, l.request_id, l.api_key_id,
 		COALESCE(k.name, ''), l.ingress_protocol,
 		l.model, l.provider, l.endpoint, l.upstream_model, l.status, l.latency_ms, l.ttft_ms,
-		l.prompt_tokens, l.completion_tokens, l.usage_estimated, l.error_code
+		l.prompt_tokens, l.completion_tokens, l.cache_read_tokens, l.cache_write_tokens,
+		l.usage_estimated, l.error_code
 		FROM request_logs l LEFT JOIN api_keys k ON k.id = l.api_key_id
 		WHERE l.ts >= ? AND (? = 0 OR l.api_key_id = ?) AND (? = '' OR l.model = ?)
 		ORDER BY l.id DESC LIMIT ?`,
@@ -1331,6 +1375,7 @@ func (s *Store) Logs(f LogFilter) ([]LogRow, error) {
 		if err := rows.Scan(&r.ID, &ts, &r.RequestID, &r.APIKeyID, &r.KeyName, &r.IngressProtocol,
 			&r.Model, &r.Provider, &r.Endpoint, &r.UpstreamModel, &r.Status,
 			&r.LatencyMS, &r.TTFTMS, &r.PromptTokens, &r.CompletionTokens,
+			&r.CacheReadTokens, &r.CacheWriteTokens,
 			&estimated, &r.ErrorCode); err != nil {
 			return nil, err
 		}
@@ -1346,6 +1391,8 @@ type UsageDay struct {
 	Requests         int64  `json:"requests"`
 	PromptTokens     int64  `json:"prompt_tokens"`
 	CompletionTokens int64  `json:"completion_tokens"`
+	CacheReadTokens  int64  `json:"cache_read_tokens"`
+	CacheWriteTokens int64  `json:"cache_write_tokens"`
 }
 
 type UsageByModel struct {
@@ -1373,14 +1420,16 @@ func (s *Store) Usage(days int) (*UsageReport, error) {
 	rep := &UsageReport{}
 
 	rows, err := s.db.Query(`SELECT day, SUM(requests), SUM(prompt_tokens),
-		SUM(completion_tokens) FROM usage_daily
+		SUM(completion_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens)
+		FROM usage_daily
 		WHERE day >= ? GROUP BY day ORDER BY day`, since)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var d UsageDay
-		if err := rows.Scan(&d.Day, &d.Requests, &d.PromptTokens, &d.CompletionTokens); err != nil {
+		if err := rows.Scan(&d.Day, &d.Requests, &d.PromptTokens, &d.CompletionTokens,
+			&d.CacheReadTokens, &d.CacheWriteTokens); err != nil {
 			rows.Close()
 			return nil, err
 		}

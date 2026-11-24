@@ -24,6 +24,32 @@ async function load() {
   }
 }
 
+/**
+ * 缓存命中比例。
+ *
+ * Anthropic 的 input_tokens 不含缓存 token，OpenAI 的 prompt_tokens
+ * 已包含 cached tokens，所以两种入口的分母不同。
+ */
+function cachePercent(r: LogEntry): string {
+  if (r.cache_read_tokens <= 0) return '';
+  const total =
+    r.ingress_protocol === 'anthropic'
+      ? r.prompt_tokens + r.cache_read_tokens + r.cache_write_tokens
+      : r.prompt_tokens;
+  if (total <= 0) return '';
+  const percent = (r.cache_read_tokens / total) * 100;
+  return percent < 1 ? '<1%' : `${Math.round(percent)}%`;
+}
+
+function cacheLabel(r: LogEntry): string {
+  if (r.cache_read_tokens > 0) {
+    const percent = cachePercent(r);
+    return percent ? `命中 ${percent}` : '命中';
+  }
+  if (r.cache_write_tokens > 0) return `写入 ${formatNumber(r.cache_write_tokens)}`;
+  return '未命中';
+}
+
 onMounted(() => {
   void load();
 });
@@ -63,6 +89,7 @@ onMounted(() => {
             <th class="num">TTFT</th>
             <th class="num">输入</th>
             <th class="num">输出</th>
+            <th class="num">缓存</th>
           </tr>
         </thead>
         <tbody>
@@ -85,9 +112,23 @@ onMounted(() => {
             <td class="num">{{ r.ttft_ms ? formatMs(r.ttft_ms) : '-' }}</td>
             <td class="num">{{ formatNumber(r.prompt_tokens) }}</td>
             <td class="num">{{ formatNumber(r.completion_tokens) }}</td>
+            <td class="num">
+              <span v-if="r.usage_estimated" class="muted" title="上游未返回用量，缓存信息不可用">
+                -
+              </span>
+              <template v-else>
+                <span :class="r.cache_read_tokens > 0 ? 'status-ok' : 'muted'">
+                  {{ cacheLabel(r) }}
+                </span>
+                <div v-if="r.cache_read_tokens > 0" class="muted small">
+                  读 {{ formatNumber(r.cache_read_tokens) }} / 写
+                  {{ formatNumber(r.cache_write_tokens) }}
+                </div>
+              </template>
+            </td>
           </tr>
           <tr v-if="!rows.length">
-            <td colspan="10" class="muted">暂无日志</td>
+            <td colspan="11" class="muted">暂无日志</td>
           </tr>
         </tbody>
       </table>

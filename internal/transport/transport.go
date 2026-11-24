@@ -567,6 +567,12 @@ func (f *Forwarder) record(in Request, target router.Target, status int, start t
 	if acc.completion > 0 {
 		observ.TokensTotal.WithLabelValues(in.Protocol, "completion").Add(float64(acc.completion))
 	}
+	if acc.cacheRead > 0 {
+		observ.TokensTotal.WithLabelValues(in.Protocol, "cache_read").Add(float64(acc.cacheRead))
+	}
+	if acc.cacheWrite > 0 {
+		observ.TokensTotal.WithLabelValues(in.Protocol, "cache_write").Add(float64(acc.cacheWrite))
+	}
 }
 
 func upstreamURL(t router.Target) string {

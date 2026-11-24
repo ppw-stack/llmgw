@@ -226,13 +226,31 @@ GET /metrics    Prometheus（需 server.metrics_token，否则接口关闭）
 | `gw_requests_total{protocol,status}` | 请求量与状态码分布 |
 | `gw_request_duration_seconds` | 端到端延迟 |
 | `gw_ttft_seconds{protocol}` | 首 token 延迟 |
-| `gw_tokens_total{protocol,kind}` | token 消耗 |
+| `gw_tokens_total{protocol,kind}` | token 消耗；`kind` 为 `prompt`、`completion`、`cache_read`、`cache_write` |
 | `gw_upstream_errors_total{instance}` | 上游错误（按上游接入点） |
 | `gw_log_dropped_total` | 日志队列溢出丢条数 |
 
 未设置 `server.metrics_token` 时，`/metrics` **整个接口关闭**，任何来源都返回 `404`。
 要抓取指标必须先设置令牌，之后以 `Authorization: Bearer <token>` 或 `?token=<token>` 访问；
 令牌不对返回 `401`。改配置后 1 秒内热加载生效，无需重启。
+
+### 判断 prompt 缓存命中
+
+请求日志页的「缓存」列直接显示每次请求：`命中 X%`（附读/写 token）、`写入 N`、`未命中`，或 `-`（上游未返回 usage，信息不可用）。概览页会汇总所选区间的缓存读/写 token；按日累计从升级后开始，升级前的历史行为 0。
+
+也可以直接查库做聚合：
+
+```sql
+SELECT model, ingress_protocol,
+       SUM(cache_read_tokens) AS cache_read,
+       SUM(cache_write_tokens) AS cache_write
+FROM request_logs
+WHERE status >= 200 AND status < 300 AND usage_estimated = 0
+  AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 day')
+GROUP BY model, ingress_protocol;
+```
+
+命中率按入口协议分开计算：Anthropic 用 `cache_read / (prompt + cache_read + cache_write)`，OpenAI 用 `cache_read / prompt_tokens`（`prompt_tokens` 已包含 cached tokens）。OpenAI 兼容上游如果返回 `prompt_cache_hit_tokens`（DeepSeek 风格），网关也会识别。
 
 日志为 JSON，一行一条，`request_id` 可与响应头 `X-Request-Id` 对应。
 

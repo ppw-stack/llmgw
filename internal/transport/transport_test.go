@@ -150,6 +150,35 @@ func TestEstimateTokens(t *testing.T) {
 	}
 }
 
+func TestOpenAICacheReadTokens(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		usage string
+		want  int64
+	}{
+		{"nested cached_tokens", `{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":6}}}`, 6},
+		{"nested takes precedence", `{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":6},"prompt_cache_hit_tokens":7}}`, 6},
+		{"deepseek prompt_cache_hit_tokens", `{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":7}}`, 7},
+		{"no cache counters", `{"usage":{"prompt_tokens":10,"completion_tokens":2}}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodyAcc usageAcc
+			bodyAcc.observeBody(config.ProtocolOpenAI, []byte(tc.usage))
+			if bodyAcc.cacheRead != tc.want {
+				t.Fatalf("body cache read = %d, want %d", bodyAcc.cacheRead, tc.want)
+			}
+
+			var streamAcc usageAcc
+			streamAcc.observeLine(config.ProtocolOpenAI, []byte("data: "+tc.usage))
+			if streamAcc.cacheRead != tc.want {
+				t.Fatalf("stream cache read = %d, want %d", streamAcc.cacheRead, tc.want)
+			}
+		})
+	}
+}
+
 func TestAnthropicStreamUsageFromMessageDelta(t *testing.T) {
 	var acc usageAcc
 	acc.observeLine(config.ProtocolAnthropic,

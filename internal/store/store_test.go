@@ -111,6 +111,7 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 		TS: time.Now(), RequestID: "req-1", APIKeyID: 1, IngressProtocol: "openai",
 		Model: "m", Provider: "p", Endpoint: "openai", UpstreamModel: "m",
 		Status: 200, PromptTokens: 3, CompletionTokens: 4,
+		CacheReadTokens: 5, CacheWriteTokens: 6,
 	}) {
 		t.Fatal("enqueue rejected")
 	}
@@ -118,7 +119,8 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 	for time.Now().Before(deadline) {
 		rows, err := st.Logs(LogFilter{Limit: 10})
 		if err == nil && len(rows) == 1 {
-			if rows[0].PromptTokens != 3 || rows[0].CompletionTokens != 4 {
+			if rows[0].PromptTokens != 3 || rows[0].CompletionTokens != 4 ||
+				rows[0].CacheReadTokens != 5 || rows[0].CacheWriteTokens != 6 {
 				t.Fatalf("unexpected row: %+v", rows[0])
 			}
 			return
@@ -126,6 +128,81 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("log row was not written")
+}
+
+func TestUsageAggregatesCacheTokens(t *testing.T) {
+	t.Parallel()
+	st := testStore(t)
+	if !st.Enqueue(LogEntry{
+		TS: time.Now(), RequestID: "req-cache", APIKeyID: 1, IngressProtocol: "openai",
+		Model: "m", Provider: "p", Endpoint: "openai", UpstreamModel: "m",
+		Status: 200, PromptTokens: 10, CompletionTokens: 2,
+		CacheReadTokens: 6, CacheWriteTokens: 3,
+	}) {
+		t.Fatal("enqueue rejected")
+	}
+
+	written := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := st.Logs(LogFilter{Limit: 10})
+		if err == nil && len(rows) == 1 {
+			written = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !written {
+		t.Fatal("log row was not written")
+	}
+
+	rep, err := st.Usage(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Daily) != 1 {
+		t.Fatalf("daily = %+v", rep.Daily)
+	}
+	if rep.Daily[0].CacheReadTokens != 6 || rep.Daily[0].CacheWriteTokens != 3 {
+		t.Fatalf("daily cache tokens = %+v", rep.Daily[0])
+	}
+}
+
+// TestUsageDailyCacheColumnsAreAdded checks that a database created before
+// the cache counters existed still opens and gains both columns.
+func TestUsageDailyCacheColumnsAreAdded(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE usage_daily (
+		day               TEXT    NOT NULL,
+		api_key_id        INTEGER NOT NULL,
+		model             TEXT    NOT NULL,
+		provider          TEXT    NOT NULL,
+		requests          INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		cost_usd          REAL    NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, api_key_id, model, provider)
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st := testStoreAt(t, path)
+	var count int
+	if err := st.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('usage_daily')
+		 WHERE name IN ('cache_read_tokens', 'cache_write_tokens')`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("cache columns = %d, want 2", count)
+	}
 }
 
 // testQuotaCredentialValues are deliberately fake credential fixtures. They

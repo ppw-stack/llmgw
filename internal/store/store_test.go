@@ -110,7 +110,7 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 	if !st.Enqueue(LogEntry{
 		TS: time.Now(), RequestID: "req-1", APIKeyID: 1, IngressProtocol: "openai",
 		Model: "m", Provider: "p", Endpoint: "openai", UpstreamModel: "m",
-		Status: 200, PromptTokens: 3, CompletionTokens: 4, CostUSD: 0.5,
+		Status: 200, PromptTokens: 3, CompletionTokens: 4,
 	}) {
 		t.Fatal("enqueue rejected")
 	}
@@ -735,6 +735,97 @@ func TestWeightColumnIsDropped(t *testing.T) {
 	}
 	if records[0].Instances[0].Priority != 7 {
 		t.Fatalf("priority = %d", records[0].Instances[0].Priority)
+	}
+}
+
+// TestCostColumnsAreDropped covers the upgrade path from a database that still
+// has the obsolete cost_usd columns: they are dropped and the remaining rows
+// stay readable.
+func TestCostColumnsAreDropped(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "cost.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stmts := []string{
+		`CREATE TABLE request_logs (
+			id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts                 TEXT    NOT NULL,
+			request_id         TEXT    NOT NULL,
+			api_key_id         INTEGER NOT NULL,
+			ingress_protocol   TEXT    NOT NULL,
+			model              TEXT    NOT NULL,
+			provider           TEXT    NOT NULL,
+			endpoint           TEXT    NOT NULL,
+			upstream_model     TEXT    NOT NULL,
+			status             INTEGER NOT NULL,
+			latency_ms         INTEGER NOT NULL,
+			ttft_ms            INTEGER NOT NULL,
+			prompt_tokens      INTEGER NOT NULL,
+			completion_tokens  INTEGER NOT NULL,
+			cache_read_tokens  INTEGER NOT NULL,
+			cache_write_tokens INTEGER NOT NULL,
+			cost_usd           REAL    NOT NULL,
+			usage_estimated    INTEGER NOT NULL,
+			error_code         TEXT    NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE usage_daily (
+			day               TEXT    NOT NULL,
+			api_key_id        INTEGER NOT NULL,
+			model             TEXT    NOT NULL,
+			provider          TEXT    NOT NULL,
+			requests          INTEGER NOT NULL DEFAULT 0,
+			prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			cost_usd          REAL    NOT NULL DEFAULT 0,
+			PRIMARY KEY (day, api_key_id, model, provider)
+		)`,
+		fmt.Sprintf(`INSERT INTO request_logs(ts, request_id, api_key_id, ingress_protocol,
+			model, provider, endpoint, upstream_model, status, latency_ms, ttft_ms,
+			prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
+			cost_usd, usage_estimated, error_code)
+			VALUES ('%s', 'req-1', 1, 'openai', 'm', 'p', 'openai', 'm', 200, 10, 2,
+			3, 4, 0, 0, 0.5, 0, '')`, now.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`INSERT INTO usage_daily(day, api_key_id, model, provider, requests,
+			prompt_tokens, completion_tokens, cost_usd)
+			VALUES ('%s', 1, 'm', 'p', 1, 3, 4, 0.5)`, now.Format("2006-01-02")),
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := testStoreAt(t, path)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, table := range []string{"request_logs", "usage_daily"} {
+		cols, err := tableColumns(ctx, st.db, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cols["cost_usd"] {
+			t.Fatalf("%s.cost_usd column was not dropped", table)
+		}
+	}
+	rows, err := st.Logs(LogFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PromptTokens != 3 || rows[0].CompletionTokens != 4 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	report, err := st.Usage(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Daily) != 1 || report.Daily[0].PromptTokens != 3 {
+		t.Fatalf("usage = %+v", report.Daily)
 	}
 }
 

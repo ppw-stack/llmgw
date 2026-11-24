@@ -25,7 +25,6 @@ import (
 	"github.com/pw/llmgw/internal/observ"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
-	"github.com/pw/llmgw/internal/usage"
 	"github.com/tidwall/sjson"
 )
 
@@ -537,16 +536,6 @@ func isDataLine(line []byte) bool {
 }
 
 func (f *Forwarder) record(in Request, target router.Target, status int, start time.Time, ttft time.Duration, acc usageAcc, errCode string) {
-	cost := 0.0
-	if snap := f.router.Snapshot(); snap != nil {
-		cost = usage.Cost(snap.Config.Pricing, in.Meta.Model, usage.Usage{
-			PromptTokens:     acc.prompt,
-			CompletionTokens: acc.completion,
-			CacheReadTokens:  acc.cacheRead,
-			CacheWriteTokens: acc.cacheWrite,
-			Estimated:        acc.estimated,
-		})
-	}
 	latency := time.Since(start)
 	f.store.Enqueue(store.LogEntry{
 		TS:               start.UTC(),
@@ -564,7 +553,6 @@ func (f *Forwarder) record(in Request, target router.Target, status int, start t
 		CompletionTokens: acc.completion,
 		CacheReadTokens:  acc.cacheRead,
 		CacheWriteTokens: acc.cacheWrite,
-		CostUSD:          cost,
 		UsageEstimated:   acc.estimated,
 		ErrorCode:        errCode,
 	})

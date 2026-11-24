@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { api, formatMs, formatNumber, formatTime, formatUSD } from '../api';
+import { api, formatMs, formatNumber, formatTime } from '../api';
 import type { LogEntry } from '../types';
 import { errorMessage } from '../utils/error';
 
@@ -63,7 +63,6 @@ onMounted(() => {
             <th class="num">TTFT</th>
             <th class="num">输入</th>
             <th class="num">输出</th>
-            <th class="num">成本</th>
           </tr>
         </thead>
         <tbody>
@@ -86,10 +85,9 @@ onMounted(() => {
             <td class="num">{{ r.ttft_ms ? formatMs(r.ttft_ms) : '-' }}</td>
             <td class="num">{{ formatNumber(r.prompt_tokens) }}</td>
             <td class="num">{{ formatNumber(r.completion_tokens) }}</td>
-            <td class="num">{{ formatUSD(r.cost_usd) }}</td>
           </tr>
           <tr v-if="!rows.length">
-            <td colspan="11" class="muted">暂无日志</td>
+            <td colspan="10" class="muted">暂无日志</td>
           </tr>
         </tbody>
       </table>

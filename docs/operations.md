@@ -98,12 +98,6 @@ models:
     instances:
       - name: deepseek
         upstream: deepseek-chat
-
-# 可选：用于成本估算，单位美元 / 百万 token
-pricing:
-  MiniMax-M3.1-Flash: { input_per_mtok: 0.3, output_per_mtok: 1.2 }
-  glm-4.6:            { input_per_mtok: 0.6, output_per_mtok: 2.2 }
-  deepseek-chat:      { input_per_mtok: 0.27, output_per_mtok: 1.1 }
 ```
 
 规则：

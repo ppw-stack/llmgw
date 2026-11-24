@@ -143,14 +143,3 @@ models:
       - name: opencode-go
         upstream: glm-5.3-flash
         priority: 1
-
-pricing:
-  MiniMax-M3.1-Flash:
-    input_per_mtok: 0.3
-    output_per_mtok: 1.2
-  deepseek-v4.1-flash:
-    input_per_mtok: 0.15
-    output_per_mtok: 0.6
-  glm-5.3-flash:
-    input_per_mtok: 0.6
-    output_per_mtok: 2.2

@@ -259,6 +259,10 @@ func Load(path string) (*Config, error) {
 			msg = fmt.Errorf("%w; an instance accepts name, api_key, preset and a list of "+
 				"endpoints ({protocol, base_url})", msg)
 		}
+		if strings.Contains(err.Error(), "field pricing not found in type config.Config") {
+			msg = fmt.Errorf("%w; the optional pricing section was removed because the gateway "+
+				"no longer estimates request cost, so delete it from the config file", msg)
+		}
 		return nil, msg
 	}
 	if err := c.normalize(); err != nil {

@@ -748,6 +748,9 @@ func TestCostColumnsAreDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Backstop for the t.Fatal exits below; the explicit Close stays so
+	// testStoreAt can reopen the same file.
+	defer func() { _ = db.Close() }()
 	now := time.Now().UTC()
 	stmts := []string{
 		`CREATE TABLE request_logs (

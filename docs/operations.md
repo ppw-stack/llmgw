@@ -202,6 +202,10 @@ GET /metrics    Prometheus（需 server.metrics_token，否则接口关闭）
   迁移失败时网关启动即报错退出，不会带病运行。
 - **迁移后的回退路径**：旧二进制不认识新列，但 SQLite 会忽略未使用的列，旧版本可以直接打开迁移后的库继续工作（只是不再使用窗口数据）。
   要彻底还原，用升级前的快照覆盖 `data/llmgw.db`（并保留 `master.key`），再换回旧二进制即可。
+- **移除成本统计的升级注意**（本版本起网关不再估算请求成本）：
+  - 配置文件里若仍有 `pricing:` 段，严格解码会拒绝启动与热加载并提示该段已移除，升级前先删除。
+  - 新版本打开旧库时会执行 `ALTER TABLE ... DROP COLUMN cost_usd`（`request_logs` 与 `usage_daily`），
+    历史成本数据被永久删除，旧二进制无法再读回该列；需要保留历史成本时，升级前先 `.backup`，回滚用快照覆盖 `data/llmgw.db`。
 - **删掉 `instances.allow_private` 列**（要彻底回退这一列时，先停机并备份数据库）：
   - SQLite 3.35 及以上直接删列：
 

@@ -151,6 +151,7 @@ func TestEstimateTokens(t *testing.T) {
 }
 
 func TestOpenAICacheReadTokens(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		usage string

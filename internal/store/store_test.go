@@ -131,6 +131,7 @@ func TestRequestLogsAreWrittenAsynchronously(t *testing.T) {
 }
 
 func TestUsageAggregatesCacheTokens(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 	if !st.Enqueue(LogEntry{
 		TS: time.Now(), RequestID: "req-cache", APIKeyID: 1, IngressProtocol: "openai",
@@ -170,11 +171,13 @@ func TestUsageAggregatesCacheTokens(t *testing.T) {
 // TestUsageDailyCacheColumnsAreAdded checks that a database created before
 // the cache counters existed still opens and gains both columns.
 func TestUsageDailyCacheColumnsAreAdded(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
 	_, err = db.Exec(`CREATE TABLE usage_daily (
 		day               TEXT    NOT NULL,
 		api_key_id        INTEGER NOT NULL,
@@ -187,10 +190,6 @@ func TestUsageDailyCacheColumnsAreAdded(t *testing.T) {
 		PRIMARY KEY (day, api_key_id, model, provider)
 	)`)
 	if err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 

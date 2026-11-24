@@ -13,6 +13,7 @@ import (
 )
 
 func TestModelMetadataRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := testStore(t)
 	if _, err := st.CreateInstance(InstanceSpec{
 		Name:   "i",
@@ -78,11 +79,13 @@ func TestModelMetadataRoundTrip(t *testing.T) {
 }
 
 func TestModelMetadataColumnIsMigrated(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
 	stmts := []string{
 		`CREATE TABLE instances (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,

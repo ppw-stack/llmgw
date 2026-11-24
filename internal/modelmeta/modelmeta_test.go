@@ -6,6 +6,7 @@ import (
 )
 
 func TestNormalizeCanonicalizesCapabilities(t *testing.T) {
+	t.Parallel()
 	meta := Metadata{
 		DisplayName:     "  GLM-5.3  ",
 		ContextLength:   -1,
@@ -38,6 +39,7 @@ func TestNormalizeCanonicalizesCapabilities(t *testing.T) {
 }
 
 func TestNormalizeDropsEmptyProtocolMap(t *testing.T) {
+	t.Parallel()
 	meta := Metadata{Protocols: map[string]Override{" ": {}}}
 	meta.Normalize()
 	if meta.Protocols != nil {
@@ -46,6 +48,7 @@ func TestNormalizeDropsEmptyProtocolMap(t *testing.T) {
 }
 
 func TestForAppliesProtocolOverride(t *testing.T) {
+	t.Parallel()
 	meta := Metadata{
 		ContextLength:   200000,
 		MaxOutputTokens: 64000,
@@ -77,6 +80,7 @@ func TestForAppliesProtocolOverride(t *testing.T) {
 }
 
 func TestForKeepsBaseWhenOverrideOmitsCapabilities(t *testing.T) {
+	t.Parallel()
 	meta := Metadata{
 		ContextLength: 1000,
 		Capabilities:  []string{"tools"},
@@ -92,6 +96,7 @@ func TestForKeepsBaseWhenOverrideOmitsCapabilities(t *testing.T) {
 }
 
 func TestMergePrefersExplicitValues(t *testing.T) {
+	t.Parallel()
 	explicit := Metadata{
 		ContextLength: 1000,
 		Capabilities:  []string{"tools"},
@@ -128,6 +133,7 @@ func TestMergePrefersExplicitValues(t *testing.T) {
 }
 
 func TestIsZero(t *testing.T) {
+	t.Parallel()
 	if !(Metadata{}).IsZero() {
 		t.Fatal("empty metadata should be zero")
 	}

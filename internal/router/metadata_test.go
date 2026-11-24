@@ -8,6 +8,7 @@ import (
 )
 
 func TestModelInfosExpandsMetadataPerProtocol(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Instances: []config.Instance{
 			{

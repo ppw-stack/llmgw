@@ -528,7 +528,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+	if err := json.NewEncoder(w).Encode(out); err != nil {
+		s.log.Warn("encode models response failed",
+			"request_id", requestID(r), "path", r.URL.Path, "err", err)
+	}
 }
 
 // handleAnthropicModels serves the Anthropic-shaped model list. Anthropic
@@ -583,7 +586,10 @@ func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
 		out.LastID = out.Data[len(out.Data)-1].ID
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+	if err := json.NewEncoder(w).Encode(out); err != nil {
+		s.log.Warn("encode models response failed",
+			"request_id", requestID(r), "path", r.URL.Path, "err", err)
+	}
 }
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, protocol string) (*store.APIKey, bool) {

@@ -1,3 +1,5 @@
+// Package router compiles immutable routing snapshots and resolves models to
+// ordered upstream candidates.
 package router
 
 import (
@@ -314,7 +316,12 @@ func (r *Router) ModelInfos(protocol string) []ModelInfo {
 	if snap == nil {
 		return nil
 	}
-	return snap.InfosByProtocol[protocol]
+	// Snapshot is shared by every request, so hand out a copy to keep
+	// callers from mutating the immutable routing table.
+	infos := snap.InfosByProtocol[protocol]
+	out := make([]ModelInfo, len(infos))
+	copy(out, infos)
+	return out
 }
 
 // ModelList returns the models visible on one protocol's endpoint.

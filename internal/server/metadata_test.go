@@ -1,15 +1,18 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/modelmeta"
 )
 
 func TestOpenAIModelsAdvertiseMetadata(t *testing.T) {
+	t.Parallel()
 	gw, _, key := setupConfig(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"up-1"},
 		func(cfg *config.Config) {
 			cfg.Models[0].Metadata = modelmeta.Metadata{
@@ -62,6 +65,7 @@ func TestOpenAIModelsAdvertiseMetadata(t *testing.T) {
 }
 
 func TestAnthropicModelsUseAnthropicShape(t *testing.T) {
+	t.Parallel()
 	gw, _, key := setupConfig(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"up-1"},
 		func(cfg *config.Config) {
 			cfg.Models[0].Metadata = modelmeta.Metadata{
@@ -101,7 +105,9 @@ func TestAnthropicModelsUseAnthropicShape(t *testing.T) {
 
 func getModels(t *testing.T, url, key string) []byte {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

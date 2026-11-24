@@ -6,6 +6,7 @@ import (
 )
 
 func TestModelMetadataIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
 	meta, ok := ModelMetadata("  MiniMax-M3.1-Flash ")
 	if !ok {
 		t.Fatal("MiniMax-M3.1-Flash should be in the catalog")
@@ -19,12 +20,14 @@ func TestModelMetadataIsCaseInsensitive(t *testing.T) {
 }
 
 func TestModelMetadataSkipsDynamicAlias(t *testing.T) {
+	t.Parallel()
 	if _, ok := ModelMetadata("ark-code-latest"); ok {
 		t.Fatal("ark-code-latest is a control-plane alias and must not carry fixed limits")
 	}
 }
 
 func TestModelCatalogEntriesAreServedByPresets(t *testing.T) {
+	t.Parallel()
 	served := map[string]bool{}
 	for _, p := range All() {
 		for _, model := range p.Models {

@@ -8,10 +8,10 @@ import (
 )
 
 func TestModelMetadataFromYAML(t *testing.T) {
+	t.Parallel()
 	body := `
 instances:
   - name: custom
-    api_key: k
     endpoints:
       - protocol: openai
         base_url: https://example.com/v1
@@ -49,6 +49,7 @@ models:
 }
 
 func TestEffectiveMetadataFallsBackToPreset(t *testing.T) {
+	t.Parallel()
 	cfg := Config{
 		Instances: []Instance{
 			{
@@ -83,6 +84,7 @@ func TestEffectiveMetadataFallsBackToPreset(t *testing.T) {
 }
 
 func TestEffectiveMetadataKeepsExplicitValues(t *testing.T) {
+	t.Parallel()
 	cfg := Config{
 		Instances: []Instance{
 			{
@@ -121,6 +123,7 @@ func TestEffectiveMetadataKeepsExplicitValues(t *testing.T) {
 }
 
 func TestEffectiveMetadataSkipsCustomInstances(t *testing.T) {
+	t.Parallel()
 	cfg := Config{
 		Instances: []Instance{
 			{

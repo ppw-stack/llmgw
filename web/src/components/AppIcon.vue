@@ -18,6 +18,7 @@ export type IconName =
   | 'external'
   | 'chevron-down'
   | 'chevron-right'
+  | 'arrow-right'
   | 'menu'
   | 'lock'
   | 'logout'
@@ -133,6 +134,10 @@ withDefaults(
     </template>
     <template v-else-if="name === 'chevron-right'">
       <path d="m9 6 6 6-6 6" />
+    </template>
+    <template v-else-if="name === 'arrow-right'">
+      <path d="M5 12h14" />
+      <path d="m13 6 6 6-6 6" />
     </template>
     <template v-else-if="name === 'menu'">
       <path d="M4 7h16" />

@@ -1229,6 +1229,11 @@ tbody tr.hoverable:hover {
   max-width: 780px;
 }
 
+/* 面板本身只承载初始焦点，不显示围绕整个弹窗的焦点框。 */
+.modal-panel:focus {
+  outline: none;
+}
+
 .modal-header {
   display: flex;
   align-items: center;

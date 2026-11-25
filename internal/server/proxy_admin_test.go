@@ -5,23 +5,42 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/store"
 )
+
+// proxyTestPassword returns the proxy password used by the admin API tests.
+// The environment variable injects a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func proxyTestPassword() string {
+	if v := strings.TrimSpace(os.Getenv("TEST_PROXY_PASSWORD")); v != "" {
+		return v
+	}
+	return "test-proxy-placeholder-password"
+}
 
 func TestInstanceProxyCRUDAndRedaction(t *testing.T) {
 	t.Parallel()
 	gw, _, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
 	apiKey := testAPIKey("TEST_INSTANCE_PROXY_API_KEY", "9999")
+	proxyPassword := proxyTestPassword()
 
 	// 1. Create with authenticated proxy URL.
+	proxyURL := (&url.URL{
+		Scheme: "socks5",
+		User:   url.UserPassword("alice", proxyPassword),
+		Host:   "127.0.0.1:1080",
+	}).String()
 	createBody := `{"name":"proxied-inst","api_key":"` + apiKey + `",
 		"models":["gpt-upstream"],
 		"endpoints":[{"protocol":"openai","base_url":"https://api.example.com/v1"}],
-		"proxy_url":"socks5://alice:demo-secret@127.0.0.1:1080"}`
+		"proxy_url":"` + proxyURL + `"}`
 	resp := adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances", createBody)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -33,7 +52,7 @@ func TestInstanceProxyCRUDAndRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(rawBody), "demo-secret") {
+	if strings.Contains(string(rawBody), proxyPassword) {
 		t.Fatalf("create response leaked proxy password: %s", rawBody)
 	}
 	var created instanceView
@@ -146,5 +165,48 @@ func TestPresetModelsUsesSubmittedProxy(t *testing.T) {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid proxy status = %d, want 400", resp2.StatusCode)
+	}
+}
+
+// A stored proxy that cannot be decrypted must fail the update instead of
+// being silently dropped: the instance would otherwise be saved without its
+// proxy and only break later, on the topology reload.
+func TestUpdateInstanceRejectsUndecryptableStoredProxy(t *testing.T) {
+	t.Parallel()
+	gw, st, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"})
+
+	rec, err := st.CreateInstance(store.InstanceSpec{
+		Name:              "broken-proxy",
+		Models:            []string{"gpt-upstream"},
+		Endpoints:         []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://api.example.com/v1"}},
+		EncryptedProxyURL: "not-valid-ciphertext",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The update omits proxy_url, so the stored value has to be read back.
+	body := `{"name":"broken-proxy",
+		"models":["gpt-upstream"],
+		"endpoints":[{"protocol":"openai","base_url":"https://api.example.com/v1"}]}`
+	resp := adminRequest(t, http.MethodPut, gw.URL+"/admin/api/instances/"+itoa(rec.ID), body)
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("update status = %d %s, want 500", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "cannot decrypt the stored proxy url") {
+		t.Fatalf("update error = %s, want it to name the proxy decryption", raw)
+	}
+
+	// The stored proxy must be left untouched.
+	records, err := st.ListInstanceRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range records {
+		if r.Name == "broken-proxy" && r.EncryptedProxyURL != "not-valid-ciphertext" {
+			t.Fatalf("stored proxy = %q, want it unchanged", r.EncryptedProxyURL)
+		}
 	}
 }

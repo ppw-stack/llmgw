@@ -1,14 +1,33 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+// proxyTestPassword returns the proxy password used by the config tests. Set
+// TEST_PROXY_PASSWORD to inject a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func proxyTestPassword() string {
+	if v := strings.TrimSpace(os.Getenv("TEST_PROXY_PASSWORD")); v != "" {
+		return v
+	}
+	return "test-proxy-placeholder-password"
+}
+
 func TestNormalizeProxyURL(t *testing.T) {
 	t.Parallel()
+	proxyPassword := proxyTestPassword()
+	withPassword := func(scheme, user, host string) string {
+		return (&url.URL{
+			Scheme: scheme,
+			User:   url.UserPassword(user, proxyPassword),
+			Host:   host,
+		}).String()
+	}
 	valid := []struct {
 		in   string
 		want string
@@ -19,7 +38,8 @@ func TestNormalizeProxyURL(t *testing.T) {
 		{"HTTP://localhost:7890/", "http://localhost:7890"},
 		{"https://192.168.1.10:8443", "https://192.168.1.10:8443"},
 		{"socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"},
-		{"socks5h://user:demo-pass@proxy.example.com:1080", "socks5h://user:demo-pass@proxy.example.com:1080"},
+		{withPassword("socks5h", "user", "proxy.example.com:1080"),
+			withPassword("socks5h", "user", "proxy.example.com:1080")},
 		{"http://[::1]:7890", "http://[::1]:7890"},
 		{"http://[fd00::1]:7890", "http://[fd00::1]:7890"},
 	}
@@ -55,6 +75,14 @@ func TestNormalizeProxyURL(t *testing.T) {
 
 func TestRedactProxyURL(t *testing.T) {
 	t.Parallel()
+	proxyPassword := proxyTestPassword()
+	withPassword := func(scheme, user, host string) string {
+		return (&url.URL{
+			Scheme: scheme,
+			User:   url.UserPassword(user, proxyPassword),
+			Host:   host,
+		}).String()
+	}
 	cases := []struct {
 		in       string
 		want     string
@@ -63,8 +91,8 @@ func TestRedactProxyURL(t *testing.T) {
 		{"", "", false},
 		{"http://127.0.0.1:7890", "http://127.0.0.1:7890", false},
 		{"http://alice@127.0.0.1:7890", "http://alice@127.0.0.1:7890", false},
-		{"http://alice:demo-pass@127.0.0.1:7890", "http://alice:****@127.0.0.1:7890", true},
-		{"socks5://:demo-pass@127.0.0.1:1080", "socks5://****@127.0.0.1:1080", true},
+		{withPassword("http", "alice", "127.0.0.1:7890"), "http://alice:****@127.0.0.1:7890", true},
+		{withPassword("socks5", "", "127.0.0.1:1080"), "socks5://****@127.0.0.1:1080", true},
 	}
 	for _, tc := range cases {
 		got, hasAuth := RedactProxyURL(tc.in)
@@ -72,7 +100,7 @@ func TestRedactProxyURL(t *testing.T) {
 			t.Errorf("RedactProxyURL(%q) = (%q, %v), want (%q, %v)",
 				tc.in, got, hasAuth, tc.want, tc.wantAuth)
 		}
-		if strings.Contains(got, "demo-pass") {
+		if strings.Contains(got, proxyPassword) {
 			t.Errorf("RedactProxyURL(%q) leaked password: %q", tc.in, got)
 		}
 	}
@@ -112,5 +140,50 @@ models:
 	}
 	if eff.Instances[0].ProxyURL != "http://127.0.0.1:7890" {
 		t.Fatalf("effective proxy = %q", eff.Instances[0].ProxyURL)
+	}
+}
+
+// An unset environment variable must not silently turn the proxy off: the
+// instance would then reach the upstream straight from the gateway.
+func TestConfigLoadRejectsUnsetProxyURLEnv(t *testing.T) {
+	t.Setenv("TEST_INSTANCE_PROXY_URL", "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+instances:
+  - name: upstream
+    api_key: placeholder
+    proxy_url: "${TEST_INSTANCE_PROXY_URL}"
+    endpoints:
+      - protocol: openai
+        base_url: https://api.example.com/v1
+    models: [m1]
+models:
+  - name: m1
+    instances:
+      - name: upstream
+        upstream: m1
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with an unset proxy_url environment variable")
+	}
+}
+
+// A proxy URL that cannot be parsed must not leak its password into the
+// error, because the error reaches the admin console and the log.
+func TestNormalizeProxyURLDoesNotLeakPassword(t *testing.T) {
+	t.Parallel()
+	proxyPassword := proxyTestPassword()
+	// A port that is not a number makes url.Parse fail, and the raw URL
+	// carries the password.
+	raw := "http://alice:" + proxyPassword + "@host:port"
+	_, err := NormalizeProxyURL("inst", "proxy_url", raw)
+	if err == nil {
+		t.Fatal("NormalizeProxyURL succeeded with an invalid URL")
+	}
+	if strings.Contains(err.Error(), proxyPassword) {
+		t.Fatalf("error leaked the proxy password: %v", err)
 	}
 }

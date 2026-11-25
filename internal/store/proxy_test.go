@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +16,16 @@ import (
 	"github.com/pw/llmgw/internal/secret"
 )
 
+// proxyTestPassword returns the proxy password used by the store tests. Set
+// TEST_PROXY_PASSWORD to inject a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func proxyTestPassword() string {
+	if v := strings.TrimSpace(os.Getenv("TEST_PROXY_PASSWORD")); v != "" {
+		return v
+	}
+	return "test-proxy-placeholder-password"
+}
+
 func TestInstanceProxyURLEncryptedRoundTrip(t *testing.T) {
 	t.Parallel()
 	st := testStore(t)
@@ -22,7 +34,12 @@ func TestInstanceProxyURLEncryptedRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	proxyPlain := "socks5://alice:demo-proxy-pass@127.0.0.1:1080"
+	proxyPassword := proxyTestPassword()
+	proxyPlain := (&url.URL{
+		Scheme: "socks5",
+		User:   url.UserPassword("alice", proxyPassword),
+		Host:   "127.0.0.1:1080",
+	}).String()
 	if err := st.ImportTopology([]config.Instance{{
 		Name:      "proxied",
 		APIKey:    topologyTestKey(),
@@ -44,7 +61,7 @@ func TestInstanceProxyURLEncryptedRoundTrip(t *testing.T) {
 	if records[0].EncryptedProxyURL == "" {
 		t.Fatal("expected encrypted proxy_url to be stored")
 	}
-	if strings.Contains(records[0].EncryptedProxyURL, "demo-proxy-pass") {
+	if strings.Contains(records[0].EncryptedProxyURL, proxyPassword) {
 		t.Fatalf("stored proxy_url_enc contains plaintext password: %q", records[0].EncryptedProxyURL)
 	}
 

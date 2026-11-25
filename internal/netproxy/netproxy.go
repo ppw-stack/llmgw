@@ -46,11 +46,11 @@ func ProxyFunc(req *http.Request) (*url.URL, error) {
 func DialProxySafe(ctx context.Context, dialer *net.Dialer, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("split proxy address %q: %w", addr, err)
 	}
 	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve proxy host %q: %w", host, err)
 	}
 	for _, ip := range ips {
 		if config.BlockedProxyAddress(ip) {

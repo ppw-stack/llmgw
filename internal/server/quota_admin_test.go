@@ -1,14 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/quota"
+	"github.com/pw/llmgw/internal/store"
 )
 
 // TestAdminQuota checks that the quota endpoint reports the windows of a
@@ -76,6 +80,40 @@ func TestAdminQuota(t *testing.T) {
 	}
 	if builtin.Error != "" {
 		t.Fatalf("error = %q", builtin.Error)
+	}
+}
+
+// TestAdminQuotaLogsUndecryptableProxy makes sure a proxy that cannot be
+// decrypted is logged on the server. The console only sees a generic message,
+// so the real reason has to reach the log.
+func TestAdminQuotaLogsUndecryptableProxy(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	gw, st, _ := setup(t, nil, func(w http.ResponseWriter, r *http.Request) {}, []string{"k"},
+		func(o *Options) { o.Log = logger })
+
+	if _, err := st.CreateInstance(store.InstanceSpec{
+		Name:              "broken-proxy",
+		Models:            []string{"gpt-upstream"},
+		Endpoints:         []config.Endpoint{{Protocol: config.ProtocolOpenAI, BaseURL: "https://api.example.com/v1"}},
+		EncryptedProxyURL: "not-valid-ciphertext",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := adminRequest(t, http.MethodGet, gw.URL+"/admin/api/quota", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("quota = %d", resp.StatusCode)
+	}
+	if !strings.Contains(logs.String(), "decrypt proxy url") {
+		t.Fatalf("the decryption failure was not logged: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "broken-proxy") {
+		t.Fatalf("the log does not name the instance: %q", logs.String())
 	}
 }
 

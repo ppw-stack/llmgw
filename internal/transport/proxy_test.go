@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -20,6 +21,16 @@ import (
 	"github.com/pw/llmgw/internal/store"
 )
 
+// proxyTestPassword returns the password used by the proxy tests. The
+// environment variable injects a real one; the fallback is an obviously
+// synthetic placeholder so no credential is stored in the repository.
+func proxyTestPassword() string {
+	if v := strings.TrimSpace(os.Getenv("TEST_PROXY_PASSWORD")); v != "" {
+		return v
+	}
+	return "test-proxy-placeholder-password"
+}
+
 func TestForwardUsesInstanceProxyWithBlockPrivateEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -31,7 +42,7 @@ func TestForwardUsesInstanceProxyWithBlockPrivateEnabled(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxyuser:proxypass"))
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxyuser:"+proxyTestPassword()))
 	var proxyHits atomic.Int64
 	var gotProxyAuth atomic.Value
 	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +82,11 @@ func TestForwardUsesInstanceProxyWithBlockPrivateEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyWithAuth := "http://proxyuser:proxypass@" + parsedProxy.Host
+	proxyWithAuth := (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword("proxyuser", proxyTestPassword()),
+		Host:   parsedProxy.Host,
+	}).String()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -156,6 +156,12 @@ func NormalizeProxyURL(owner, field, raw string) (string, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		// url.Parse returns a *url.Error whose message repeats the whole raw
+		// URL, including the userinfo. Unwrap it so a proxy password never
+		// reaches a log line or an admin API response.
+		if uerr, ok := err.(*url.Error); ok {
+			err = uerr.Err
+		}
 		return "", fmt.Errorf("%s: %s is not a valid URL: %w", owner, field, err)
 	}
 	scheme := strings.ToLower(u.Scheme)

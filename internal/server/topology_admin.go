@@ -564,9 +564,18 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 			return
 		}
 	} else if existing.EncryptedProxyURL != "" {
-		if plain, derr := s.box.Decrypt(existing.EncryptedProxyURL); derr == nil {
-			instance.ProxyURL = plain
+		plain, derr := s.box.Decrypt(existing.EncryptedProxyURL)
+		if derr != nil {
+			// The stored proxy cannot be read back, so the instance would
+			// be saved without it and only fail on the topology reload.
+			// Fail here instead, like store.Topology does for the same
+			// field.
+			s.log.Error("decrypt proxy url", "method", r.Method, "path", r.URL.Path,
+				"request_id", requestID(r), "instance", existing.Name, "err", derr)
+			writeAdminError(w, http.StatusInternalServerError, "cannot decrypt the stored proxy url; fix or clear the proxy of this instance first")
+			return
 		}
+		instance.ProxyURL = plain
 	}
 	instances, models, err := s.store.Topology(s.box)
 	if err != nil {

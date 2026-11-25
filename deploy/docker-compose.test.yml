@@ -49,6 +49,32 @@ services:
       retries: 10
       start_period: 2s
 
+  # 出站代理（可选依赖）。网关只有被显式配置了 proxy_url 的接入点才会走它；
+  # 默认不启动，避免给常规验证多加一个容器。
+  proxy:
+    image: python:3.13-alpine
+    container_name: llmgw-proxy
+    profiles: ["proxy"]
+    command: ["python", "/app/mock_proxy.py"]
+    environment:
+      PROXY_USER: "proxyuser"
+      PROXY_PASS: "proxypass"
+      PROXY_HTTP_PORT: "8888"
+      PROXY_SOCKS_PORT: "1080"
+    volumes:
+      - ./mock_proxy.py:/app/mock_proxy.py:ro
+    expose:
+      - "8888"
+      - "1080"
+    networks:
+      - llmgw-test
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8888/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
 networks:
   # 固定网段，让容器看到的来源 IP 可复现。compose 默认网络每次 Docker
   # Desktop 重启都会换网段（192.168.x.1），那样 server.admin_allowed_cidrs

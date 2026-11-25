@@ -2,13 +2,17 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,14 +21,28 @@ import (
 )
 
 // proxyTestPassword returns the proxy password used by the store tests. Set
-// TEST_PROXY_PASSWORD to inject a real one; the fallback is an obviously
-// synthetic placeholder so no credential is stored in the repository.
+// TEST_PROXY_PASSWORD to inject a real one; otherwise a random one-off
+// password is generated at runtime so no credential literal is stored in the
+// repository. The generated value is cached so every call in the same test
+// binary returns the same password.
 func proxyTestPassword() string {
 	if v := strings.TrimSpace(os.Getenv("TEST_PROXY_PASSWORD")); v != "" {
 		return v
 	}
-	return "test-proxy-placeholder-password"
+	proxyTestPasswordOnce.Do(func() {
+		buf := make([]byte, 18)
+		if _, err := rand.Read(buf); err != nil {
+			panic(fmt.Sprintf("generate the random proxy test password: %v", err))
+		}
+		proxyTestPasswordValue = base64.RawURLEncoding.EncodeToString(buf)
+	})
+	return proxyTestPasswordValue
 }
+
+var (
+	proxyTestPasswordOnce  sync.Once
+	proxyTestPasswordValue string
+)
 
 func TestInstanceProxyURLEncryptedRoundTrip(t *testing.T) {
 	t.Parallel()

@@ -2,11 +2,35 @@ package netproxy
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+)
+
+// proxyTestPassword returns the proxy password used by the netproxy tests.
+// A random one-off password is generated at runtime so no credential literal
+// is stored in the repository. The generated value is cached so every call in
+// the same test binary returns the same password.
+func proxyTestPassword() string {
+	proxyTestPasswordOnce.Do(func() {
+		buf := make([]byte, 18)
+		if _, err := rand.Read(buf); err != nil {
+			panic(fmt.Sprintf("generate the random proxy test password: %v", err))
+		}
+		proxyTestPasswordValue = base64.RawURLEncoding.EncodeToString(buf)
+	})
+	return proxyTestPasswordValue
+}
+
+var (
+	proxyTestPasswordOnce  sync.Once
+	proxyTestPasswordValue string
 )
 
 // A proxy address that cannot be split must report which address failed, so
@@ -32,12 +56,17 @@ func TestDialProxySafeWrapsSplitError(t *testing.T) {
 func TestSanitizeErrorMasksPassword(t *testing.T) {
 	t.Parallel()
 
-	proxyURL, err := url.Parse("http://alice:secret-value@127.0.0.1:7890")
+	proxyPassword := proxyTestPassword()
+	proxyURL, err := url.Parse((&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword("alice", proxyPassword),
+		Host:   "127.0.0.1:7890",
+	}).String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := SanitizeError(errors.New("dial failed for secret-value"), proxyURL)
-	if strings.Contains(got, "secret-value") {
+	got := SanitizeError(errors.New("dial failed for "+proxyPassword), proxyURL)
+	if strings.Contains(got, proxyPassword) {
 		t.Fatalf("error leaked the proxy password: %q", got)
 	}
 }

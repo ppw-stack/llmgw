@@ -45,8 +45,10 @@ func TestInvalidateWinsOverInFlightReport(t *testing.T) {
 	}
 
 	done := make(chan Report, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
 	go func() {
-		done <- svc.Report(context.Background(), target)
+		done <- svc.Report(ctx, target)
 	}()
 
 	// Wait for the upstream request to be in flight.

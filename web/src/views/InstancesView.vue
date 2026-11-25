@@ -316,6 +316,10 @@ function setMode(mode: InstanceMode) {
 }
 
 function addEndpoint(form: InstanceForm) {
+  // 目前只有 openai / anthropic 两种协议，每种仅能配置一个地址。
+  if (form.endpoints.length >= 2) {
+    return;
+  }
   const used = new Set(form.endpoints.map((ep) => ep.protocol));
   const nextProtocol: InstanceEndpoint['protocol'] = used.has('openai') ? 'anthropic' : 'openai';
   form.endpoints.push({ protocol: nextProtocol, base_url: '' });
@@ -977,7 +981,12 @@ onUnmounted(() => {
         <div v-if="editing.mode === 'custom'" class="form-section">
           <div class="row space-between">
             <span class="form-section-title">自定义协议端点</span>
-            <button type="button" class="ghost sm" @click="addEndpoint(editing)">
+            <button
+              type="button"
+              class="ghost sm"
+              :disabled="editing.endpoints.length >= 2"
+              @click="addEndpoint(editing)"
+            >
               <AppIcon name="plus" :size="13" />
               <span>添加端点</span>
             </button>

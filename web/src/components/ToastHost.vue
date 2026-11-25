@@ -1,6 +1,11 @@
 <script setup lang="ts">
+import { onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
-import { toasts } from '../utils/toast';
+import { clearToasts, toasts } from '../utils/toast';
+
+onUnmounted(() => {
+  clearToasts();
+});
 </script>
 
 <template>

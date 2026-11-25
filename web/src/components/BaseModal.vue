@@ -13,9 +13,18 @@ withDefaults(
 const emit = defineEmits<{ close: [] }>();
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    emit('close');
+  if (event.key !== 'Escape' || event.defaultPrevented) {
+    return;
   }
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest('.modal-panel')) {
+    return;
+  }
+  // 正在编辑表单控件时按 Esc 只交给控件自身处理，避免无确认地丢弃未保存的输入。
+  if (target.closest('input, textarea, select, [contenteditable]')) {
+    return;
+  }
+  emit('close');
 }
 
 onMounted(() => {

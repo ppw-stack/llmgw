@@ -14,21 +14,21 @@ const snippetCode = computed(() => {
   if (activeSnippet.value === 'claude-code') {
     return [
       `export ANTHROPIC_BASE_URL="${anthropicBase.value}"`,
-      `export ANTHROPIC_AUTH_TOKEN="sk-gw-your-key"`,
+      `export ANTHROPIC_AUTH_TOKEN="<YOUR_GATEWAY_KEY>"`,
       `claude`,
     ].join('\n');
   }
   if (activeSnippet.value === 'openai-curl') {
     return [
       `curl ${openaiBase.value}/chat/completions \\`,
-      `  -H "Authorization: Bearer sk-gw-your-key" \\`,
+      `  -H "Authorization: Bearer <YOUR_GATEWAY_KEY>" \\`,
       `  -H "Content-Type: application/json" \\`,
       `  -d '{"model":"your-model","messages":[{"role":"user","content":"Hello"}]}'`,
     ].join('\n');
   }
   return [
     `curl ${anthropicBase.value}/v1/messages \\`,
-    `  -H "x-api-key: sk-gw-your-key" \\`,
+    `  -H "x-api-key: <YOUR_GATEWAY_KEY>" \\`,
     `  -H "anthropic-version: 2023-06-01" \\`,
     `  -H "Content-Type: application/json" \\`,
     `  -d '{"model":"your-model","max_tokens":256,"messages":[{"role":"user","content":"Hello"}]}'`,
@@ -91,7 +91,9 @@ const clients = [
       <div class="row space-between">
         <div>
           <h3>快速接入示例</h3>
-          <p class="muted small">将示例中的 <code>sk-gw-your-key</code> 替换为你的网关 Key</p>
+          <p class="muted small">
+            将示例中的 <code>&lt;YOUR_GATEWAY_KEY&gt;</code> 替换为你的网关 Key
+          </p>
         </div>
         <div class="segmented" role="group" aria-label="接入示例类型">
           <button

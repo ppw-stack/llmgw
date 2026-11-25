@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import { api } from '../api';
+import { api, healthz } from '../api';
 import AppIcon, { type IconName } from '../components/AppIcon.vue';
 import { errorMessage } from '../utils/error';
 import {
@@ -209,16 +209,11 @@ async function probeHealth(): Promise<void> {
     controller.abort();
   }, 1500);
 
-  const start = performance.now();
   try {
-    const res = await fetch('/healthz', {
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    const latency = Math.max(1, Math.round(performance.now() - start));
-    if (res.ok) {
+    const result = await healthz(controller.signal);
+    if (result.ok) {
       healthStatus.value = 'online';
-      healthLatencyMs.value = latency;
+      healthLatencyMs.value = result.latencyMs;
     } else {
       healthStatus.value = 'offline';
       healthLatencyMs.value = null;
@@ -309,6 +304,16 @@ function onColorSchemeChange(): void {
   canvasController?.refreshTheme();
 }
 
+/**
+ * 弹窗打开时画布背后的 blur 合成每帧都要重算，暂停 rAF 只保留静态帧。
+ * 登录成功后恢复动画，让成功脉冲可见。
+ */
+const canvasPaused = computed(() => modalOpen.value && !loginSuccess.value);
+
+watch(canvasPaused, (paused) => {
+  canvasController?.setPaused(paused);
+});
+
 watch(themeMode, () => {
   canvasController?.refreshTheme();
 });
@@ -364,7 +369,7 @@ onUnmounted(() => {
     />
 
     <!-- Layer 2: 顶栏（品牌、真实探活、主题切换、登录入口） -->
-    <header class="landing-header">
+    <header class="landing-header" :inert="modalOpen">
       <div class="brand-mark">
         <span class="brand-icon">
           <AppIcon name="spark" :size="16" />
@@ -405,7 +410,7 @@ onUnmounted(() => {
     </header>
 
     <!-- Layer 3: 中上部 Hero 与底部交互栈 -->
-    <main class="landing-stage" :class="{ faded: modalOpen }">
+    <main class="landing-stage" :class="{ faded: modalOpen }" :inert="modalOpen">
       <section class="hero-anchor" aria-labelledby="landing-title">
         <h1 id="landing-title" class="hero-title">统一的大模型路由与观测网关</h1>
         <div class="feature-pills">
@@ -910,6 +915,9 @@ onUnmounted(() => {
 .auth-card {
   width: 100%;
   max-width: 400px;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
   padding: 26px;
   border-radius: var(--radius-xl);
   border: 1px solid var(--border-subtle);

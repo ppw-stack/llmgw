@@ -32,6 +32,8 @@ export interface GatewayCanvasOptions {
 
 export interface GatewayCanvasController {
   triggerPulse: (burstCount?: number, color?: string) => void;
+  /** 暂停/恢复动画循环；暂停时保留一帧静态画面，避免弹窗背后闪烁。 */
+  setPaused: (paused: boolean) => void;
   refreshTheme: () => void;
   destroy: () => void;
 }
@@ -114,6 +116,8 @@ export function initGatewayCanvas(
   let rafId: number | null = null;
   let lastFrameTime: number | null = null;
   let destroyed = false;
+  let paused = false;
+  let gridCache: { key: string; pattern: CanvasPattern } | null = null;
 
   const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   let prefersReducedMotion = reducedMotionQuery.matches;
@@ -180,16 +184,44 @@ export function initGatewayCanvas(
     ctx.closePath();
   }
 
+  /**
+   * 点阵用一块「一个间距大小」的离屏 tile 预先画好，再用 pattern 一次铺满，
+   * 避免每帧上千次 beginPath()+arc()+fill()；tile 只在 DPR 或色板变化时重建。
+   */
   function drawWarmGrid(palette: GatewayCanvasPalette): void {
     const spacing = 32;
-    ctx.fillStyle = palette.gridDot;
-    for (let x = spacing; x < width; x += spacing) {
-      for (let y = spacing; y < height; y += spacing) {
-        ctx.beginPath();
-        ctx.arc(x, y, 0.9, 0, Math.PI * 2);
-        ctx.fill();
+    const dpr = window.devicePixelRatio || 1;
+    const key = `${dpr}|${palette.gridDot}`;
+
+    if (gridCache?.key !== key) {
+      const tile = document.createElement('canvas');
+      tile.width = Math.max(1, Math.round(spacing * dpr));
+      tile.height = Math.max(1, Math.round(spacing * dpr));
+      const tileCtx = tile.getContext('2d');
+      if (!tileCtx) {
+        gridCache = null;
+        return;
       }
+      // tile 按设备像素绘制，配合下面的单位矩阵铺满，保证 32px 一个点。
+      tileCtx.fillStyle = palette.gridDot;
+      tileCtx.beginPath();
+      tileCtx.arc(tile.width / 2, tile.height / 2, 0.9 * dpr, 0, Math.PI * 2);
+      tileCtx.fill();
+
+      const pattern = ctx.createPattern(tile, 'repeat');
+      if (!pattern) {
+        gridCache = null;
+        return;
+      }
+      gridCache = { key, pattern };
     }
+
+    // pattern 在设备像素空间平铺，避免依赖 CanvasPattern.setTransform。
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = gridCache.pattern;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
   }
 
   function drawTopology(palette: GatewayCanvasPalette, dt: number): void {
@@ -397,7 +429,7 @@ export function initGatewayCanvas(
   }
 
   function render(now: number): void {
-    if (destroyed) {
+    if (destroyed || paused) {
       return;
     }
     if (prefersReducedMotion) {
@@ -538,7 +570,9 @@ export function initGatewayCanvas(
     canvas.width = Math.floor(width * dpr);
     canvas.height = Math.floor(height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (prefersReducedMotion) {
+    // 画布位图重建后旧的 pattern 可能失效，置空让下一帧重建这块 32px tile。
+    gridCache = null;
+    if (paused || prefersReducedMotion) {
       drawStaticFrame();
     }
   }
@@ -573,7 +607,27 @@ export function initGatewayCanvas(
       }
       lastFrameTime = null;
       drawStaticFrame();
-    } else if (rafId === null && !destroyed) {
+    } else if (rafId === null && !destroyed && !paused) {
+      lastFrameTime = null;
+      rafId = window.requestAnimationFrame(render);
+    }
+  }
+
+  function setPaused(next: boolean): void {
+    if (destroyed || paused === next) {
+      return;
+    }
+    paused = next;
+    if (paused) {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      lastFrameTime = null;
+      drawStaticFrame();
+      return;
+    }
+    if (!prefersReducedMotion && rafId === null) {
       lastFrameTime = null;
       rafId = window.requestAnimationFrame(render);
     }
@@ -599,8 +653,9 @@ export function initGatewayCanvas(
 
   return {
     triggerPulse,
+    setPaused,
     refreshTheme() {
-      if (!destroyed && prefersReducedMotion) {
+      if (!destroyed && (prefersReducedMotion || paused)) {
         drawStaticFrame();
       }
     },

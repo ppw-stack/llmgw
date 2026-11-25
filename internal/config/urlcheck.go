@@ -101,3 +101,105 @@ func CheckUpstreamHost(owner, field, raw string, allowPrivate bool) error {
 	}
 	return nil
 }
+
+// BlockedProxyAddress reports whether a proxy server address is unsafe to dial.
+// Unlike upstream endpoints, a proxy commonly lives on localhost or the private
+// network (for example 127.0.0.1:7890 or a LAN proxy), so loopback and RFC 1918
+// / IPv6 ULA ranges are allowed. Link-local (including cloud metadata
+// 169.254.169.254 and fe80::/10), unspecified, and multicast addresses are
+// still rejected.
+func BlockedProxyAddress(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.IsValid() {
+		return true
+	}
+	if addr.IsUnspecified() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
+		addr.IsMulticast() || addr.IsInterfaceLocalMulticast() {
+		return true
+	}
+	return false
+}
+
+// blockedProxyHostnames are hostnames that must never be used as a proxy
+// target, such as cloud instance metadata services.
+var blockedProxyHostnames = []string{
+	"metadata",
+	"instance-data",
+	"metadata.google.internal",
+}
+
+// LooksBlockedProxyHost reports whether a proxy URL host points at a cloud
+// metadata hostname or a blocked IP literal.
+func LooksBlockedProxyHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "" {
+		return true
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return BlockedProxyAddress(addr)
+	}
+	for _, name := range blockedProxyHostnames {
+		if host == name {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeProxyURL validates an optional instance proxy URL. Supported schemes
+// match Go's net/http.Transport.Proxy: http, https, socks5, and socks5h.
+func NormalizeProxyURL(owner, field, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("%s: %s is not a valid URL: %w", owner, field, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("%s: %s scheme %q is not supported (want http, https, socks5 or socks5h)",
+			owner, field, u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("%s: %s must include a host", owner, field)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("%s: %s must not contain a path, query or fragment", owner, field)
+	}
+	if LooksBlockedProxyHost(u.Hostname()) {
+		return "", fmt.Errorf("%s: %s points at a blocked link-local or metadata host %q",
+			owner, field, u.Hostname())
+	}
+	u.Scheme = scheme
+	u.Path = ""
+	return u.String(), nil
+}
+
+// RedactProxyURL masks any password in a proxy URL for safe display in the
+// admin console and logs. hasAuth is true when the URL carries a password.
+func RedactProxyURL(raw string) (redacted string, hasAuth bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	if u.User == nil {
+		return u.String(), false
+	}
+	if _, ok := u.User.Password(); !ok {
+		return u.String(), false
+	}
+	user := u.User.Username()
+	if user != "" {
+		return u.Scheme + "://" + user + ":****@" + u.Host, true
+	}
+	return u.Scheme + "://****@" + u.Host, true
+}

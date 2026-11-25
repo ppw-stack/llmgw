@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS instances (
     allow_private   INTEGER NOT NULL DEFAULT 0,
     session_header  TEXT    NOT NULL DEFAULT '',
     failover_statuses_json TEXT NOT NULL DEFAULT '[]',
+    proxy_url_enc   TEXT    NOT NULL DEFAULT '',
     max_fails       INTEGER NOT NULL DEFAULT 3,
     cooldown_secs   INTEGER NOT NULL DEFAULT 30,
     timeout_secs    INTEGER NOT NULL DEFAULT 0,
@@ -247,6 +248,10 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	if err := migrateInstanceSessionAffinity(ctx, db, log); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate instance session affinity: %w", err)
+	}
+	if err := migrateInstanceProxyURL(ctx, db, log); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate instance proxy_url: %w", err)
 	}
 	if err := migrateModelInstanceWindows(ctx, db, log); err != nil {
 		db.Close()
@@ -618,6 +623,28 @@ func migrateInstanceSessionAffinity(ctx context.Context, db *sql.DB, log *slog.L
 		}
 		log.Info("added the failover_statuses_json column to instances")
 	}
+	return nil
+}
+
+// migrateInstanceProxyURL adds the column that holds the encrypted optional
+// outbound proxy URL of an instance. Existing rows keep an empty string and
+// continue to inherit the process proxy environment.
+func migrateInstanceProxyURL(ctx context.Context, db *sql.DB, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	cols, err := tableColumns(ctx, db, "instances")
+	if err != nil {
+		return fmt.Errorf("read instances table columns: %w", err)
+	}
+	if len(cols) == 0 || cols["proxy_url_enc"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE instances ADD COLUMN proxy_url_enc TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add instances proxy_url_enc column: %w", err)
+	}
+	log.Info("added the proxy_url_enc column to instances")
 	return nil
 }
 

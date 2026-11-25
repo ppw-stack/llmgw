@@ -22,6 +22,7 @@ import (
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/health"
 	"github.com/pw/llmgw/internal/ingress"
+	"github.com/pw/llmgw/internal/netproxy"
 	"github.com/pw/llmgw/internal/observ"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
@@ -83,7 +84,7 @@ func NewWithTimeout(r *router.Router, st *store.Store, log *slog.Logger, timeout
 		breaker: health.NewBreaker(),
 	}
 	tr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 netproxy.ProxyFunc,
 		MaxIdleConns:          256,
 		MaxIdleConnsPerHost:   64,
 		IdleConnTimeout:       90 * time.Second,
@@ -113,6 +114,9 @@ func (f *Forwarder) dialContext(ctx context.Context, network, addr string) (net.
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	if !f.blockPrivate.Load() {
 		return dialer.DialContext(ctx, network, addr)
+	}
+	if _, viaProxy := netproxy.FromContext(ctx); viaProxy {
+		return netproxy.DialProxySafe(ctx, dialer, network, addr)
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -315,6 +319,9 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 	if target.AllowPrivate {
 		ctx = context.WithValue(ctx, allowPrivateKey{}, true)
 	}
+	if target.ProxyURL != nil {
+		ctx = netproxy.WithURL(ctx, target.ProxyURL)
+	}
 	if !in.Meta.Stream {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -391,7 +398,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		}
 		f.log.Warn("upstream request failed",
 			"request_id", in.RequestID, "instance", target.Instance,
-			"endpoint", target.Endpoint, "err", lastErr.Error(), "class", code)
+			"endpoint", target.Endpoint, "err", netproxy.SanitizeError(lastErr, target.ProxyURL), "class", code)
 		observ.UpstreamErrors.WithLabelValues(target.Instance, code).Inc()
 		f.record(in, target, status, start, 0, usageAcc{estimated: true}, code)
 		f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)

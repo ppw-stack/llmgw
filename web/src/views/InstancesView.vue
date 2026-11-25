@@ -53,6 +53,14 @@ interface InstanceForm {
   sessionHeader: string;
   /** 额外触发候选切换的状态码，逗号分隔 */
   failoverStatuses: string;
+  /** 可选网络代理地址；编辑含密码的存量代理时留空表示保留原值 */
+  proxyUrl: string;
+  /** 存量代理的脱敏展示值 */
+  proxyUrlHint: string;
+  /** 存量代理是否包含密码 */
+  proxyHasAuth: boolean;
+  /** 编辑含密码的存量代理时，勾选表示清空已有代理 */
+  clearProxy: boolean;
   maxFails: string;
   cooldownSecs: string;
   timeoutSecs: string;
@@ -241,6 +249,9 @@ const advancedCustomCount = computed(() => {
   if (f.failoverStatuses.trim() !== '') {
     count += 1;
   }
+  if (f.proxyUrl.trim() !== '' || (f.proxyHasAuth && !f.clearProxy)) {
+    count += 1;
+  }
   return count;
 });
 
@@ -262,6 +273,10 @@ function newForm(): InstanceForm {
     allowPrivateUpstream: false,
     sessionHeader: '',
     failoverStatuses: '',
+    proxyUrl: '',
+    proxyUrlHint: '',
+    proxyHasAuth: false,
+    clearProxy: false,
     maxFails: '3',
     cooldownSecs: '30',
     timeoutSecs: '0',
@@ -366,9 +381,17 @@ async function queryCandidates() {
   candidatesWarning.value = '';
   candidatesError.value = '';
   try {
+    const reqBody: { preset: string; api_key: string; proxy_url?: string } = {
+      preset: form.preset,
+      api_key: apiKey,
+    };
+    const proxyUrl = form.proxyUrl.trim();
+    if (proxyUrl) {
+      reqBody.proxy_url = proxyUrl;
+    }
     const result = await api<PresetModelCandidates>('/preset-models', {
       method: 'POST',
-      body: JSON.stringify({ preset: form.preset, api_key: apiKey }),
+      body: JSON.stringify(reqBody),
     });
     candidates.value = result.models;
     candidateSearch.value = '';
@@ -547,6 +570,10 @@ function openEdit(inst: Instance) {
     allowPrivateUpstream: inst.allow_private_upstream,
     sessionHeader: inst.session_header ?? '',
     failoverStatuses: inst.failover_statuses.join(', '),
+    proxyUrl: inst.proxy_has_auth ? '' : (inst.proxy_url ?? ''),
+    proxyUrlHint: inst.proxy_url ?? '',
+    proxyHasAuth: Boolean(inst.proxy_has_auth),
+    clearProxy: false,
     maxFails: String(inst.max_fails),
     cooldownSecs: String(inst.cooldown_secs),
     timeoutSecs: String(inst.timeout_secs),
@@ -636,6 +663,15 @@ async function save() {
   payload.allow_private_upstream = f.allowPrivateUpstream;
   payload.failover_statuses = failoverStatuses;
   payload.session_header = f.sessionHeader.trim();
+  if (f.proxyHasAuth) {
+    if (f.clearProxy) {
+      payload.proxy_url = '';
+    } else if (f.proxyUrl.trim()) {
+      payload.proxy_url = f.proxyUrl.trim();
+    }
+  } else {
+    payload.proxy_url = f.proxyUrl.trim();
+  }
 
   saving.value = true;
   error.value = '';
@@ -808,6 +844,9 @@ onUnmounted(() => {
         </span>
         <span v-if="inst.failover_statuses.length">
           额外切换：{{ inst.failover_statuses.join(', ') }}
+        </span>
+        <span v-if="inst.proxy_url">
+          代理：<code>{{ inst.proxy_url }}</code>
         </span>
       </div>
 
@@ -1195,6 +1234,36 @@ onUnmounted(() => {
                   客户端未携带该头时，网关按「系统提示 + 首条用户消息」派生稳定值以提升 Prompt
                   缓存命中率。
                 </p>
+              </div>
+              <div class="field span-2">
+                <label for="instance-proxy-url">
+                  网络代理（可选）
+                  <span v-if="editing.proxyHasAuth && editing.proxyUrlHint" class="muted">
+                    （当前 {{ editing.proxyUrlHint }}，留空保持不变）
+                  </span>
+                </label>
+                <input
+                  id="instance-proxy-url"
+                  v-model="editing.proxyUrl"
+                  type="text"
+                  autocomplete="off"
+                  :disabled="editing.proxyHasAuth && editing.clearProxy"
+                  :placeholder="
+                    editing.proxyHasAuth
+                      ? '留空保留原有代理，填写新地址则覆盖'
+                      : '例如 http://127.0.0.1:7890 或 socks5://user:pass@127.0.0.1:1080'
+                  "
+                />
+                <p class="field-hint">
+                  支持 http / https / socks5 /
+                  socks5h，作用于推理转发、套餐额度查询与模型拉取；留空则沿用进程环境变量或直连。
+                </p>
+                <div v-if="editing.proxyHasAuth" class="row" style="margin-top: 6px; gap: 6px">
+                  <input id="instance-clear-proxy" v-model="editing.clearProxy" type="checkbox" />
+                  <label for="instance-clear-proxy" class="small" style="cursor: pointer">
+                    清除已有代理配置
+                  </label>
+                </div>
               </div>
             </div>
           </div>

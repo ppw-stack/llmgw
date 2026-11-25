@@ -397,6 +397,7 @@ func (c *Config) normalize() error {
 		p.Name = strings.TrimSpace(expandEnv(p.Name))
 		p.Preset = strings.TrimSpace(expandEnv(p.Preset))
 		p.APIKey = strings.TrimSpace(expandEnv(p.APIKey))
+		p.ProxyURL = strings.TrimSpace(expandEnv(p.ProxyURL))
 		p.QuotaCredential.AccessKeyID = strings.TrimSpace(expandEnv(p.QuotaCredential.AccessKeyID))
 		p.QuotaCredential.SecretAccessKey = strings.TrimSpace(expandEnv(p.QuotaCredential.SecretAccessKey))
 		for ei := range p.Endpoints {

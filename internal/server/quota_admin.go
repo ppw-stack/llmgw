@@ -74,6 +74,14 @@ func (s *Server) quotaTargets() ([]quota.Target, error) {
 				target.Credential = credential
 			}
 		}
+		if rec.EncryptedProxyURL != "" {
+			proxyURL, err := s.box.Decrypt(rec.EncryptedProxyURL)
+			if err != nil {
+				target.Err = "无法解密代理配置"
+			} else {
+				target.ProxyURL = proxyURL
+			}
+		}
 		targets = append(targets, target)
 	}
 	return targets, nil

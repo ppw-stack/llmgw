@@ -43,6 +43,14 @@ func (c *Cache) set(id int64, report Report) {
 	c.items[id] = cacheItem{report: report, at: time.Now()}
 }
 
+// delete removes the cached report of one instance so the next query fetches
+// fresh data from the upstream.
+func (c *Cache) delete(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.items, id)
+}
+
 // lock serialises the upstream query of one instance, so a burst of console
 // clients triggers a single request. The returned function releases it.
 func (c *Cache) lock(id int64) func() {

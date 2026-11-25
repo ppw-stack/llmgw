@@ -83,6 +83,9 @@ type Instance struct {
 	// this list only adds vendor-specific ones, such as MiniMax's 402 when
 	// the subscription window is exhausted.
 	FailoverStatuses []int `yaml:"failover_statuses"`
+	// ProxyURL is an optional outbound proxy for this instance (http, https,
+	// socks5, or socks5h). Empty inherits the process proxy environment.
+	ProxyURL string `yaml:"proxy_url"`
 }
 
 // ModelInstance binds a model to one concrete upstream model of one instance.
@@ -135,6 +138,8 @@ type EffectiveInstance struct {
 	SessionHeader string
 	// FailoverStatuses are the instance's extra retryable status codes.
 	FailoverStatuses []int
+	// ProxyURL is the optional outbound proxy configured on this instance.
+	ProxyURL string
 }
 
 // EffectiveEndpoint is one protocol entrance of an instance.
@@ -325,6 +330,11 @@ func NormalizeInstance(in *Instance) error {
 	if err := normalizeFailoverStatuses(in); err != nil {
 		return err
 	}
+	proxyURL, err := NormalizeProxyURL(in.Name, "proxy_url", in.ProxyURL)
+	if err != nil {
+		return err
+	}
+	in.ProxyURL = proxyURL
 	return nil
 }
 
@@ -471,6 +481,7 @@ func (c *Config) Effective() (Effective, error) {
 			AllowPrivateUpstream: inst.AllowPrivateUpstream,
 			SessionHeader:        inst.SessionHeader,
 			FailoverStatuses:     append([]int(nil), inst.FailoverStatuses...),
+			ProxyURL:             inst.ProxyURL,
 		}
 		if eff.MaxFails <= 0 {
 			eff.MaxFails = DefaultMaxFails

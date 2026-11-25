@@ -95,10 +95,10 @@ export function initGatewayCanvas(
   }
   const ctx: CanvasRenderingContext2D = rawCtx;
 
-  const spawnChance = options.spawnChance ?? 0.28;
-  const maxParticles = options.maxParticles ?? 115;
-  const speedMin = options.speedMin ?? 0.015;
-  const speedMax = options.speedMax ?? 0.024;
+  const spawnChance = options.spawnChance ?? 0.11;
+  const maxParticles = options.maxParticles ?? 56;
+  const speedMin = options.speedMin ?? 0.0065;
+  const speedMax = options.speedMax ?? 0.0105;
   const isModalOpen = options.isModalOpen ?? (() => false);
   const getPalette = options.getPalette ?? (() => DEFAULT_PALETTE);
 
@@ -112,6 +112,7 @@ export function initGatewayCanvas(
   let hubScale = 1;
   let starRotation = 0;
   let rafId: number | null = null;
+  let lastFrameTime: number | null = null;
   let destroyed = false;
 
   const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -191,7 +192,7 @@ export function initGatewayCanvas(
     }
   }
 
-  function drawTopology(palette: GatewayCanvasPalette): void {
+  function drawTopology(palette: GatewayCanvasPalette, dt: number): void {
     const lx = getLeftX();
     const rx = getRightX();
     const hub = getHubCenter();
@@ -202,7 +203,7 @@ export function initGatewayCanvas(
     for (const node of leftNodes) {
       const ny = height * node.yRatio;
       const cp = (hub.x - lx) * 0.52;
-      node.glow = Math.max(0, node.glow - 0.035);
+      node.glow = Math.max(0, node.glow - 0.022 * dt);
 
       ctx.lineWidth = 1.1;
       ctx.strokeStyle =
@@ -243,7 +244,7 @@ export function initGatewayCanvas(
     for (const node of rightNodes) {
       const ny = height * node.yRatio;
       const cp = (rx - hub.x) * 0.52;
-      node.glow = Math.max(0, node.glow - 0.035);
+      node.glow = Math.max(0, node.glow - 0.022 * dt);
 
       ctx.lineWidth = 1.1;
       ctx.strokeStyle =
@@ -282,11 +283,11 @@ export function initGatewayCanvas(
     }
   }
 
-  function drawHub(palette: GatewayCanvasPalette): void {
+  function drawHub(palette: GatewayCanvasPalette, dt: number): void {
     const hub = getHubCenter();
     if (!prefersReducedMotion) {
-      hubScale += ((isHubHovered ? 1.09 : 1) - hubScale) * 0.14;
-      starRotation += 0.004;
+      hubScale += ((isHubHovered ? 1.09 : 1) - hubScale) * Math.min(1, 0.12 * dt);
+      starRotation += 0.0025 * dt;
     } else {
       hubScale = 1;
     }
@@ -357,7 +358,7 @@ export function initGatewayCanvas(
     const particle: Particle = {
       stage: isDirectBurst ? 'out' : 'in',
       t: 0,
-      speed: isDirectBurst ? speed * 1.25 : speed,
+      speed: isDirectBurst ? speed * 1.15 : speed,
       targetIdx,
       startYRatio: startNode.yRatio,
       targetYRatio: targetNode.yRatio,
@@ -369,19 +370,19 @@ export function initGatewayCanvas(
     return particle;
   }
 
-  function triggerPulse(burstCount = 18, color?: string): void {
+  function triggerPulse(burstCount = 14, color?: string): void {
     if (destroyed || prefersReducedMotion) {
       return;
     }
     const pulseColor = color ?? getPalette().accent;
-    ripples.push({ r: 28, maxR: 135, alpha: 0.55, color: pulseColor });
+    ripples.push({ r: 28, maxR: 135, alpha: 0.5, color: pulseColor });
     for (let i = 0; i < burstCount; i++) {
       const timerId = window.setTimeout(() => {
         pulseTimers.delete(timerId);
         if (!destroyed) {
           spawnParticle(true, pulseColor);
         }
-      }, i * 18);
+      }, i * 28);
       pulseTimers.add(timerId);
     }
   }
@@ -391,25 +392,30 @@ export function initGatewayCanvas(
     ctx.fillStyle = palette.bg;
     ctx.fillRect(0, 0, width, height);
     drawWarmGrid(palette);
-    drawTopology(palette);
-    drawHub(palette);
+    drawTopology(palette, 0);
+    drawHub(palette, 0);
   }
 
-  function render(): void {
+  function render(now: number): void {
     if (destroyed) {
       return;
     }
     if (prefersReducedMotion) {
       drawStaticFrame();
       rafId = null;
+      lastFrameTime = null;
       return;
     }
+
+    const dt =
+      lastFrameTime === null ? 1 : Math.min(2, Math.max(0.25, (now - lastFrameTime) / 16.6667));
+    lastFrameTime = now;
 
     const palette = getPalette();
     ctx.fillStyle = palette.bg;
     ctx.fillRect(0, 0, width, height);
     drawWarmGrid(palette);
-    drawTopology(palette);
+    drawTopology(palette, dt);
 
     const lx = getLeftX();
     const rx = getRightX();
@@ -420,8 +426,8 @@ export function initGatewayCanvas(
       if (!rp) {
         continue;
       }
-      rp.r += 2.2;
-      rp.alpha -= 0.012;
+      rp.r += 1.25 * dt;
+      rp.alpha -= 0.008 * dt;
       if (rp.alpha <= 0 || rp.r >= rp.maxR) {
         ripples.splice(i, 1);
         continue;
@@ -440,7 +446,7 @@ export function initGatewayCanvas(
       if (!p) {
         continue;
       }
-      p.t += p.speed;
+      p.t += p.speed * dt;
       let pos: Point;
 
       if (p.stage === 'in') {
@@ -457,8 +463,8 @@ export function initGatewayCanvas(
           p.stage = 'out';
           p.t = 0;
           p.trail = [];
-          if (ripples.length < 7 && Math.random() < 0.35) {
-            ripples.push({ r: 26, maxR: 92, alpha: 0.34, color: palette.accent });
+          if (ripples.length < 5 && Math.random() < 0.25) {
+            ripples.push({ r: 26, maxR: 92, alpha: 0.3, color: palette.accent });
           }
         }
       } else {
@@ -513,11 +519,11 @@ export function initGatewayCanvas(
       ctx.fill();
     }
 
-    drawHub(palette);
+    drawHub(palette, dt);
 
-    if (particles.length < maxParticles && Math.random() < spawnChance) {
+    if (particles.length < maxParticles && Math.random() < spawnChance * dt) {
       spawnParticle(false);
-      if (Math.random() < 0.4) {
+      if (Math.random() < 0.25) {
         spawnParticle(false);
       }
     }
@@ -554,7 +560,7 @@ export function initGatewayCanvas(
     }
     const hub = getHubCenter();
     if (Math.hypot(event.clientX - hub.x, event.clientY - hub.y) <= 40) {
-      triggerPulse(18);
+      triggerPulse(14);
     }
   }
 
@@ -565,8 +571,10 @@ export function initGatewayCanvas(
         window.cancelAnimationFrame(rafId);
         rafId = null;
       }
+      lastFrameTime = null;
       drawStaticFrame();
     } else if (rafId === null && !destroyed) {
+      lastFrameTime = null;
       rafId = window.requestAnimationFrame(render);
     }
   }
@@ -580,7 +588,7 @@ export function initGatewayCanvas(
   if (prefersReducedMotion) {
     drawStaticFrame();
   } else {
-    for (let i = 0; i < 24; i++) {
+    for (let i = 0; i < 14; i++) {
       const p = spawnParticle(i % 2 === 0);
       if (p) {
         p.t = Math.random() * 0.85;

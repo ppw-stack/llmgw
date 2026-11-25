@@ -274,7 +274,7 @@ async function submit(): Promise<void> {
     });
     loginSuccess.value = true;
     const successColor = isDarkMode() ? '#56B886' : '#2E7D5B';
-    canvasController?.triggerPulse(28, successColor);
+    canvasController?.triggerPulse(22, successColor);
     successTimer = window.setTimeout(() => {
       emit('done');
     }, 650);
@@ -329,7 +329,7 @@ onMounted(() => {
   if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     tickerTimer = window.setInterval(() => {
       tickerIndex.value = (tickerIndex.value + 1) % ROUTE_PREVIEWS.length;
-    }, 3600);
+    }, 5200);
   }
 
   window.addEventListener('keydown', onKeydown);

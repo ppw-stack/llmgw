@@ -51,6 +51,29 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   return (await res.json()) as T;
 }
 
+/** `/healthz` 探活结果。 */
+export interface HealthzResult {
+  ok: boolean;
+  latencyMs: number;
+}
+
+/**
+ * 探测 `/healthz`，用于登录页的健康状态胶囊。
+ *
+ * 与 `api()` 一样走同源请求；额外禁用缓存并支持外部 abort（调用方负责超时）。
+ * 网络失败与超时都抛错，由调用方降级为离线状态。
+ */
+export async function healthz(signal?: AbortSignal): Promise<HealthzResult> {
+  const started = performance.now();
+  const res = await fetch('/healthz', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal: signal ?? null,
+  });
+  const latencyMs = Math.max(1, Math.round(performance.now() - started));
+  return { ok: res.ok, latencyMs };
+}
+
 /** 格式化数字，空值显示为短横线。 */
 export function formatNumber(n: number | null | undefined): string {
   if (n === null || n === undefined) return '-';

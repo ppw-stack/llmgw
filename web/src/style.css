@@ -1409,7 +1409,7 @@ details.form-collapse > summary:hover {
 }
 
 /* ===========================
-   Login Page
+   Initial Loading Screen
    =========================== */
 
 .login-page {
@@ -1421,36 +1421,6 @@ details.form-collapse > summary:hover {
   position: relative;
   background:
     radial-gradient(640px circle at 50% 18%, var(--accent-soft), transparent 62%), var(--bg-canvas);
-}
-
-.login-theme-btn {
-  position: fixed;
-  top: 18px;
-  right: 18px;
-}
-
-.login-card {
-  width: 100%;
-  max-width: 400px;
-  padding: 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  box-shadow: var(--shadow-sm);
-}
-
-.login-card form {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.login-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.6;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-subtle);
 }
 
 /* ===========================

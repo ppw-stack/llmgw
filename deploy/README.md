@@ -108,12 +108,48 @@ curl -s http://localhost:8080/openai/v1/chat/completions \
   -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+## 验证出站代理
+
+接入点支持 `proxy_url`（`http` / `https` / `socks5` / `socks5h`），作用于推理转发、
+套餐额度查询与模型拉取。测试环境带了一个可选的代理容器，用来验证这条链路真的被走到：
+
+```bash
+# 启动代理（默认不在 compose 的默认 profile 里）
+docker compose -f deploy/docker-compose.test.yml --profile proxy up -d proxy
+```
+
+代理监听 `http://proxy:8888`（HTTP + CONNECT 隧道）与 `socks5://proxy:1080`，
+账号密码 `proxyuser` / `proxypass`，每条转发都会打印一行日志。
+
+给接入点配上代理（控制台「上游接入点」页的「网络代理」字段，或 `test-config.yaml`
+里的 `proxy_url:`，注意配置文件只在**数据库为空时的首次启动**导入）：
+
+```yaml
+proxy_url: "http://proxyuser:proxypass@proxy:8888"
+```
+
+然后发起一次请求，确认代理日志里出现转发记录：
+
+```bash
+KEY=sk-gw-...
+curl -s http://localhost:8080/openai/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}'
+
+docker compose -f deploy/docker-compose.test.yml logs -f proxy
+# proxy: POST http://mock:8000/chat/completions auth=True
+```
+
+代理密码不会出现在接口响应、控制台或日志里（只回显 `****`）。
+指向云元数据地址（`169.254.169.254`）、`metadata.google.internal` 等的代理会被直接拒绝。
+
 ## 常用操作
 
 ```bash
 # 日志
 docker compose -f deploy/docker-compose.test.yml logs -f gateway
 docker compose -f deploy/docker-compose.test.yml logs -f mock
+docker compose -f deploy/docker-compose.test.yml logs -f proxy   # 需 --profile proxy
 
 # 重置数据（删除 Key、日志、用量）
 docker compose -f deploy/docker-compose.test.yml down -v
@@ -127,6 +163,8 @@ docker compose -f deploy/docker-compose.test.yml down
 
 - mock 上游是确定性的，不调用任何真实模型，不产生费用。
 - 网关配置在 `test-config.yaml`，修改后 1 秒内自动热加载，无需重启容器。
+- `test-config.yaml` 只在**数据库为空时的首次启动**导入拓扑；启动之后控制台是唯一入口，
+  改配置文件不会覆盖控制台里的改动。
 - 数据库位于名为 `llmgw-test_llmgw-test-data` 的卷中。
 - 若 8080 被占用，修改 compose 里的端口映射即可。
 - 生产若新增接入点或模型，把对应条目同步到 `test-config.yaml` 即可保持两边一致。

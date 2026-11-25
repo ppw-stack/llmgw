@@ -33,6 +33,8 @@ type InstanceSpec struct {
 	SessionHeader string
 	// FailoverStatuses are extra upstream status codes treated as retryable.
 	FailoverStatuses []int
+	// EncryptedProxyURL holds the encrypted optional outbound proxy URL.
+	EncryptedProxyURL string
 }
 
 // InstanceRecord is the storage form of an instance.
@@ -93,7 +95,7 @@ func (s *Store) CountInstances() (int, error) {
 
 func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 	rows, err := s.db.Query(`SELECT id, name, preset, key_enc, quota_cred_enc, endpoints_json, models_json,
-		allow_private, session_header, failover_statuses_json, max_fails, cooldown_secs, timeout_secs, created_at, updated_at
+		allow_private, session_header, failover_statuses_json, proxy_url_enc, max_fails, cooldown_secs, timeout_secs, created_at, updated_at
 		FROM instances ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -111,7 +113,7 @@ func (s *Store) ListInstanceRecords() ([]InstanceRecord, error) {
 			updated      string
 		)
 		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Preset, &rec.EncryptedKey, &rec.EncryptedQuotaCredential,
-			&endpoints, &models, &allowPrivate, &rec.SessionHeader, &statuses,
+			&endpoints, &models, &allowPrivate, &rec.SessionHeader, &statuses, &rec.EncryptedProxyURL,
 			&rec.MaxFails, &rec.CooldownSecs, &rec.TimeoutSecs,
 			&created, &updated); err != nil {
 			return nil, err
@@ -167,12 +169,12 @@ func (s *Store) CreateInstance(spec InstanceSpec) (*InstanceRecord, error) {
 	}
 	now := nowStamp()
 	res, err := s.db.Exec(`INSERT INTO instances(name, preset, key_enc, quota_cred_enc, endpoints_json,
-		models_json, allow_private, session_header, failover_statuses_json, max_fails, cooldown_secs, timeout_secs,
+		models_json, allow_private, session_header, failover_statuses_json, proxy_url_enc, max_fails, cooldown_secs, timeout_secs,
 		created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		spec.Name, spec.Preset, spec.EncryptedKey, spec.EncryptedQuotaCredential, string(endpointsJSON),
 		string(modelsJSON), boolInt(spec.AllowPrivateUpstream), spec.SessionHeader, string(statusesJSON),
-		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
+		spec.EncryptedProxyURL, spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -204,11 +206,11 @@ func (s *Store) UpdateInstance(id int64, spec InstanceSpec) error {
 		statusesJSON = []byte("[]")
 	}
 	res, err := s.db.Exec(`UPDATE instances SET name=?, preset=?, key_enc=?, quota_cred_enc=?, endpoints_json=?,
-		models_json=?, allow_private=?, session_header=?, failover_statuses_json=?, max_fails=?, cooldown_secs=?,
+		models_json=?, allow_private=?, session_header=?, failover_statuses_json=?, proxy_url_enc=?, max_fails=?, cooldown_secs=?,
 		timeout_secs=?, updated_at=? WHERE id=?`,
 		spec.Name, spec.Preset, spec.EncryptedKey, spec.EncryptedQuotaCredential, string(endpointsJSON),
 		string(modelsJSON), boolInt(spec.AllowPrivateUpstream), spec.SessionHeader, string(statusesJSON),
-		spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
+		spec.EncryptedProxyURL, spec.MaxFails, spec.CooldownSecs, spec.TimeoutSecs, nowStamp(), id)
 	if err != nil {
 		return err
 	}
@@ -430,6 +432,14 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 		if err != nil {
 			return nil, nil, fmt.Errorf("instance %q: cannot decrypt quota credential: %w", rec.Name, err)
 		}
+		proxyURL := ""
+		if rec.EncryptedProxyURL != "" {
+			plain, err := box.Decrypt(rec.EncryptedProxyURL)
+			if err != nil {
+				return nil, nil, fmt.Errorf("instance %q: cannot decrypt proxy URL: %w", rec.Name, err)
+			}
+			proxyURL = plain
+		}
 		instances = append(instances, config.Instance{
 			Name:                 rec.Name,
 			Preset:               rec.Preset,
@@ -443,6 +453,7 @@ func (s *Store) Topology(box *secret.Box) ([]config.Instance, []config.Model, er
 			AllowPrivateUpstream: rec.AllowPrivateUpstream,
 			SessionHeader:        sessionHeaderFor(rec),
 			FailoverStatuses:     rec.FailoverStatuses,
+			ProxyURL:             proxyURL,
 		})
 	}
 
@@ -485,6 +496,14 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 		if err != nil {
 			return fmt.Errorf("instance %q: encrypt quota credential: %w", inst.Name, err)
 		}
+		encryptedProxyURL := ""
+		if inst.ProxyURL != "" {
+			enc, err := box.Encrypt(inst.ProxyURL)
+			if err != nil {
+				return fmt.Errorf("instance %q: encrypt proxy URL: %w", inst.Name, err)
+			}
+			encryptedProxyURL = enc
+		}
 		spec := InstanceSpec{
 			Name:                     inst.Name,
 			Preset:                   inst.Preset,
@@ -498,6 +517,7 @@ func (s *Store) ImportTopology(instances []config.Instance, models []config.Mode
 			AllowPrivateUpstream:     inst.AllowPrivateUpstream,
 			SessionHeader:            inst.SessionHeader,
 			FailoverStatuses:         inst.FailoverStatuses,
+			EncryptedProxyURL:        encryptedProxyURL,
 		}
 		if _, err := s.CreateInstance(spec); err != nil {
 			if isUniqueViolation(err) {

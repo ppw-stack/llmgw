@@ -89,6 +89,10 @@ instances:
     preset: opencode-go
     api_key: "${OPENCODE_GO_KEY}"
     models: [glm-5.3, kimi-k3]
+    # 可选：为该接入点指定出站代理（支持 http / https / socks5 / socks5h，
+    # 可含用户名密码与环境变量引用）；留空则沿用进程 HTTP_PROXY / HTTPS_PROXY。
+    # 引用了未设置或为空的环境变量时，网关会在启动时报错，不会静默直连上游。
+    # proxy_url: "http://127.0.0.1:7890"
     # 可选：缺会话头等 400 也允许切换（默认 4xx 不切换）
     # failover_statuses: [400]
 

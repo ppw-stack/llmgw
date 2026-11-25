@@ -4,6 +4,7 @@ package router
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,8 @@ type Target struct {
 	SessionHeader string
 	// FailoverStatuses are the instance's extra retryable status codes.
 	FailoverStatuses []int
+	// ProxyURL is the optional outbound proxy configured on this instance.
+	ProxyURL *url.URL
 }
 
 // ModelInfo is one model visible on a protocol endpoint together with the
@@ -100,8 +103,16 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 	infos := map[string]map[string]ModelInfo{}
 
 	instances := make(map[string]config.EffectiveInstance, len(eff.Instances))
+	proxyURLs := make(map[string]*url.URL, len(eff.Instances))
 	for _, inst := range eff.Instances {
 		instances[inst.Name] = inst
+		if inst.ProxyURL != "" {
+			parsed, err := url.Parse(inst.ProxyURL)
+			if err != nil {
+				return nil, fmt.Errorf("instance %q: invalid proxy_url: %w", inst.Name, err)
+			}
+			proxyURLs[inst.Name] = parsed
+		}
 	}
 	defaultTimeout := cfg.UpstreamTimeout.Value()
 	location := cfg.Schedule.Location
@@ -142,6 +153,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 					AllowPrivate:     inst.AllowPrivateUpstream,
 					SessionHeader:    inst.SessionHeader,
 					FailoverStatuses: append([]int(nil), inst.FailoverStatuses...),
+					ProxyURL:         proxyURLs[inst.Name],
 				})
 				if models[ep.Protocol] == nil {
 					models[ep.Protocol] = map[string]struct{}{}

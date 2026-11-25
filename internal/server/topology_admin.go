@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/discovery"
 	"github.com/pw/llmgw/internal/modelmeta"
+	"github.com/pw/llmgw/internal/netproxy"
 	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/router"
 	"github.com/pw/llmgw/internal/store"
@@ -41,6 +43,9 @@ type instanceInput struct {
 	SessionHeader *string `json:"session_header"`
 	// FailoverStatuses are extra upstream status codes treated as retryable.
 	FailoverStatuses []int `json:"failover_statuses"`
+	// ProxyURL is the optional outbound proxy URL. On update, nil preserves the
+	// stored proxy, "" clears it, and a non-empty value replaces it.
+	ProxyURL *string `json:"proxy_url"`
 }
 
 // quotaCredentialInput is the write form of the extra credential some
@@ -78,9 +83,13 @@ type instanceView struct {
 	// SessionHeader mirrors the instance field.
 	SessionHeader string `json:"session_header,omitempty"`
 	// FailoverStatuses mirrors the instance field.
-	FailoverStatuses []int  `json:"failover_statuses"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	FailoverStatuses []int `json:"failover_statuses"`
+	// ProxyURL is the redacted proxy URL safe for display.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// ProxyHasAuth reports whether the stored proxy URL carries a password.
+	ProxyHasAuth bool   `json:"proxy_has_auth,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 type endpointView struct {
@@ -212,15 +221,19 @@ func (s *Server) adminInstancePresets(w http.ResponseWriter, r *http.Request) {
 const presetModelsTimeout = 10 * time.Second
 
 var (
-	presetModelsClient = &http.Client{Timeout: presetModelsTimeout}
+	presetModelsClient = &http.Client{
+		Timeout:   presetModelsTimeout,
+		Transport: netproxy.NewTransport(),
+	}
 	// presetModelsEndpoint is a variable so tests can point the handler at a
 	// local server without reaching a real provider.
 	presetModelsEndpoint = config.PresetModelsEndpoint
 )
 
 type presetModelsInput struct {
-	Preset string `json:"preset"`
-	APIKey string `json:"api_key"`
+	Preset   string `json:"preset"`
+	APIKey   string `json:"api_key"`
+	ProxyURL string `json:"proxy_url"`
 }
 
 type presetModelsView struct {
@@ -252,6 +265,20 @@ func (s *Server) adminPresetModels(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "an upstream API key is required")
 		return
 	}
+	var proxyURL *url.URL
+	if rawProxy := strings.TrimSpace(in.ProxyURL); rawProxy != "" {
+		normalizedProxy, err := config.NormalizeProxyURL("preset-models", "proxy_url", rawProxy)
+		if err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		parsed, err := url.Parse(normalizedProxy)
+		if err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid proxy_url")
+			return
+		}
+		proxyURL = parsed
+	}
 
 	suggested, err := config.PresetModels(pr.ID)
 	if err != nil {
@@ -275,10 +302,13 @@ func (s *Server) adminPresetModels(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), presetModelsTimeout)
 	defer cancel()
+	if proxyURL != nil {
+		ctx = netproxy.WithURL(ctx, proxyURL)
+	}
 	models, err := discovery.Fetch(ctx, presetModelsClient, endpoint, protocol, apiKey)
 	if err != nil {
 		s.log.Warn("query preset model list", "method", r.Method, "path", r.URL.Path,
-			"request_id", requestID(r), "preset", pr.ID, "err", err)
+			"request_id", requestID(r), "preset", pr.ID, "err", netproxy.SanitizeError(err, proxyURL))
 		view.Warning = joinWarnings(view.Warning, "上游模型列表查询失败，已回退到预设建议")
 		writeJSON(w, http.StatusOK, view)
 		return
@@ -357,6 +387,14 @@ func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanc
 			view.QuotaCredential = credential
 		}
 	}
+	if rec.EncryptedProxyURL != "" {
+		plain, err := s.box.Decrypt(rec.EncryptedProxyURL)
+		if err != nil {
+			s.log.Error("read proxy url", "method", r.Method, "path", r.URL.Path, "request_id", requestID(r), "instance", rec.Name, "err", err)
+		} else {
+			view.ProxyURL, view.ProxyHasAuth = config.RedactProxyURL(plain)
+		}
+	}
 	for _, ep := range rec.Endpoints {
 		view.Endpoints = append(view.Endpoints, endpointView{Protocol: ep.Protocol, BaseURL: ep.BaseURL})
 	}
@@ -424,6 +462,11 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	encryptedProxyURL, err := s.encryptKey(instance.ProxyURL)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	rec, err := s.store.CreateInstance(store.InstanceSpec{
 		Name:                     instance.Name,
 		Preset:                   instance.Preset,
@@ -437,6 +480,7 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *admi
 		AllowPrivateUpstream:     instance.AllowPrivateUpstream,
 		SessionHeader:            instance.SessionHeader,
 		FailoverStatuses:         instance.FailoverStatuses,
+		EncryptedProxyURL:        encryptedProxyURL,
 	})
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -509,6 +553,30 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 			return
 		}
 	}
+	// ProxyURL follows the same preservation rule: omitted keeps the stored
+	// proxy (so edits that do not touch it never lose its password), an empty
+	// string clears it, and a non-empty value replaces it.
+	encryptedProxyURL := existing.EncryptedProxyURL
+	if in.ProxyURL != nil {
+		encryptedProxyURL, err = s.encryptKey(instance.ProxyURL)
+		if err != nil {
+			writeAdminError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else if existing.EncryptedProxyURL != "" {
+		plain, derr := s.box.Decrypt(existing.EncryptedProxyURL)
+		if derr != nil {
+			// The stored proxy cannot be read back, so the instance would
+			// be saved without it and only fail on the topology reload.
+			// Fail here instead, like store.Topology does for the same
+			// field.
+			s.log.Error("decrypt proxy url", "method", r.Method, "path", r.URL.Path,
+				"request_id", requestID(r), "instance", existing.Name, "err", derr)
+			writeAdminError(w, http.StatusInternalServerError, "cannot decrypt the stored proxy url; fix or clear the proxy of this instance first")
+			return
+		}
+		instance.ProxyURL = plain
+	}
 	instances, models, err := s.store.Topology(s.box)
 	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
@@ -540,6 +608,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		AllowPrivateUpstream:     instance.AllowPrivateUpstream,
 		SessionHeader:            instance.SessionHeader,
 		FailoverStatuses:         instance.FailoverStatuses,
+		EncryptedProxyURL:        encryptedProxyURL,
 	}); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -553,6 +622,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 		writeAdminError(w, http.StatusInternalServerError, "instance saved but routing reload failed: "+err.Error())
 		return
 	}
+	s.quota.Invalidate(instanceID)
 	s.audit(r, id.Username, "instance.update", instance.Name, "success")
 	writeJSON(w, http.StatusOK, s.instanceView(r, store.InstanceRecord{
 		ID: instanceID,
@@ -569,6 +639,7 @@ func (s *Server) updateInstance(w http.ResponseWriter, r *http.Request, id *admi
 			AllowPrivateUpstream:     instance.AllowPrivateUpstream,
 			SessionHeader:            instance.SessionHeader,
 			FailoverStatuses:         instance.FailoverStatuses,
+			EncryptedProxyURL:        encryptedProxyURL,
 		},
 		CreatedAt: existing.CreatedAt,
 		UpdatedAt: time.Now().UTC(),
@@ -860,6 +931,9 @@ func (in instanceInput) toInstance(presetID string) (config.Instance, error) {
 	}
 	if in.SessionHeader != nil {
 		instance.SessionHeader = strings.TrimSpace(*in.SessionHeader)
+	}
+	if in.ProxyURL != nil {
+		instance.ProxyURL = strings.TrimSpace(*in.ProxyURL)
 	}
 	if in.QuotaCredential != nil {
 		instance.QuotaCredential = config.QuotaCredential{

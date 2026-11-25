@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/pw/llmgw/internal/netproxy"
 	"github.com/pw/llmgw/internal/preset"
 )
 
@@ -84,6 +86,8 @@ type Target struct {
 	APIKey   string
 	// Credential is the extra credential the vendor needs, if any.
 	Credential Credential
+	// ProxyURL is the optional outbound proxy configured on this instance.
+	ProxyURL string
 	// Err replaces the upstream query when the key cannot be read.
 	Err string
 }
@@ -114,6 +118,12 @@ func NewServiceWithClient(client *Client, ttl time.Duration) *Service {
 		ttl = DefaultTTL
 	}
 	return &Service{client: client, cache: NewCache(), ttl: ttl}
+}
+
+// Invalidate drops the cached quota report for one instance, for example after
+// its credentials or proxy settings change.
+func (s *Service) Invalidate(instanceID int64) {
+	s.cache.delete(instanceID)
 }
 
 // Report returns the quota of one instance.
@@ -151,10 +161,23 @@ func (s *Service) Report(ctx context.Context, target Target) Report {
 		return cached
 	}
 
+	var proxyURL *url.URL
+	if strings.TrimSpace(target.ProxyURL) != "" {
+		parsed, err := url.Parse(strings.TrimSpace(target.ProxyURL))
+		if err != nil {
+			report.FetchedAt = time.Now().UTC().Format(time.RFC3339)
+			report.Error = "代理地址格式无效"
+			s.cache.set(target.ID, report)
+			return report
+		}
+		proxyURL = parsed
+		ctx = netproxy.WithURL(ctx, proxyURL)
+	}
+
 	windows, err := s.client.Fetch(ctx, *p.Quota, target.APIKey, target.Credential)
 	report.FetchedAt = time.Now().UTC().Format(time.RFC3339)
 	if err != nil {
-		report.Error = describeError(err)
+		report.Error = describeError(err, proxyURL)
 	} else {
 		report.Windows = windows
 	}
@@ -163,7 +186,7 @@ func (s *Service) Report(ctx context.Context, target Target) Report {
 }
 
 // describeError turns an upstream failure into a message the console shows.
-func describeError(err error) string {
+func describeError(err error, proxyURL *url.URL) string {
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
 		switch httpErr.Status {
@@ -177,5 +200,5 @@ func describeError(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
 		return "查询上游额度超时"
 	}
-	return err.Error()
+	return netproxy.SanitizeError(err, proxyURL)
 }

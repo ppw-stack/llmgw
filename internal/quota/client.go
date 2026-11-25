@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pw/llmgw/internal/netproxy"
 	"github.com/pw/llmgw/internal/preset"
 )
 
@@ -47,9 +48,15 @@ type Client struct {
 	ArkHost string
 }
 
-// NewClient returns a client with the default timeout.
+// NewClient returns a client with the default timeout and per-request proxy
+// support.
 func NewClient() *Client {
-	return &Client{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	return &Client{
+		HTTP: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: netproxy.NewTransport(),
+		},
+	}
 }
 
 // httpClient returns the client used for the queries.

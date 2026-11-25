@@ -397,6 +397,14 @@ func (c *Config) normalize() error {
 		p.Name = strings.TrimSpace(expandEnv(p.Name))
 		p.Preset = strings.TrimSpace(expandEnv(p.Preset))
 		p.APIKey = strings.TrimSpace(expandEnv(p.APIKey))
+		rawProxyURL := strings.TrimSpace(p.ProxyURL)
+		p.ProxyURL = strings.TrimSpace(expandEnv(p.ProxyURL))
+		// An unset environment variable must not silently turn the proxy off:
+		// the instance would then reach the upstream straight from the
+		// gateway, bypassing the intended egress path.
+		if p.ProxyURL == "" && strings.Contains(rawProxyURL, "${") {
+			return fmt.Errorf("instance %q: proxy_url references an environment variable that is empty or unset", p.Name)
+		}
 		p.QuotaCredential.AccessKeyID = strings.TrimSpace(expandEnv(p.QuotaCredential.AccessKeyID))
 		p.QuotaCredential.SecretAccessKey = strings.TrimSpace(expandEnv(p.QuotaCredential.SecretAccessKey))
 		for ei := range p.Endpoints {

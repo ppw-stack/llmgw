@@ -1,0 +1,152 @@
+/* 温润极简风（Warm Minimal）设计系统 Token：支持亮/暗双主题与系统跟随 */
+
+:root {
+  color-scheme: light;
+
+  /* 表面层级（Warm Paper） */
+  --bg-canvas: #faf9f5;
+  --bg-sidebar: #f3f1ea;
+  --bg-surface: #ffffff;
+  --bg-elevated: #fbfaf7;
+  --bg-subtle: #f2efe7;
+  --bg-hover: #ebe7dc;
+  --bg-code: #f3f0e8;
+
+  /* 边框 */
+  --border-subtle: #e7e2d6;
+  --border-strong: #d4cdc0;
+
+  /* 文本 */
+  --text-primary: #1c1917;
+  --text-secondary: #57534e;
+  --text-muted: #78716c;
+
+  /* 品牌主色：陶土橙 */
+  --accent: #c96442;
+  --accent-hover: #b45333;
+  --accent-soft: rgba(201, 100, 66, 0.11);
+  --accent-border: rgba(201, 100, 66, 0.32);
+  --accent-text: #ffffff;
+
+  /* 语义色 */
+  --ok: #2d7a53;
+  --ok-soft: rgba(45, 122, 83, 0.12);
+  --warn: #b56f16;
+  --warn-soft: rgba(181, 111, 22, 0.13);
+  --danger: #c23b3b;
+  --danger-soft: rgba(194, 59, 59, 0.1);
+  --danger-border: rgba(194, 59, 59, 0.3);
+
+  /* 协议色 */
+  --proto-openai: #2c6aa0;
+  --proto-openai-soft: rgba(44, 106, 160, 0.11);
+  --proto-anthropic: #b45a3a;
+  --proto-anthropic-soft: rgba(180, 90, 58, 0.12);
+
+  /* 阴影 */
+  --shadow-xs: 0 1px 2px rgba(28, 25, 23, 0.04);
+  --shadow-sm: 0 2px 6px rgba(28, 25, 23, 0.05), 0 1px 2px rgba(28, 25, 23, 0.03);
+  --shadow-lg: 0 18px 40px rgba(28, 25, 23, 0.14), 0 4px 12px rgba(28, 25, 23, 0.06);
+  --backdrop: rgba(24, 22, 19, 0.44);
+
+  /* 尺度 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --sidebar-width: 236px;
+
+  /* 字体 */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg-canvas: #161513;
+    --bg-sidebar: #1c1b18;
+    --bg-surface: #22201d;
+    --bg-elevated: #282521;
+    --bg-subtle: #2b2924;
+    --bg-hover: #33302a;
+    --bg-code: #2c2924;
+
+    --border-subtle: rgba(255, 248, 235, 0.09);
+    --border-strong: rgba(255, 248, 235, 0.17);
+
+    --text-primary: #f3efe6;
+    --text-secondary: #bcb5a9;
+    --text-muted: #8c867c;
+
+    --accent: #d97757;
+    --accent-hover: #e38869;
+    --accent-soft: rgba(217, 119, 87, 0.16);
+    --accent-border: rgba(217, 119, 87, 0.4);
+    --accent-text: #1b1613;
+
+    --ok: #56b886;
+    --ok-soft: rgba(86, 184, 134, 0.16);
+    --warn: #e2a24a;
+    --warn-soft: rgba(226, 162, 74, 0.16);
+    --danger: #e86a6a;
+    --danger-soft: rgba(232, 106, 106, 0.15);
+    --danger-border: rgba(232, 106, 106, 0.35);
+
+    --proto-openai: #69a9e2;
+    --proto-openai-soft: rgba(105, 169, 226, 0.15);
+    --proto-anthropic: #e48d6c;
+    --proto-anthropic-soft: rgba(228, 141, 108, 0.16);
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.24);
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.52);
+    --backdrop: rgba(8, 7, 6, 0.68);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg-canvas: #161513;
+  --bg-sidebar: #1c1b18;
+  --bg-surface: #22201d;
+  --bg-elevated: #282521;
+  --bg-subtle: #2b2924;
+  --bg-hover: #33302a;
+  --bg-code: #2c2924;
+
+  --border-subtle: rgba(255, 248, 235, 0.09);
+  --border-strong: rgba(255, 248, 235, 0.17);
+
+  --text-primary: #f3efe6;
+  --text-secondary: #bcb5a9;
+  --text-muted: #8c867c;
+
+  --accent: #d97757;
+  --accent-hover: #e38869;
+  --accent-soft: rgba(217, 119, 87, 0.16);
+  --accent-border: rgba(217, 119, 87, 0.4);
+  --accent-text: #1b1613;
+
+  --ok: #56b886;
+  --ok-soft: rgba(86, 184, 134, 0.16);
+  --warn: #e2a24a;
+  --warn-soft: rgba(226, 162, 74, 0.16);
+  --danger: #e86a6a;
+  --danger-soft: rgba(232, 106, 106, 0.15);
+  --danger-border: rgba(232, 106, 106, 0.35);
+
+  --proto-openai: #69a9e2;
+  --proto-openai-soft: rgba(105, 169, 226, 0.15);
+  --proto-anthropic: #e48d6c;
+  --proto-anthropic-soft: rgba(228, 141, 108, 0.16);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.52);
+  --backdrop: rgba(8, 7, 6, 0.68);
+}

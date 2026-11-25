@@ -1,14 +1,27 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { api } from '../api';
+import AppIcon, { type IconName } from '../components/AppIcon.vue';
 import { errorMessage } from '../utils/error';
+import { cycleThemeMode, themeLabel, themeMode } from '../utils/theme';
 
 const emit = defineEmits<{ done: [] }>();
 
 const username = ref('admin');
 const password = ref('');
+const showPassword = ref(false);
 const error = ref('');
 const busy = ref(false);
+
+const themeIcon = computed<IconName>(() => {
+  if (themeMode.value === 'light') {
+    return 'sun';
+  }
+  if (themeMode.value === 'dark') {
+    return 'moon';
+  }
+  return 'monitor';
+});
 
 async function submit() {
   if (!password.value) {
@@ -32,32 +45,72 @@ async function submit() {
 </script>
 
 <template>
-  <div class="login-wrap">
+  <div class="login-page">
+    <button
+      type="button"
+      class="ghost sm login-theme-btn"
+      :aria-label="`切换主题，当前为${themeLabel(themeMode)}`"
+      @click="cycleThemeMode"
+    >
+      <AppIcon :name="themeIcon" :size="14" />
+      <span>{{ themeLabel(themeMode) }}</span>
+    </button>
+
     <div class="card login-card">
-      <h1>llmgw</h1>
-      <p class="muted">登录控制台</p>
+      <div class="brand-mark">
+        <span class="brand-icon">
+          <AppIcon name="spark" :size="16" />
+        </span>
+        <div class="brand-text">
+          <span class="brand-name">llmgw</span>
+          <span class="brand-sub">LLM Gateway 控制台</span>
+        </div>
+      </div>
+
+      <p class="secondary small">输入管理员凭据以管理上游接入点、路由模型与访问密钥。</p>
+
       <form @submit.prevent="submit">
-        <label class="visually-hidden" for="login-username">用户名</label>
-        <input
-          id="login-username"
-          v-model="username"
-          placeholder="用户名"
-          autocomplete="username"
-        />
-        <label class="visually-hidden" for="login-password">密码</label>
-        <input
-          id="login-password"
-          v-model="password"
-          type="password"
-          placeholder="密码"
-          autocomplete="current-password"
-        />
+        <div class="field">
+          <label for="login-username">用户名</label>
+          <input
+            id="login-username"
+            v-model="username"
+            placeholder="admin"
+            autocomplete="username"
+          />
+        </div>
+
+        <div class="field">
+          <label for="login-password">密码</label>
+          <div class="input-wrap">
+            <input
+              id="login-password"
+              v-model="password"
+              :type="showPassword ? 'text' : 'password'"
+              placeholder="输入管理员密码"
+              autocomplete="current-password"
+            />
+            <span class="input-suffix">
+              <button
+                type="button"
+                class="icon-btn"
+                :aria-label="showPassword ? '隐藏密码' : '显示密码'"
+                @click="showPassword = !showPassword"
+              >
+                <AppIcon :name="showPassword ? 'eye-off' : 'eye'" :size="15" />
+              </button>
+            </span>
+          </div>
+        </div>
+
+        <p v-if="error" class="error">{{ error }}</p>
+
         <button class="primary" type="submit" :disabled="busy">
-          {{ busy ? '登录中…' : '登录' }}
+          {{ busy ? '登录中…' : '登录控制台' }}
         </button>
       </form>
-      <p v-if="error" class="error">{{ error }}</p>
-      <p class="hint">
+
+      <p class="login-hint">
         首次启动时密码会写入数据库旁的 <code>admin-password.txt</code>，或由
         <code>server.admin_password</code> 指定。
       </p>

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { api } from '../api';
+import AppIcon from '../components/AppIcon.vue';
+import BaseModal from '../components/BaseModal.vue';
+import CopyButton from '../components/CopyButton.vue';
 import type {
   Instance,
   InstanceEndpoint,
@@ -15,6 +18,7 @@ import type {
 } from '../types';
 import { confirmAction } from '../utils/confirm';
 import { errorMessage } from '../utils/error';
+import { showToast } from '../utils/toast';
 
 type InstanceMode = 'builtin' | 'custom';
 
@@ -61,7 +65,9 @@ const loading = ref(true);
 const error = ref('');
 const editing = ref<InstanceForm | null>(null);
 const saving = ref(false);
+const showApiKey = ref(false);
 const candidates = ref<PresetModelCandidate[]>([]);
+const candidateSearch = ref('');
 const candidatesLoading = ref(false);
 const candidatesWarning = ref('');
 const candidatesError = ref('');
@@ -85,21 +91,27 @@ function usedBy(instanceName: string): string[] {
 /** 按接入点 id 索引额度报告。 */
 const quotaByID = computed<Record<number, QuotaReport>>(() => {
   const map: Record<number, QuotaReport> = {};
-  for (const report of quotaReports.value) map[report.instance_id] = report;
+  for (const report of quotaReports.value) {
+    map[report.instance_id] = report;
+  }
   return map;
 });
 
 /** 该接入点的额度窗口；没有额度接口的接入点返回空列表。 */
 function quotaWindows(inst: Instance): QuotaWindow[] {
   const report = quotaByID.value[inst.id];
-  if (!report?.supported) return [];
+  if (!report?.supported) {
+    return [];
+  }
   return report.windows;
 }
 
 /** 该接入点的额度查询失败原因。 */
 function quotaMessage(inst: Instance): string {
   const report = quotaByID.value[inst.id];
-  if (!report?.supported) return '';
+  if (!report?.supported) {
+    return '';
+  }
   return report.error ?? '';
 }
 
@@ -111,8 +123,12 @@ function quotaWidth(pct: number): string {
 
 /** 进度条配色：七成以下正常，九成以上告急。 */
 function quotaLevel(pct: number): string {
-  if (pct >= 90) return 'danger';
-  if (pct >= 70) return 'warn';
+  if (pct >= 90) {
+    return 'danger';
+  }
+  if (pct >= 70) {
+    return 'warn';
+  }
   return 'ok';
 }
 
@@ -123,16 +139,26 @@ function quotaPercent(pct: number): string {
 
 /** 距窗口重置还有多久；上游没给重置时间时显示短横线。 */
 function quotaCountdown(resetsAt?: string): string {
-  if (!resetsAt) return '-';
+  if (!resetsAt) {
+    return '-';
+  }
   const target = new Date(resetsAt).getTime();
-  if (Number.isNaN(target)) return '-';
+  if (Number.isNaN(target)) {
+    return '-';
+  }
   const diff = target - now.value;
-  if (diff <= 0) return '即将重置';
+  if (diff <= 0) {
+    return '即将重置';
+  }
   const minutes = Math.floor(diff / 60_000);
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
-  if (days > 0) return `${days} 天 ${hours} 小时`;
-  if (hours > 0) return `${hours} 小时 ${minutes % 60} 分`;
+  if (days > 0) {
+    return `${days} 天 ${hours} 小时`;
+  }
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes % 60} 分`;
+  }
   return `${minutes % 60} 分`;
 }
 
@@ -146,7 +172,9 @@ function findPreset(id: string): InstancePreset | null {
 
 const selectedPreset = computed<InstancePreset | null>(() => {
   const form = editing.value;
-  if (form?.mode !== 'builtin') return null;
+  if (form?.mode !== 'builtin') {
+    return null;
+  }
   return findPreset(form.preset);
 });
 
@@ -156,15 +184,64 @@ const needsQuotaCredential = computed<boolean>(() => selectedPreset.value?.quota
 /** 内置模式下只读展示的端点：优先取预设自带的地址。 */
 const builtinEndpoints = computed<InstanceEndpoint[]>(() => {
   const form = editing.value;
-  if (form?.mode !== 'builtin') return [];
+  if (form?.mode !== 'builtin') {
+    return [];
+  }
   const preset = selectedPreset.value;
-  if (!preset) return form.endpoints;
+  if (!preset) {
+    return form.endpoints;
+  }
   const list: InstanceEndpoint[] = [];
-  if (preset.openai_base_url) list.push({ protocol: 'openai', base_url: preset.openai_base_url });
+  if (preset.openai_base_url) {
+    list.push({ protocol: 'openai', base_url: preset.openai_base_url });
+  }
   if (preset.anthropic_base_url) {
     list.push({ protocol: 'anthropic', base_url: preset.anthropic_base_url });
   }
   return list;
+});
+
+/** 当前已填写的模型数量。 */
+const declaredModelCount = computed(() =>
+  editing.value ? modelLines(editing.value.modelsText).length : 0,
+);
+
+/** 按搜索关键字过滤后的候选模型列表。 */
+const filteredCandidates = computed(() => {
+  const q = candidateSearch.value.trim().toLowerCase();
+  if (!q) {
+    return candidates.value;
+  }
+  return candidates.value.filter((c) => c.id.toLowerCase().includes(q));
+});
+
+/** 高级容错与会话设置中非默认配置项数量，用于折叠区摘要提示。 */
+const advancedCustomCount = computed(() => {
+  const f = editing.value;
+  if (!f) {
+    return 0;
+  }
+  let count = 0;
+  if (f.maxFails.trim() !== '' && f.maxFails.trim() !== '3' && f.maxFails.trim() !== '0') {
+    count += 1;
+  }
+  if (
+    f.cooldownSecs.trim() !== '' &&
+    f.cooldownSecs.trim() !== '30' &&
+    f.cooldownSecs.trim() !== '0'
+  ) {
+    count += 1;
+  }
+  if (f.timeoutSecs.trim() !== '' && f.timeoutSecs.trim() !== '0') {
+    count += 1;
+  }
+  if (f.sessionHeader.trim() !== '') {
+    count += 1;
+  }
+  if (f.failoverStatuses.trim() !== '') {
+    count += 1;
+  }
+  return count;
 });
 
 function newForm(): InstanceForm {
@@ -181,7 +258,7 @@ function newForm(): InstanceForm {
     quotaSecretKey: '',
     quotaSecretHint: '',
     endpoints: [{ protocol: 'openai', base_url: '' }],
-    modelsText: '',
+    modelsText: first ? first.models.join('\n') : '',
     allowPrivateUpstream: false,
     sessionHeader: '',
     failoverStatuses: '',
@@ -192,10 +269,15 @@ function newForm(): InstanceForm {
 }
 
 function applyPreset(form: InstanceForm, id: string, overwriteModels: boolean) {
+  const prevPreset = findPreset(form.preset);
   form.preset = id;
   const preset = findPreset(id);
-  if (!preset) return;
-  if (!form.name.trim()) form.name = preset.default_name;
+  if (!preset) {
+    return;
+  }
+  if (!form.name.trim() || form.name.trim() === prevPreset?.default_name) {
+    form.name = preset.default_name;
+  }
   if (overwriteModels || !form.modelsText.trim()) {
     form.modelsText = preset.models.join('\n');
   }
@@ -203,20 +285,26 @@ function applyPreset(form: InstanceForm, id: string, overwriteModels: boolean) {
 
 function choosePreset(id: string) {
   const form = editing.value;
-  if (!form) return;
+  if (!form) {
+    return;
+  }
   resetCandidates();
   applyPreset(form, id, true);
 }
 
 function onPresetChange(event: Event) {
   const target = event.target;
-  if (!(target instanceof HTMLSelectElement)) return;
+  if (!(target instanceof HTMLSelectElement)) {
+    return;
+  }
   choosePreset(target.value);
 }
 
 function setMode(mode: InstanceMode) {
   const form = editing.value;
-  if (!form) return;
+  if (!form) {
+    return;
+  }
   form.mode = mode;
   resetCandidates();
   if (mode === 'builtin') {
@@ -228,11 +316,15 @@ function setMode(mode: InstanceMode) {
 }
 
 function addEndpoint(form: InstanceForm) {
-  form.endpoints.push({ protocol: 'openai', base_url: '' });
+  const used = new Set(form.endpoints.map((ep) => ep.protocol));
+  const nextProtocol: InstanceEndpoint['protocol'] = used.has('openai') ? 'anthropic' : 'openai';
+  form.endpoints.push({ protocol: nextProtocol, base_url: '' });
 }
 
 function removeEndpoint(form: InstanceForm, index: number) {
-  if (form.endpoints.length <= 1) return;
+  if (form.endpoints.length <= 1) {
+    return;
+  }
   form.endpoints.splice(index, 1);
 }
 
@@ -247,6 +339,7 @@ function modelLines(text: string): string[] {
 /** 清空上一次查询留下的候选模型。 */
 function resetCandidates() {
   candidates.value = [];
+  candidateSearch.value = '';
   candidatesLoading.value = false;
   candidatesWarning.value = '';
   candidatesError.value = '';
@@ -255,7 +348,9 @@ function resetCandidates() {
 /** 查询内置端点上游的模型列表，作为待选建议。 */
 async function queryCandidates() {
   const form = editing.value;
-  if (form?.mode !== 'builtin' || form.id !== null) return;
+  if (form?.mode !== 'builtin' || form.id !== null) {
+    return;
+  }
 
   const apiKey = form.apiKey.trim();
   if (!apiKey) {
@@ -272,6 +367,7 @@ async function queryCandidates() {
       body: JSON.stringify({ preset: form.preset, api_key: apiKey }),
     });
     candidates.value = result.models;
+    candidateSearch.value = '';
     candidatesWarning.value = result.warning ?? '';
     if (!result.models.length && !result.warning) {
       candidatesError.value = '上游没有返回可用的聊天模型';
@@ -287,27 +383,35 @@ async function queryCandidates() {
 /** 判断一个候选是否已经写进模型文本框。 */
 function candidateAdded(id: string): boolean {
   const form = editing.value;
-  if (!form) return false;
+  if (!form) {
+    return false;
+  }
   return modelLines(form.modelsText).includes(id);
 }
 
 /** 点击候选时在模型文本框里添加或移除该模型。 */
 function toggleCandidate(id: string) {
   const form = editing.value;
-  if (!form) return;
+  if (!form) {
+    return;
+  }
   const current = modelLines(form.modelsText);
   const next = current.includes(id) ? current.filter((name) => name !== id) : [...current, id];
   form.modelsText = next.join('\n');
 }
 
-/** 把当前查询结果里尚未添加的模型一次性写入文本框。 */
+/** 把当前筛选结果里尚未添加的模型一次性写入文本框。 */
 function addAllCandidates() {
   const form = editing.value;
-  if (!form) return;
+  if (!form) {
+    return;
+  }
   const next = modelLines(form.modelsText);
   const seen = new Set(next);
-  for (const candidate of candidates.value) {
-    if (seen.has(candidate.id)) continue;
+  for (const candidate of filteredCandidates.value) {
+    if (seen.has(candidate.id)) {
+      continue;
+    }
     seen.add(candidate.id);
     next.push(candidate.id);
   }
@@ -317,9 +421,13 @@ function addAllCandidates() {
 /** 解析表单里的非负整数，非法时返回 null。 */
 function parseCount(raw: string): number | null {
   const text = raw.trim();
-  if (text === '') return null;
+  if (text === '') {
+    return null;
+  }
   const value = Number(text);
-  if (!Number.isInteger(value) || value < 0) return null;
+  if (!Number.isInteger(value) || value < 0) {
+    return null;
+  }
   return value;
 }
 
@@ -331,10 +439,16 @@ function parseStatusCodes(raw: string): number[] | null {
   const out: number[] = [];
   for (const part of raw.split(/[,，\s]+/)) {
     const text = part.trim();
-    if (!text) continue;
+    if (!text) {
+      continue;
+    }
     const value = Number(text);
-    if (!Number.isInteger(value) || value < 400 || value > 599) return null;
-    if (!out.includes(value)) out.push(value);
+    if (!Number.isInteger(value) || value < 400 || value > 599) {
+      return null;
+    }
+    if (!out.includes(value)) {
+      out.push(value);
+    }
   }
   return out.sort((a, b) => a - b);
 }
@@ -401,12 +515,14 @@ async function load() {
 
 function openCreate() {
   error.value = '';
+  showApiKey.value = false;
   resetCandidates();
   editing.value = newForm();
 }
 
 function openEdit(inst: Instance) {
   error.value = '';
+  showApiKey.value = false;
   resetCandidates();
   editing.value = {
     id: inst.id,
@@ -433,9 +549,16 @@ function openEdit(inst: Instance) {
   };
 }
 
+function closeModal() {
+  editing.value = null;
+  resetCandidates();
+}
+
 async function save() {
   const f = editing.value;
-  if (!f) return;
+  if (!f) {
+    return;
+  }
 
   const name = f.name.trim();
   if (!name) {
@@ -469,22 +592,20 @@ async function save() {
   const payload: InstancePayload = { name, models: supported };
   if (f.mode === 'builtin') {
     // preset 一旦创建不可更改：编辑已有接入点时不提交该字段。
-    if (f.id === null) payload.preset = f.preset;
+    if (f.id === null) {
+      payload.preset = f.preset;
+    }
   } else {
     const endpoints = collectEndpoints(f);
-    if (!endpoints) return;
+    if (!endpoints) {
+      return;
+    }
     payload.endpoints = endpoints;
   }
   if (f.id === null || f.apiKey.trim()) {
     payload.api_key = f.apiKey.trim();
   }
-  // The quota credential is only submitted when the operator filled one in;
-  // an untouched field keeps the stored credential.
-  //
-  // The access key id is prefilled when editing, so a blank secret must not
-  // be read as "clear the credential": it means "keep the stored one". Only
-  // a changed access key id needs a new secret, because the stored secret
-  // belongs to the old pair.
+
   const quotaAccessKeyId = f.quotaAccessKeyId.trim();
   const quotaSecretKey = f.quotaSecretKey.trim();
   const storedAccessKeyId = f.quotaAccessKeyIdStored.trim();
@@ -504,23 +625,19 @@ async function save() {
         : 'Access Key ID 改了，必须同时填写新的 Secret Access Key';
     return;
   }
+
   payload.max_fails = maxFails;
   payload.cooldown_secs = cooldownSecs;
   payload.timeout_secs = timeoutSecs;
-  // The private-upstream opt-in is always sent, even when the operator did
-  // not touch it: the backend reads an omitted field as "off", so leaving it
-  // out would silently close the gate of an instance that already has it.
   payload.allow_private_upstream = f.allowPrivateUpstream;
-  // Interval options are also always sent for the same reason: an omitted
-  // list would be stored as empty and silently drop the vendor-specific
-  // retry codes.
   payload.failover_statuses = failoverStatuses;
   payload.session_header = f.sessionHeader.trim();
 
   saving.value = true;
   error.value = '';
+  const isCreate = f.id === null;
   try {
-    if (f.id === null) {
+    if (isCreate) {
       await api<Instance>('/instances', { method: 'POST', body: JSON.stringify(payload) });
     } else {
       await api<Instance>(`/instances/${f.id}`, {
@@ -528,9 +645,10 @@ async function save() {
         body: JSON.stringify(payload),
       });
     }
-    editing.value = null;
-    resetCandidates();
+    closeModal();
     await load();
+    void loadQuota();
+    showToast(isCreate ? `已新增接入点「${name}」` : `已保存接入点「${name}」`);
   } catch (e) {
     error.value = errorMessage(e);
   } finally {
@@ -539,14 +657,16 @@ async function save() {
 }
 
 async function remove(inst: Instance) {
-  const used = inst.models.length
-    ? `它仍被模型 ${inst.models.join('、')} 引用，需要先从这些模型里移除。`
-    : '';
-  if (!confirmAction(`删除上游接入点「${inst.name}」？${used}`)) return;
+  const refs = usedBy(inst.name);
+  const used = refs.length ? `它仍被模型 ${refs.join('、')} 引用，需要先从这些模型里移除。` : '';
+  if (!confirmAction(`删除上游接入点「${inst.name}」？${used}`)) {
+    return;
+  }
   error.value = '';
   try {
     await api<null>(`/instances/${inst.id}`, { method: 'DELETE' });
     await load();
+    showToast(`已删除接入点「${inst.name}」`);
   } catch (e) {
     error.value = errorMessage(e);
   }
@@ -560,7 +680,9 @@ async function refresh() {
 
 /** 页面重新可见时立刻刷新额度。 */
 function onVisibilityChange() {
-  if (document.visibilityState === 'visible') void loadQuota();
+  if (document.visibilityState === 'visible') {
+    void loadQuota();
+  }
 }
 
 onMounted(async () => {
@@ -569,7 +691,9 @@ onMounted(async () => {
   await loadQuota();
   quotaTimer = window.setInterval(() => {
     // 页面在后台时不打扰上游。
-    if (document.visibilityState === 'visible') void loadQuota();
+    if (document.visibilityState === 'visible') {
+      void loadQuota();
+    }
   }, QUOTA_POLL_MS);
   tickTimer = window.setInterval(() => {
     now.value = Date.now();
@@ -578,34 +702,57 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (quotaTimer !== undefined) window.clearInterval(quotaTimer);
-  if (tickTimer !== undefined) window.clearInterval(tickTimer);
+  if (quotaTimer !== undefined) {
+    window.clearInterval(quotaTimer);
+  }
+  if (tickTimer !== undefined) {
+    window.clearInterval(tickTimer);
+  }
   document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 
 <template>
-  <section>
-    <div class="section-head">
-      <h2>上游接入点</h2>
+  <section class="page">
+    <div class="page-head">
+      <div class="page-title-group">
+        <h2>上游接入点</h2>
+        <p class="page-desc">
+          管理物理上游（厂商端点 + API Key）与套餐额度，在「模型」页引用接入点组成主备链路。
+        </p>
+      </div>
       <div class="row">
-        <button class="ghost" @click="refresh">刷新</button>
-        <button class="primary" @click="openCreate">新增接入点</button>
+        <button type="button" class="ghost" :disabled="loading" @click="refresh">
+          <AppIcon name="refresh" :size="14" />
+          <span>刷新</span>
+        </button>
+        <button type="button" class="primary" @click="openCreate">
+          <AppIcon name="plus" :size="14" />
+          <span>新增接入点</span>
+        </button>
       </div>
     </div>
-    <p class="muted">
-      上游接入点代表一个物理上游（厂商地址 + API Key）。模型在「模型」页引用接入点组成主备链路。
-    </p>
-    <p v-if="error && !editing" class="error">{{ error }}</p>
-    <p v-if="quotaError" class="error">额度查询失败：{{ quotaError }}</p>
-    <p v-if="loading" class="muted">加载中…</p>
 
-    <div v-else-if="!instances.length" class="card muted">
-      还没有上游接入点。点击「新增接入点」开始配置。
+    <p v-if="error && !editing" class="error">{{ error }}</p>
+    <p v-if="quotaError" class="alert warn">额度查询失败：{{ quotaError }}</p>
+
+    <div v-if="loading" class="card stack">
+      <div class="skeleton-line" style="width: 36%" />
+      <div class="skeleton-line" style="width: 72%" />
+      <div class="skeleton-line" style="width: 54%" />
     </div>
 
-    <div v-for="inst in instances" :key="inst.id" class="card provider">
-      <div class="provider-head">
+    <div v-else-if="!instances.length" class="card empty-state">
+      <span class="empty-icon"><AppIcon name="instances" :size="18" /></span>
+      <p>还没有配置上游接入点</p>
+      <button type="button" class="primary sm" @click="openCreate">
+        <AppIcon name="plus" :size="14" />
+        <span>新增第一个接入点</span>
+      </button>
+    </div>
+
+    <div v-for="inst in instances" :key="inst.id" class="card entity-card">
+      <div class="entity-head">
         <div class="row">
           <h3>{{ inst.name }}</h3>
           <span class="badge" :class="{ builtin: inst.source === 'builtin' }">
@@ -613,23 +760,28 @@ onUnmounted(() => {
           </span>
           <span v-if="inst.preset_name" class="badge">{{ inst.preset_name }}</span>
           <span v-if="inst.allow_private_upstream" class="badge danger">允许内网</span>
+          <code v-if="inst.key_hint" class="small">{{ inst.key_hint }}</code>
         </div>
         <div class="row">
           <a
             v-if="inst.docs_url"
-            class="ghost link"
+            class="btn ghost sm"
             :href="inst.docs_url"
             target="_blank"
             rel="noreferrer"
-            >文档</a
           >
-          <button class="ghost" @click="openEdit(inst)">编辑</button>
-          <button class="ghost danger" @click="remove(inst)">删除</button>
+            <AppIcon name="external" :size="13" />
+            <span>文档</span>
+          </a>
+          <button type="button" class="ghost sm" @click="openEdit(inst)">
+            <AppIcon name="edit" :size="13" />
+            <span>编辑</span>
+          </button>
+          <button type="button" class="ghost danger sm" @click="remove(inst)">
+            <AppIcon name="trash" :size="13" />
+            <span>删除</span>
+          </button>
         </div>
-      </div>
-
-      <div v-if="inst.key_hint" class="key-hints">
-        <code>{{ inst.key_hint }}</code>
       </div>
 
       <div class="endpoint-list">
@@ -639,28 +791,30 @@ onUnmounted(() => {
           class="endpoint-line"
         >
           <span class="badge" :class="ep.protocol">{{ ep.protocol }}</span>
-          <code class="base">{{ ep.base_url }}</code>
+          <code class="endpoint-url">{{ ep.base_url }}</code>
+          <CopyButton :text="ep.base_url" icon-only toast-message="Base URL 已复制" />
         </div>
       </div>
 
-      <div class="row small muted">
-        <span>熔断：连续失败 {{ inst.max_fails }} 次后冷却 {{ inst.cooldown_secs }} 秒</span>
-        <span>超时：{{ inst.timeout_secs > 0 ? inst.timeout_secs + ' 秒' : '默认' }}</span>
-        <span v-if="inst.session_header"
-          >会话头：<code>{{ inst.session_header }}</code></span
-        >
-        <span v-if="inst.failover_statuses.length"
-          >额外切换：{{ inst.failover_statuses.join(', ') }}</span
-        >
+      <div class="entity-meta-bar">
+        <span>熔断：连续失败 {{ inst.max_fails }} 次冷却 {{ inst.cooldown_secs }}s</span>
+        <span>超时：{{ inst.timeout_secs > 0 ? `${inst.timeout_secs}s` : '全局默认' }}</span>
+        <span v-if="inst.session_header">
+          会话头：<code>{{ inst.session_header }}</code>
+        </span>
+        <span v-if="inst.failover_statuses.length">
+          额外切换：{{ inst.failover_statuses.join(', ') }}
+        </span>
       </div>
 
-      <div class="models">
+      <div class="tag-list">
         <span v-if="!inst.models.length" class="muted small">未声明支持的模型</span>
         <span v-for="model in inst.models" :key="model" class="tag">{{ model }}</span>
       </div>
 
-      <div v-if="quotaWindows(inst).length || quotaMessage(inst)" class="quota">
-        <p v-if="quotaMessage(inst)" class="quota-error">{{ quotaMessage(inst) }}</p>
+      <div v-if="quotaWindows(inst).length || quotaMessage(inst)" class="quota-box">
+        <span class="quota-title">套餐额度</span>
+        <p v-if="quotaMessage(inst)" class="small status-bad">{{ quotaMessage(inst) }}</p>
         <div v-for="w in quotaWindows(inst)" :key="w.id" class="quota-row">
           <span class="quota-label">{{ w.label }}</span>
           <span class="quota-track">
@@ -668,70 +822,57 @@ onUnmounted(() => {
               class="quota-fill"
               :class="quotaLevel(w.used_pct)"
               :style="{ width: quotaWidth(w.used_pct) }"
-            ></span>
+            />
           </span>
           <span class="quota-value">
             已用 {{ quotaPercent(w.used_pct) }}
-            <span class="muted">{{ quotaCountdown(w.resets_at) }}</span>
+            <span class="muted">· {{ quotaCountdown(w.resets_at) }}</span>
           </span>
         </div>
       </div>
 
       <div v-if="usedBy(inst.name).length" class="row small muted">
-        <span>已被模型引用：{{ usedBy(inst.name).join('、') }}</span>
+        <span>已被模型引用：</span>
+        <code v-for="mName in usedBy(inst.name)" :key="mName">{{ mName }}</code>
       </div>
     </div>
 
-    <div v-if="editing" class="modal-backdrop" role="presentation" @click.self="editing = null">
-      <div class="card modal wide">
-        <div class="row space-between">
-          <h3>{{ editing.id === null ? '新增上游接入点' : '编辑上游接入点' }}</h3>
-          <button class="ghost" @click="editing = null">关闭</button>
+    <BaseModal
+      v-if="editing"
+      :title="editing.id === null ? '新增上游接入点' : '编辑上游接入点'"
+      wide
+      @close="closeModal"
+    >
+      <form id="instance-form" class="stack" @submit.prevent="save">
+        <div v-if="editing.id === null" class="row space-between">
+          <div class="segmented" role="group" aria-label="端点来源">
+            <button
+              type="button"
+              :class="{ active: editing.mode === 'builtin' }"
+              :disabled="!presets.length"
+              @click="setMode('builtin')"
+            >
+              内置端点预设
+            </button>
+            <button
+              type="button"
+              :class="{ active: editing.mode === 'custom' }"
+              @click="setMode('custom')"
+            >
+              自定义端点
+            </button>
+          </div>
+          <span class="muted small">创建后来源不可切换</span>
         </div>
-
-        <div v-if="editing.id === null" class="mode-switch">
-          <button
-            class="ghost"
-            :class="{ active: editing.mode === 'builtin' }"
-            :disabled="!presets.length"
-            @click="setMode('builtin')"
-          >
-            内置端点
-          </button>
-          <button
-            class="ghost"
-            :class="{ active: editing.mode === 'custom' }"
-            @click="setMode('custom')"
-          >
-            自定义端点
-          </button>
-        </div>
-        <p v-else class="muted small">
-          端点来源在创建后不可切换：内置端点由预设提供，自定义端点由下面的地址列表提供。
+        <p v-else class="field-hint">
+          当前为{{
+            editing.mode === 'builtin' ? '内置端点预设' : '自定义端点'
+          }}，创建后不可切换来源。
         </p>
 
-        <div class="form-grid">
+        <!-- 1. 内置预设前置：先选厂商，自动带出名称与建议模型 -->
+        <div v-if="editing.mode === 'builtin'" class="form-section">
           <div class="field">
-            <label for="instance-name">名称</label>
-            <input id="instance-name" v-model="editing.name" placeholder="例如 minimax" />
-          </div>
-          <div class="field">
-            <label for="instance-api-key">
-              上游 API Key
-              <span v-if="editing.id !== null && editing.keyHint" class="muted small">
-                留空保留现有 {{ editing.keyHint }}
-              </span>
-            </label>
-            <input
-              id="instance-api-key"
-              v-model="editing.apiKey"
-              type="password"
-              autocomplete="off"
-              :placeholder="editing.id === null ? 'sk-...' : '留空则不修改'"
-            />
-          </div>
-
-          <div v-if="editing.mode === 'builtin'" class="field span-2">
             <label for="instance-preset">内置端点预设</label>
             <select
               id="instance-preset"
@@ -743,19 +884,69 @@ onUnmounted(() => {
                 {{ presetLabel(preset) }}
               </option>
             </select>
-            <p v-if="selectedPreset" class="muted small">
-              base URL 由程序内置，随版本升级自动更新。
-              <a :href="selectedPreset.docs_url" target="_blank" rel="noreferrer">官方文档</a>
+            <p v-if="selectedPreset" class="field-hint">
+              Base URL 由程序内置维护，随版本升级自动更新。
+              <a :href="selectedPreset.docs_url" target="_blank" rel="noreferrer">查看官方文档</a>
             </p>
           </div>
 
-          <template v-if="needsQuotaCredential">
-            <div class="field span-2">
+          <div class="endpoint-list">
+            <span class="field-caption">预设协议地址（只读）</span>
+            <div v-for="ep in builtinEndpoints" :key="ep.protocol" class="endpoint-line">
+              <span class="badge" :class="ep.protocol">{{ ep.protocol }}</span>
+              <code class="endpoint-url">{{ ep.base_url }}</code>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. 基础信息与凭证 -->
+        <div class="form-grid">
+          <div class="field">
+            <label for="instance-name">接入点名称</label>
+            <input id="instance-name" v-model="editing.name" placeholder="例如 minimax" />
+          </div>
+
+          <div class="field">
+            <label for="instance-api-key">
+              上游 API Key
+              <span v-if="editing.id !== null && editing.keyHint" class="muted">
+                （留空保留 {{ editing.keyHint }}）
+              </span>
+            </label>
+            <div class="input-wrap">
+              <input
+                id="instance-api-key"
+                v-model="editing.apiKey"
+                :type="showApiKey ? 'text' : 'password'"
+                autocomplete="off"
+                :placeholder="editing.id === null ? 'sk-...' : '留空则保持不变'"
+              />
+              <span class="input-suffix">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'"
+                  @click="showApiKey = !showApiKey"
+                >
+                  <AppIcon :name="showApiKey ? 'eye-off' : 'eye'" :size="15" />
+                </button>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 火山方舟额度凭证 -->
+        <div v-if="needsQuotaCredential" class="form-section">
+          <span class="form-section-title">套餐额度查询凭证（可选）</span>
+          <p class="field-hint">
+            火山方舟的套餐额度位于账号管控面，需配置火山引擎 Access Key 对查询；推理 API Key
+            无法读取额度。
+          </p>
+          <div class="form-grid">
+            <div class="field">
               <label for="instance-quota-ak">
-                额度查询凭证 · Access Key ID
-                <span v-if="editing.quotaAccessKeyIdStored" class="muted small">
-                  留空保留现有
-                </span>
+                Access Key ID
+                <span v-if="editing.quotaAccessKeyIdStored" class="muted">（留空保留）</span>
               </label>
               <input
                 id="instance-quota-ak"
@@ -763,16 +954,12 @@ onUnmounted(() => {
                 autocomplete="off"
                 placeholder="AKLT..."
               />
-              <p class="muted small">
-                火山方舟的套餐额度只在账号管控面上，需要火山引擎的 Access Key 对才能查询； 推理用的
-                API Key 不能读额度。
-              </p>
             </div>
-            <div class="field span-2">
+            <div class="field">
               <label for="instance-quota-sk">
-                额度查询凭证 · Secret Access Key
-                <span v-if="editing.id !== null && editing.quotaSecretHint" class="muted small">
-                  留空保留现有 {{ editing.quotaSecretHint }}
+                Secret Access Key
+                <span v-if="editing.id !== null && editing.quotaSecretHint" class="muted">
+                  （留空保留 {{ editing.quotaSecretHint }}）
                 </span>
               </label>
               <input
@@ -780,200 +967,240 @@ onUnmounted(() => {
                 v-model="editing.quotaSecretKey"
                 type="password"
                 autocomplete="off"
-                :placeholder="editing.id === null ? '填写后即可显示套餐额度' : '留空则不修改'"
+                :placeholder="editing.id === null ? '填写后即可显示额度' : '留空则不修改'"
               />
             </div>
-          </template>
+          </div>
+        </div>
 
-          <div v-if="editing.mode === 'builtin'" class="field span-2 readonly">
-            <span class="field-caption">Base URL（只读）</span>
-            <div v-for="ep in builtinEndpoints" :key="ep.protocol" class="endpoint-line">
-              <span class="badge" :class="ep.protocol">{{ ep.protocol }}</span>
-              <code class="base">{{ ep.base_url }}</code>
-            </div>
-            <p v-if="selectedPreset && selectedPreset.models.length" class="muted small">
-              建议模型：{{ selectedPreset.models.join('、') }}
-            </p>
+        <!-- 3. 自定义端点配置 -->
+        <div v-if="editing.mode === 'custom'" class="form-section">
+          <div class="row space-between">
+            <span class="form-section-title">自定义协议端点</span>
+            <button type="button" class="ghost sm" @click="addEndpoint(editing)">
+              <AppIcon name="plus" :size="13" />
+              <span>添加端点</span>
+            </button>
+          </div>
+          <p class="field-hint">至少配置一个端点，同一接入点下每种协议仅支持一个地址。</p>
+
+          <div v-for="(row, index) in editing.endpoints" :key="index" class="row">
+            <label class="visually-hidden" :for="`instance-endpoint-protocol-${index}`">协议</label>
+            <select
+              :id="`instance-endpoint-protocol-${index}`"
+              v-model="row.protocol"
+              style="width: 132px"
+            >
+              <option value="openai">openai</option>
+              <option value="anthropic">anthropic</option>
+            </select>
+            <label class="visually-hidden" :for="`instance-endpoint-base-${index}`">
+              Base URL
+            </label>
+            <input
+              :id="`instance-endpoint-base-${index}`"
+              v-model="row.base_url"
+              style="flex: 1"
+              placeholder="https://api.example.com/v1"
+            />
+            <button
+              type="button"
+              class="ghost danger sm"
+              :disabled="editing.endpoints.length <= 1"
+              @click="removeEndpoint(editing, index)"
+            >
+              删除
+            </button>
           </div>
 
-          <div v-if="editing.mode === 'custom'" class="field span-2">
-            <span class="field-caption">端点（至少一个，同一协议只能有一个地址）</span>
-            <div v-for="(row, index) in editing.endpoints" :key="index" class="row">
-              <label class="visually-hidden" :for="`instance-endpoint-protocol-${index}`">
-                协议
+          <div class="checkbox-card" :class="{ 'danger-active': editing.allowPrivateUpstream }">
+            <input
+              id="instance-allow-private"
+              v-model="editing.allowPrivateUpstream"
+              type="checkbox"
+            />
+            <div class="stack" style="gap: 4px">
+              <label for="instance-allow-private" style="font-weight: 600; cursor: pointer">
+                允许指向内网 / 本机地址
               </label>
-              <select
-                :id="`instance-endpoint-protocol-${index}`"
-                v-model="row.protocol"
-                class="input-fixed"
-              >
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-              </select>
-              <label class="visually-hidden" :for="`instance-endpoint-base-${index}`"
-                >Base URL</label
-              >
-              <input
-                :id="`instance-endpoint-base-${index}`"
-                v-model="row.base_url"
-                placeholder="https://api.example.com/v1"
-              />
-              <button
-                class="ghost danger"
-                :disabled="editing.endpoints.length <= 1"
-                @click="removeEndpoint(editing, index)"
-              >
-                删除
-              </button>
+              <p class="field-hint">
+                默认拒绝 loopback、内网网段与云元数据地址（169.254.169.254）。仅在本地 mock
+                或可信内网服务时勾选。
+              </p>
             </div>
-            <div class="row">
-              <button class="ghost" @click="addEndpoint(editing)">添加端点</button>
-            </div>
-            <div class="row">
-              <label for="instance-allow-private">允许内网地址</label>
-              <input
-                id="instance-allow-private"
-                v-model="editing.allowPrivateUpstream"
-                type="checkbox"
-              />
-            </div>
-            <p class="muted small">
-              默认拒绝指向 loopback、内网网段与云元数据地址（169.254.169.254）的上游，
-              要指向这类地址必须先勾选本项。打开后网关可以拨号到 127.0.0.1、10.0.0.0/8
-              这类地址：仅在本地 mock 或内网自建上游时开启，控制台被拿下时它等于把网关
-              变成内网代理。
-            </p>
-            <p v-if="editing.allowPrivateUpstream" class="error">
-              该接入点已放行内网地址，请确认上游确实是可信的内网服务。
-            </p>
+          </div>
+        </div>
+
+        <!-- 4. 支持的模型 + 候选查询 -->
+        <div class="form-section">
+          <div class="row space-between">
+            <label for="instance-models" class="form-section-title">
+              支持的上游模型（每行一个，必填）
+            </label>
+            <span class="badge">{{ declaredModelCount }} 个模型</span>
           </div>
 
-          <div class="field span-2">
-            <label for="instance-models">支持的模型（每行一个上游模型名，必填）</label>
-            <textarea
-              id="instance-models"
-              v-model="editing.modelsText"
-              rows="3"
-              placeholder="MiniMax-M3.1-Flash"
-            ></textarea>
-            <p class="muted small">
-              模型页把模型挂到这个接入点前，会校验模型的上游名是否在此列表内。
-            </p>
-          </div>
+          <textarea
+            id="instance-models"
+            v-model="editing.modelsText"
+            rows="4"
+            placeholder="例如 MiniMax-M3.1-Flash"
+          />
 
-          <div v-if="editing.mode === 'builtin' && editing.id === null" class="field span-2">
-            <span class="field-caption">上游可用模型</span>
-            <div class="row">
-              <button
-                type="button"
-                class="ghost"
-                :disabled="candidatesLoading || !editing.apiKey.trim()"
-                @click="queryCandidates"
-              >
-                {{ candidatesLoading ? '查询中…' : '查询上游可用模型' }}
-              </button>
-              <button
-                v-if="candidates.length"
-                type="button"
-                class="ghost"
-                @click="addAllCandidates"
-              >
-                全部添加
-              </button>
-              <span v-if="!editing.apiKey.trim()" class="muted small">请先填写上方 API Key</span>
+          <p class="field-hint">模型页绑定该接入点时，仅允许从这里声明的上游模型名中选择。</p>
+
+          <div
+            v-if="editing.mode === 'builtin' && editing.id === null"
+            class="stack"
+            style="padding-top: 6px; border-top: 1px solid var(--border-subtle)"
+          >
+            <div class="row space-between">
+              <div class="row">
+                <button
+                  type="button"
+                  class="ghost sm"
+                  :disabled="candidatesLoading || !editing.apiKey.trim()"
+                  @click="queryCandidates"
+                >
+                  <AppIcon name="search" :size="13" />
+                  <span>{{ candidatesLoading ? '查询中…' : '从上游拉取可用模型' }}</span>
+                </button>
+                <button
+                  v-if="filteredCandidates.length"
+                  type="button"
+                  class="ghost sm"
+                  @click="addAllCandidates"
+                >
+                  全部添加（{{ filteredCandidates.length }}）
+                </button>
+              </div>
+              <span v-if="!editing.apiKey.trim()" class="field-hint">请先填写上方 API Key</span>
             </div>
-            <p v-if="candidatesWarning" class="muted small">{{ candidatesWarning }}</p>
+
+            <div v-if="candidates.length" class="input-wrap" style="max-width: 300px">
+              <label class="visually-hidden" for="candidate-search">筛选候选模型</label>
+              <input
+                id="candidate-search"
+                v-model="candidateSearch"
+                placeholder="筛选上游返回的模型…"
+              />
+              <span v-if="candidateSearch" class="input-suffix">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  aria-label="清空模型筛选"
+                  @click="candidateSearch = ''"
+                >
+                  <AppIcon name="close" :size="13" />
+                </button>
+              </span>
+            </div>
+
+            <p v-if="candidatesWarning" class="field-hint">{{ candidatesWarning }}</p>
             <p v-if="candidatesError" class="error">{{ candidatesError }}</p>
-            <div v-if="candidates.length" class="candidate-list">
+
+            <div v-if="filteredCandidates.length" class="tag-list">
               <button
-                v-for="candidate in candidates"
+                v-for="candidate in filteredCandidates"
                 :key="candidate.id"
                 type="button"
-                class="candidate"
-                :class="{ added: candidateAdded(candidate.id) }"
+                class="chip-btn"
+                :class="{ active: candidateAdded(candidate.id) }"
                 @click="toggleCandidate(candidate.id)"
               >
-                <span class="candidate-id">{{ candidate.id }}</span>
+                <span class="mono">{{ candidate.id }}</span>
                 <span
                   v-for="protocol in candidate.protocols ?? []"
                   :key="protocol"
                   class="badge"
                   :class="protocol"
-                  >{{ protocol }}</span
                 >
+                  {{ protocol }}
+                </span>
               </button>
             </div>
           </div>
-
-          <div class="field">
-            <label for="instance-max-fails">熔断阈值（连续失败次数）</label>
-            <input
-              id="instance-max-fails"
-              v-model="editing.maxFails"
-              type="text"
-              inputmode="numeric"
-              placeholder="0 表示用默认 3"
-            />
-          </div>
-          <div class="field">
-            <label for="instance-cooldown">冷却时间（秒）</label>
-            <input
-              id="instance-cooldown"
-              v-model="editing.cooldownSecs"
-              type="text"
-              inputmode="numeric"
-              placeholder="0 表示用默认 30"
-            />
-          </div>
-          <div class="field">
-            <label for="instance-timeout">请求超时（秒）</label>
-            <input
-              id="instance-timeout"
-              v-model="editing.timeoutSecs"
-              type="text"
-              inputmode="numeric"
-              placeholder="0 表示用全局默认"
-            />
-          </div>
-
-          <div class="field">
-            <label for="instance-session-header">会话头（可选）</label>
-            <input
-              id="instance-session-header"
-              v-model="editing.sessionHeader"
-              type="text"
-              placeholder="例如 x-opencode-session"
-            />
-            <p class="muted small">
-              上游要求会话粘性时填写。客户端没带该头时，网关按「系统提示 +
-              首条用户消息」派生一个稳定值， 同一对话的后续轮次保持一致，prompt
-              缓存才能命中；客户端自带时原样透传。 内置端点会自带厂商要求的头名，留空即用默认值。
-            </p>
-          </div>
-
-          <div class="field">
-            <label for="instance-failover-statuses">额外可切换状态码（可选）</label>
-            <input
-              id="instance-failover-statuses"
-              v-model="editing.failoverStatuses"
-              type="text"
-              placeholder="例如 402"
-            />
-            <p class="muted small">
-              429 与 5xx 始终触发候选切换，这里只追加厂商特有的状态码：MiniMax 套餐额度耗尽返回
-              402；OpenCode Go 缺会话头返回 400。命中后会尝试下一个候选，并计入熔断失败。
-            </p>
-          </div>
         </div>
 
+        <!-- 5. 高级容错与会话设置（折叠减负） -->
+        <details class="form-collapse" :open="advancedCustomCount > 0">
+          <summary>
+            <span>高级容错与会话设置</span>
+            <span class="badge" :class="advancedCustomCount > 0 ? 'accent' : 'off'">
+              {{ advancedCustomCount > 0 ? `已自定义 ${advancedCustomCount} 项` : '使用默认配置' }}
+            </span>
+          </summary>
+          <div class="collapse-body">
+            <div class="form-grid">
+              <div class="field">
+                <label for="instance-max-fails">熔断阈值（连续失败次数）</label>
+                <input
+                  id="instance-max-fails"
+                  v-model="editing.maxFails"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="0 表示用默认 3"
+                />
+              </div>
+              <div class="field">
+                <label for="instance-cooldown">冷却时间（秒）</label>
+                <input
+                  id="instance-cooldown"
+                  v-model="editing.cooldownSecs"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="0 表示用默认 30"
+                />
+              </div>
+              <div class="field">
+                <label for="instance-timeout">请求超时（秒）</label>
+                <input
+                  id="instance-timeout"
+                  v-model="editing.timeoutSecs"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="0 表示用全局默认"
+                />
+              </div>
+              <div class="field">
+                <label for="instance-failover-statuses">额外可切换状态码（可选）</label>
+                <input
+                  id="instance-failover-statuses"
+                  v-model="editing.failoverStatuses"
+                  type="text"
+                  placeholder="例如 402, 400"
+                />
+                <p class="field-hint">
+                  429 与 5xx 始终切换；这里仅追加厂商特有状态码（如 402 套餐耗尽）。
+                </p>
+              </div>
+              <div class="field span-2">
+                <label for="instance-session-header">会话粘性请求头（可选）</label>
+                <input
+                  id="instance-session-header"
+                  v-model="editing.sessionHeader"
+                  type="text"
+                  placeholder="例如 x-opencode-session（内置端点留空用默认值）"
+                />
+                <p class="field-hint">
+                  客户端未携带该头时，网关按「系统提示 + 首条用户消息」派生稳定值以提升 Prompt
+                  缓存命中率。
+                </p>
+              </div>
+            </div>
+          </div>
+        </details>
+      </form>
+
+      <template #footer>
         <p v-if="error" class="error">{{ error }}</p>
-        <div class="row">
-          <button class="primary" :disabled="saving" @click="save">
-            {{ saving ? '保存中…' : '保存' }}
+        <div class="row space-between">
+          <button type="button" class="ghost" @click="closeModal">取消</button>
+          <button type="submit" form="instance-form" class="primary" :disabled="saving">
+            {{ saving ? '保存中…' : '保存接入点' }}
           </button>
-          <button class="ghost" @click="editing = null">取消</button>
         </div>
-      </div>
-    </div>
+      </template>
+    </BaseModal>
   </section>
 </template>

@@ -254,6 +254,12 @@ async function submit(): Promise<void> {
   if (busy.value || loginSuccess.value) {
     return;
   }
+  if (!username.value.trim()) {
+    error.value = '请输入用户名';
+    triggerShake();
+    usernameInput.value?.focus();
+    return;
+  }
   if (!password.value) {
     error.value = '请输入密码';
     triggerShake();

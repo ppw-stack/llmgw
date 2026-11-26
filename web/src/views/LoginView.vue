@@ -107,7 +107,7 @@ const usernameInput = ref<HTMLInputElement | null>(null);
 const passwordInput = ref<HTMLInputElement | null>(null);
 
 const modalOpen = ref(false);
-const username = ref('admin');
+const username = ref('');
 const password = ref('');
 const showPassword = ref(false);
 const error = ref('');
@@ -252,6 +252,12 @@ function closeModal(): void {
 
 async function submit(): Promise<void> {
   if (busy.value || loginSuccess.value) {
+    return;
+  }
+  if (!username.value.trim()) {
+    error.value = '请输入用户名';
+    triggerShake();
+    usernameInput.value?.focus();
     return;
   }
   if (!password.value) {
@@ -534,11 +540,6 @@ onUnmounted(() => {
               {{ loginSuccess ? '已通过 · 跳转中…' : busy ? '登录中…' : '登录控制台' }}
             </button>
           </form>
-
-          <p class="auth-hint">
-            首次启动时密码会写入数据库旁的 <code>admin-password.txt</code>，或由
-            <code>server.admin_password</code> 指定。
-          </p>
         </div>
       </div>
     </Transition>
@@ -979,14 +980,6 @@ onUnmounted(() => {
   width: 100%;
   justify-content: center;
   padding: 10px 16px;
-}
-
-.auth-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.6;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-subtle);
 }
 
 @keyframes auth-shake {

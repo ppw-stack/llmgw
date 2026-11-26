@@ -230,6 +230,10 @@ func TestDataPlaneResponsesAndCountTokensEndpoints(t *testing.T) {
 		switch r.URL.Path {
 		case "/responses":
 			_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","output":[],"usage":{"input_tokens":10,"output_tokens":5}}`)
+		case "/images/generations":
+			_, _ = io.WriteString(w, `{"created":1700000000,"data":[{"url":"https://example.com/a.png"}]}`)
+		case "/embeddings":
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":6,"total_tokens":6}}`)
 		case "/v1/messages/count_tokens":
 			_, _ = io.WriteString(w, `{"input_tokens":17}`)
 		default:
@@ -278,8 +282,46 @@ func TestDataPlaneResponsesAndCountTokensEndpoints(t *testing.T) {
 		t.Fatalf("anthropic models = %d %s", resp.StatusCode, body)
 	}
 
+	// 4. OpenAI /openai/images/generations (normalized to /openai/v1/images/generations)
+	req, _ = http.NewRequest(http.MethodPost, gw.URL+"/openai/images/generations",
+		strings.NewReader(`{"model":"gpt-test","prompt":"a sunset"}`))
+	req.Header.Set("Authorization", "Bearer "+gwKey)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read images/generations response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"https://example.com/a.png"`) {
+		t.Fatalf("images/generations = %d %s", resp.StatusCode, body)
+	}
+
+	// 5. OpenAI /openai/embeddings (normalized to /openai/v1/embeddings)
+	req, _ = http.NewRequest(http.MethodPost, gw.URL+"/openai/embeddings",
+		strings.NewReader(`{"model":"gpt-test","input":"hello","stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+gwKey)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read embeddings response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"embedding"`) {
+		t.Fatalf("embeddings = %d %s", resp.StatusCode, body)
+	}
+
 	reqs := cap.all()
-	if len(reqs) != 2 || reqs[0].Path != "/responses" || reqs[1].Path != "/v1/messages/count_tokens" {
+	if len(reqs) != 4 ||
+		reqs[0].Path != "/responses" ||
+		reqs[1].Path != "/v1/messages/count_tokens" ||
+		reqs[2].Path != "/images/generations" ||
+		reqs[3].Path != "/embeddings" {
 		t.Fatalf("unexpected upstream requests: %+v", reqs)
 	}
 }

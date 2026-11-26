@@ -67,7 +67,8 @@ const clients = [
         </div>
         <p class="secondary small">
           <code>base_url</code> 必须包含 <code>/v1</code>，客户端 SDK 会在其后拼接
-          <code>/chat/completions</code> 或 <code>/responses</code>。
+          <code>/chat/completions</code>、<code>/responses</code>、<code>/images/generations</code>
+          或 <code>/embeddings</code>。
         </p>
       </div>
 

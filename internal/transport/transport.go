@@ -183,9 +183,11 @@ func (f *Forwarder) dialContext(ctx context.Context, network, addr string) (net.
 // Endpoint kinds select which upstream path a data-plane request targets.
 // Empty keeps the protocol default (/chat/completions or /v1/messages).
 const (
-	EndpointDefault              = ""
-	EndpointOpenAIResponses      = "responses"
-	EndpointAnthropicCountTokens = "count_tokens"
+	EndpointDefault                 = ""
+	EndpointOpenAIResponses         = "responses"
+	EndpointOpenAIImagesGenerations = "images/generations"
+	EndpointOpenAIEmbeddings        = "embeddings"
+	EndpointAnthropicCountTokens    = "count_tokens"
 )
 
 type Request struct {
@@ -473,9 +475,11 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			return attemptOutcome{handled: true}
 		}
 		acc.observeBody(in.Protocol, raw)
-		if !acc.seen && resp.StatusCode < 300 && in.Endpoint != EndpointAnthropicCountTokens {
+		if !acc.seen && resp.StatusCode < 300 && !skipTokenEstimation(in.Endpoint) {
 			acc.prompt = estimateTokens(len(body))
-			acc.completion = estimateTokens(len(raw))
+			if estimatesCompletionTokens(in.Endpoint) {
+				acc.completion = estimateTokens(len(raw))
+			}
 			acc.estimated = true
 		}
 		writeRaw(w, resp, raw, in.RequestID)
@@ -508,9 +512,11 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 	if writeErr != nil {
 		f.log.Debug("stream interrupted", "request_id", in.RequestID, "err", writeErr.Error())
 	}
-	if !acc.seen {
+	if !acc.seen && !skipTokenEstimation(in.Endpoint) {
 		acc.prompt = estimateTokens(len(body))
-		acc.completion = estimateTokens(int(written))
+		if estimatesCompletionTokens(in.Endpoint) {
+			acc.completion = estimateTokens(int(written))
+		}
 		acc.estimated = true
 	}
 	f.record(in, target, resp.StatusCode, start, ttft, acc, responseCode(resp.StatusCode))
@@ -619,10 +625,25 @@ func (f *Forwarder) record(in Request, target router.Target, status int, start t
 	}
 }
 
+func skipTokenEstimation(endpoint string) bool {
+	return endpoint == EndpointAnthropicCountTokens || endpoint == EndpointOpenAIImagesGenerations
+}
+
+// estimatesCompletionTokens reports whether the endpoint's response body is
+// billable completion output. Embeddings return vectors rather than generated
+// tokens, so only the prompt may be estimated for them.
+func estimatesCompletionTokens(endpoint string) bool {
+	return endpoint != EndpointOpenAIEmbeddings
+}
+
 func upstreamURL(t router.Target, endpoint string) string {
 	switch endpoint {
 	case EndpointOpenAIResponses:
 		return t.BaseURL + "/responses"
+	case EndpointOpenAIImagesGenerations:
+		return t.BaseURL + "/images/generations"
+	case EndpointOpenAIEmbeddings:
+		return t.BaseURL + "/embeddings"
 	case EndpointAnthropicCountTokens:
 		return t.BaseURL + "/v1/messages/count_tokens"
 	}

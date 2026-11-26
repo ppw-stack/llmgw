@@ -10,12 +10,14 @@ import (
 )
 
 const (
-	PathOpenAIChat           = "/openai/v1/chat/completions"
-	PathOpenAIResponses      = "/openai/v1/responses"
-	PathOpenAIModels         = "/openai/v1/models"
-	PathAnthropicMsgs        = "/anthropic/v1/messages"
-	PathAnthropicCountTokens = "/anthropic/v1/messages/count_tokens"
-	PathAnthropicModels      = "/anthropic/v1/models"
+	PathOpenAIChat              = "/openai/v1/chat/completions"
+	PathOpenAIResponses         = "/openai/v1/responses"
+	PathOpenAIImagesGenerations = "/openai/v1/images/generations"
+	PathOpenAIEmbeddings        = "/openai/v1/embeddings"
+	PathOpenAIModels            = "/openai/v1/models"
+	PathAnthropicMsgs           = "/anthropic/v1/messages"
+	PathAnthropicCountTokens    = "/anthropic/v1/messages/count_tokens"
+	PathAnthropicModels         = "/anthropic/v1/models"
 )
 
 // Normalize makes common base_url mistakes work anyway.
@@ -43,6 +45,10 @@ func Normalize(path string) string {
 		return PathOpenAIChat
 	case "/openai/responses":
 		return PathOpenAIResponses
+	case "/openai/images/generations":
+		return PathOpenAIImagesGenerations
+	case "/openai/embeddings":
+		return PathOpenAIEmbeddings
 	case "/openai/models":
 		return PathOpenAIModels
 	}
@@ -52,7 +58,7 @@ func Normalize(path string) string {
 // ProtocolOf maps a normalized path to its protocol.
 func ProtocolOf(path string) (string, bool) {
 	switch path {
-	case PathOpenAIChat, PathOpenAIResponses, PathOpenAIModels:
+	case PathOpenAIChat, PathOpenAIResponses, PathOpenAIImagesGenerations, PathOpenAIEmbeddings, PathOpenAIModels:
 		return config.ProtocolOpenAI, true
 	case PathAnthropicMsgs, PathAnthropicCountTokens, PathAnthropicModels:
 		return config.ProtocolAnthropic, true

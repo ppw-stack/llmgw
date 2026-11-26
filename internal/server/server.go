@@ -216,6 +216,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointOpenAIResponses)
 	})
+	mux.HandleFunc("/openai/v1/images/generations", func(w http.ResponseWriter, r *http.Request) {
+		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointOpenAIImagesGenerations)
+	})
+	mux.HandleFunc("/openai/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointOpenAIEmbeddings)
+	})
 	mux.HandleFunc("/anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		s.handleChat(w, r, config.ProtocolAnthropic, transport.EndpointDefault)
 	})
@@ -420,6 +426,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 <ul>
   <li><code>POST /openai/v1/chat/completions</code></li>
   <li><code>POST /openai/v1/responses</code></li>
+  <li><code>POST /openai/v1/images/generations</code></li>
+  <li><code>POST /openai/v1/embeddings</code></li>
   <li><code>GET  /openai/v1/models</code></li>
   <li><code>POST /anthropic/v1/messages</code></li>
   <li><code>POST /anthropic/v1/messages/count_tokens</code></li>
@@ -476,7 +484,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol, en
 		return
 	}
 
-	if endpoint == transport.EndpointAnthropicCountTokens {
+	if endpoint == transport.EndpointAnthropicCountTokens || endpoint == transport.EndpointOpenAIEmbeddings {
 		meta.Stream = false
 	}
 	if !key.AllowsModel(meta.Model) {

@@ -19,6 +19,12 @@ func TestNormalize(t *testing.T) {
 		"/openai/v1/responses":                   PathOpenAIResponses,
 		"/openai/responses":                      PathOpenAIResponses,
 		"/openai/v1/v1/responses":                PathOpenAIResponses,
+		"/openai/v1/images/generations":          PathOpenAIImagesGenerations,
+		"/openai/images/generations":             PathOpenAIImagesGenerations,
+		"/openai/v1/v1/images/generations":       PathOpenAIImagesGenerations,
+		"/openai/v1/embeddings":                  PathOpenAIEmbeddings,
+		"/openai/embeddings":                     PathOpenAIEmbeddings,
+		"/openai/v1/v1/embeddings":               PathOpenAIEmbeddings,
 		"/openai/v1/models":                      PathOpenAIModels,
 		"/metrics":                               "/metrics",
 		"/":                                      "/",
@@ -46,6 +52,12 @@ func TestProtocolOf(t *testing.T) {
 	}
 	if p, ok := ProtocolOf(PathOpenAIResponses); !ok || p != "openai" {
 		t.Fatalf("openai responses path -> %q %v", p, ok)
+	}
+	if p, ok := ProtocolOf(PathOpenAIImagesGenerations); !ok || p != "openai" {
+		t.Fatalf("openai images/generations path -> %q %v", p, ok)
+	}
+	if p, ok := ProtocolOf(PathOpenAIEmbeddings); !ok || p != "openai" {
+		t.Fatalf("openai embeddings path -> %q %v", p, ok)
 	}
 	if _, ok := ProtocolOf("/nope"); ok {
 		t.Fatal("unexpected protocol")

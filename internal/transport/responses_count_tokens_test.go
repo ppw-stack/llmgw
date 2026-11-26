@@ -251,3 +251,153 @@ func TestAnthropicCountTokensSkipsTokenEstimation(t *testing.T) {
 		t.Fatalf("count_tokens should log zero tokens without estimation: %+v", got)
 	}
 }
+
+func TestImagesGenerationsForwardsAndSkipsEstimationWhenUsageAbsent(t *testing.T) {
+	t.Parallel()
+	var gotPath, gotBody string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1700000000,"data":[{"b64_json":"`+strings.Repeat("A", 1024)+`"}]}`)
+	}))
+	t.Cleanup(up.Close)
+
+	fwd, st, targets := newForwarder(t, up.URL, 5*time.Second)
+	raw := []byte(`{"model":"m","prompt":"a red cat","size":"1024x1024"}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/images/generations", bytes.NewReader(raw))
+	rec := httptest.NewRecorder()
+
+	fwd.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Endpoint:  EndpointOpenAIImagesGenerations,
+		Meta:      ingress.Meta{Model: "m", Stream: false, RawBody: raw},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-img-1",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/images/generations" {
+		t.Fatalf("upstream path = %q, want /images/generations", gotPath)
+	}
+	if !strings.Contains(gotBody, `"model":"upstream-m"`) {
+		t.Fatalf("upstream body did not rewrite model: %s", gotBody)
+	}
+
+	logs := waitLogs(t, st, 1)
+	got := logs[0]
+	if got.PromptTokens != 0 || got.CompletionTokens != 0 || got.UsageEstimated {
+		t.Fatalf("images/generations without usage should skip token estimation: %+v", got)
+	}
+}
+
+func TestImagesGenerationsRecordsUsageWhenProvided(t *testing.T) {
+	t.Parallel()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1700000000,"data":[{"b64_json":"AAAA"}],"usage":{"input_tokens":50,"output_tokens":1024,"total_tokens":1074}}`)
+	}))
+	t.Cleanup(up.Close)
+
+	fwd, st, targets := newForwarder(t, up.URL, 5*time.Second)
+	raw := []byte(`{"model":"m","prompt":"a red cat"}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/images/generations", bytes.NewReader(raw))
+	rec := httptest.NewRecorder()
+
+	fwd.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Endpoint:  EndpointOpenAIImagesGenerations,
+		Meta:      ingress.Meta{Model: "m", Stream: false, RawBody: raw},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-img-usage",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	logs := waitLogs(t, st, 1)
+	got := logs[0]
+	if got.PromptTokens != 50 || got.CompletionTokens != 1024 || got.UsageEstimated {
+		t.Fatalf("unexpected images/generations usage: %+v", got)
+	}
+}
+
+func TestEmbeddingsForwardsAndParsesUsage(t *testing.T) {
+	t.Parallel()
+	var gotPath, gotBody string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"upstream-m","usage":{"prompt_tokens":12,"total_tokens":12}}`)
+	}))
+	t.Cleanup(up.Close)
+
+	fwd, st, targets := newForwarder(t, up.URL, 5*time.Second)
+	raw := []byte(`{"model":"m","input":"hello world"}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/embeddings", bytes.NewReader(raw))
+	rec := httptest.NewRecorder()
+
+	fwd.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Endpoint:  EndpointOpenAIEmbeddings,
+		Meta:      ingress.Meta{Model: "m", Stream: false, RawBody: raw},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-emb-1",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/embeddings" {
+		t.Fatalf("upstream path = %q, want /embeddings", gotPath)
+	}
+	if !strings.Contains(gotBody, `"model":"upstream-m"`) {
+		t.Fatalf("upstream body did not rewrite model: %s", gotBody)
+	}
+
+	logs := waitLogs(t, st, 1)
+	got := logs[0]
+	if got.PromptTokens != 12 || got.CompletionTokens != 0 || got.UsageEstimated {
+		t.Fatalf("unexpected embeddings usage: %+v", got)
+	}
+}
+
+func TestEmbeddingsFallbackEstimatesPromptOnly(t *testing.T) {
+	t.Parallel()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3,0.4,0.5]}]}`)
+	}))
+	t.Cleanup(up.Close)
+
+	fwd, st, targets := newForwarder(t, up.URL, 5*time.Second)
+	raw := []byte(`{"model":"m","input":"hello world"}`)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/embeddings", bytes.NewReader(raw))
+	rec := httptest.NewRecorder()
+
+	fwd.Forward(rec, req, Request{
+		Protocol:  config.ProtocolOpenAI,
+		Endpoint:  EndpointOpenAIEmbeddings,
+		Meta:      ingress.Meta{Model: "m", Stream: false, RawBody: raw},
+		Targets:   targets,
+		APIKeyID:  1,
+		RequestID: "req-emb-est",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	logs := waitLogs(t, st, 1)
+	got := logs[0]
+	if got.PromptTokens <= 0 || got.CompletionTokens != 0 || !got.UsageEstimated {
+		t.Fatalf("embeddings fallback should estimate prompt only: %+v", got)
+	}
+}

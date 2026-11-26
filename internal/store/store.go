@@ -1146,9 +1146,12 @@ func normalizeAllowedModels(models []string) []string {
 	return cleaned
 }
 
-func encodeAllowedModelsJSON(models []string) string {
-	b, _ := json.Marshal(normalizeAllowedModels(models))
-	return string(b)
+func encodeAllowedModelsJSON(models []string) (string, error) {
+	b, err := json.Marshal(normalizeAllowedModels(models))
+	if err != nil {
+		return "", fmt.Errorf("encode allowed_models_json: %w", err)
+	}
+	return string(b), nil
 }
 
 func (s *Store) KeyRecords() ([]KeyRecord, error) {
@@ -1209,7 +1212,10 @@ func (s *Store) CreateKeyWithPolicy(name, hash, prefix, encrypted string, policy
 		expiresOut = &t
 	}
 	allowedModels := normalizeAllowedModels(policy.AllowedModels)
-	allowedJSON := encodeAllowedModelsJSON(allowedModels)
+	allowedJSON, err := encodeAllowedModelsJSON(allowedModels)
+	if err != nil {
+		return nil, err
+	}
 	res, err := s.db.Exec(
 		`INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, key_enc, rpm_limit, max_concurrent, expires_at, allowed_models_json)
 		 VALUES(?,?,?,1,?,?,?,?,?,?)`,
@@ -1305,8 +1311,12 @@ func (s *Store) UpdateKey(id int64, patch KeyPatch) (*APIKey, error) {
 		args = append(args, expiresArg)
 	}
 	if patch.AllowedModels != nil {
+		encoded, err := encodeAllowedModelsJSON(*patch.AllowedModels)
+		if err != nil {
+			return nil, err
+		}
 		setClauses = append(setClauses, "allowed_models_json=?")
-		args = append(args, encodeAllowedModelsJSON(*patch.AllowedModels))
+		args = append(args, encoded)
 	}
 	if len(setClauses) > 0 {
 		args = append(args, id)

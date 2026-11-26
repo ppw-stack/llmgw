@@ -393,6 +393,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 				// fallback keeps the required header non-empty while making
 				// the derivation failure visible in the logs.
 				f.log.Warn("derive upstream session header failed; falling back to a per-request value",
+					"method", r.Method, "path", r.URL.Path,
 					"request_id", in.RequestID, "instance", target.Instance, "err", err)
 				value = "ses_" + hex.EncodeToString(byteSeed("request:"+in.RequestID))
 			}

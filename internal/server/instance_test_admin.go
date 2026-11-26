@@ -417,13 +417,13 @@ func probeEndpoint(
 	}
 	defer resp.Body.Close()
 
+	res.HTTPStatus = resp.StatusCode
 	body, err := io.ReadAll(io.LimitReader(resp.Body, instanceTestMaxResponseBytes))
 	if err != nil {
 		res.Status = "error"
 		res.Message = netproxy.SanitizeError(err, proxyURL)
 		return res
 	}
-	res.HTTPStatus = resp.StatusCode
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:

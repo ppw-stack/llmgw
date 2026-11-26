@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/pw/llmgw/internal/config"
 )
 
 func TestSavedInstanceConnectivityTest(t *testing.T) {
@@ -121,6 +124,38 @@ func TestSavedInstanceConnectivityTest(t *testing.T) {
 	resp.Body.Close()
 	if out.OK || len(out.Endpoints) != 1 || out.Endpoints[0].Status != "auth_error" {
 		t.Fatalf("expected auth_error, got %+v", out)
+	}
+}
+
+func TestProbeEndpointKeepsHTTPStatusOnReadError(t *testing.T) {
+	t.Parallel()
+	// The handler sends a 401 with a truncated body, so reading the response
+	// fails after the status line was already received.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer does not support hijacking")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 401 Unauthorized\r\nContent-Length: 8\r\n\r\nabc")
+		_ = buf.Flush()
+	}))
+	t.Cleanup(upstream.Close)
+
+	res := probeEndpoint(context.Background(), upstream.Client(),
+		config.Endpoint{Protocol: config.ProtocolOpenAI, BaseURL: upstream.URL}, "", nil, true)
+	if res.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("http_status = %d, want %d (status=%q message=%q)",
+			res.HTTPStatus, http.StatusUnauthorized, res.Status, res.Message)
+	}
+	if res.OK || res.Status != "error" {
+		t.Fatalf("unexpected result: %+v", res)
 	}
 }
 

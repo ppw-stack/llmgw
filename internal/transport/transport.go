@@ -477,7 +477,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		acc.observeBody(in.Protocol, raw)
 		if !acc.seen && resp.StatusCode < 300 && !skipTokenEstimation(in.Endpoint) {
 			acc.prompt = estimateTokens(len(body))
-			if in.Endpoint != EndpointOpenAIEmbeddings {
+			if estimatesCompletionTokens(in.Endpoint) {
 				acc.completion = estimateTokens(len(raw))
 			}
 			acc.estimated = true
@@ -514,7 +514,9 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 	}
 	if !acc.seen && !skipTokenEstimation(in.Endpoint) {
 		acc.prompt = estimateTokens(len(body))
-		acc.completion = estimateTokens(int(written))
+		if estimatesCompletionTokens(in.Endpoint) {
+			acc.completion = estimateTokens(int(written))
+		}
 		acc.estimated = true
 	}
 	f.record(in, target, resp.StatusCode, start, ttft, acc, responseCode(resp.StatusCode))
@@ -625,6 +627,13 @@ func (f *Forwarder) record(in Request, target router.Target, status int, start t
 
 func skipTokenEstimation(endpoint string) bool {
 	return endpoint == EndpointAnthropicCountTokens || endpoint == EndpointOpenAIImagesGenerations
+}
+
+// estimatesCompletionTokens reports whether the endpoint's response body is
+// billable completion output. Embeddings return vectors rather than generated
+// tokens, so only the prompt may be estimated for them.
+func estimatesCompletionTokens(endpoint string) bool {
+	return endpoint != EndpointOpenAIEmbeddings
 }
 
 func upstreamURL(t router.Target, endpoint string) string {

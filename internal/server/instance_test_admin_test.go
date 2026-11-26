@@ -290,8 +290,11 @@ func TestDataPlaneResponsesAndCountTokensEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read images/generations response: %v", err)
+	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"https://example.com/a.png"`) {
 		t.Fatalf("images/generations = %d %s", resp.StatusCode, body)
 	}
@@ -304,8 +307,11 @@ func TestDataPlaneResponsesAndCountTokensEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read embeddings response: %v", err)
+	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"embedding"`) {
 		t.Fatalf("embeddings = %d %s", resp.StatusCode, body)
 	}

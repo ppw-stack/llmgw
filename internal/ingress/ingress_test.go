@@ -3,6 +3,7 @@ package ingress
 import "testing"
 
 func TestNormalize(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"/anthropic/v1/messages":                 PathAnthropicMsgs,
 		"/anthropic/messages":                    PathAnthropicMsgs,
@@ -30,6 +31,7 @@ func TestNormalize(t *testing.T) {
 }
 
 func TestProtocolOf(t *testing.T) {
+	t.Parallel()
 	if p, ok := ProtocolOf(PathAnthropicMsgs); !ok || p != "anthropic" {
 		t.Fatalf("anthropic path -> %q %v", p, ok)
 	}

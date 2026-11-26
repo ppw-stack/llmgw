@@ -248,21 +248,25 @@ var sessionHeaderAliases = []string{
 // fingerprint of the conversation prefix, so every turn of one conversation
 // maps to the same value while different conversations diverge. A per-request
 // random value would satisfy the upstream check and destroy the cache.
-func sessionHeaderValue(r *http.Request, in Request, target router.Target) string {
+func sessionHeaderValue(r *http.Request, in Request, target router.Target) (string, error) {
 	if v := strings.TrimSpace(r.Header.Get(target.SessionHeader)); v != "" {
-		return v
+		return v, nil
 	}
 	for _, alias := range sessionHeaderAliases {
 		if v := strings.TrimSpace(r.Header.Get(alias)); v != "" {
 			sum := sha256.Sum256([]byte("header:" + alias + ":" + v))
-			return "ses_" + hex.EncodeToString(sum[:16])
+			return "ses_" + hex.EncodeToString(sum[:16]), nil
 		}
 	}
+	prefix, err := conversationPrefix(in.Meta.RawBody)
+	if err != nil {
+		return "", fmt.Errorf("derive upstream session header: %w", err)
+	}
 	seed := fmt.Sprintf("key:%d\nprefix:", in.APIKeyID)
-	return "ses_" + hex.EncodeToString(byteSeed(seed+conversationPrefix(in.Meta.RawBody)))
+	return "ses_" + hex.EncodeToString(byteSeed(seed+prefix)), nil
 }
 
-func conversationPrefix(body []byte) string {
+func conversationPrefix(body []byte) (string, error) {
 	return ingress.ConversationPrefix(body)
 }
 
@@ -383,7 +387,16 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			req.Header.Set("Authorization", "Bearer "+target.Key)
 		}
 		if target.SessionHeader != "" {
-			req.Header.Set(target.SessionHeader, sessionHeaderValue(r, in, target))
+			value, err := sessionHeaderValue(r, in, target)
+			if err != nil {
+				// The body was already validated before forwarding; this
+				// fallback keeps the required header non-empty while making
+				// the derivation failure visible in the logs.
+				f.log.Warn("derive upstream session header failed; falling back to a per-request value",
+					"request_id", in.RequestID, "instance", target.Instance, "err", err)
+				value = "ses_" + hex.EncodeToString(byteSeed("request:"+in.RequestID))
+			}
+			req.Header.Set(target.SessionHeader, value)
 		}
 		return f.client.Do(req)
 	}

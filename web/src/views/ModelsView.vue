@@ -102,6 +102,22 @@ function strategyHint(strategy: RoutingStrategy): string {
   return STRATEGY_OPTIONS.find((item) => item.value === strategy)?.hint ?? '';
 }
 
+/** 预览顺序是否等同于实际选主顺序；轮询与粘性要到请求时才确定主节点。 */
+function hasDeterministicPreviewOrder(strategy: RoutingStrategy): boolean {
+  return strategy === 'failover' || strategy === 'least_used';
+}
+
+/** 链路候选标签：非确定性策略下不再标「主/备」，避免误导流量去向。 */
+function candidateBadge(c: EffectiveCandidate, idx: number, strategy: RoutingStrategy): string {
+  if (c.quota_degraded) {
+    return '额度降级';
+  }
+  if (!hasDeterministicPreviewOrder(strategy)) {
+    return `候选${idx + 1}`;
+  }
+  return idx === 0 ? '主' : `备${idx}`;
+}
+
 /** 新增 / 编辑模型的表单状态。 */
 interface ModelForm {
   id: number | null;
@@ -715,16 +731,36 @@ onUnmounted(() => {
 
       <!-- 当前生效链路可视化 -->
       <div v-if="m.effective_candidates?.length" class="stack" style="gap: 6px">
-        <span class="muted small">当前生效链路</span>
+        <span class="muted small">
+          当前生效链路
+          <template v-if="!hasDeterministicPreviewOrder(m.strategy)">
+            （按优先级展示，主节点由策略在请求时决定）
+          </template>
+        </span>
         <div class="route-flow">
           <template
             v-for="(c, idx) in activeCandidates(m)"
             :key="`active-${c.instance}-${c.upstream}`"
           >
             <span v-if="idx > 0" class="route-arrow" aria-hidden="true">→</span>
-            <div class="route-node" :class="{ 'primary-node': idx === 0 && !c.quota_degraded }">
-              <span class="badge" :class="c.quota_degraded ? 'danger' : idx === 0 ? 'ok' : 'off'">
-                {{ c.quota_degraded ? '额度降级' : idx === 0 ? '主' : `备${idx}` }}
+            <div
+              class="route-node"
+              :class="{
+                'primary-node':
+                  idx === 0 && !c.quota_degraded && hasDeterministicPreviewOrder(m.strategy),
+              }"
+            >
+              <span
+                class="badge"
+                :class="
+                  c.quota_degraded
+                    ? 'danger'
+                    : idx === 0 && hasDeterministicPreviewOrder(m.strategy)
+                      ? 'ok'
+                      : 'off'
+                "
+              >
+                {{ candidateBadge(c, idx, m.strategy) }}
               </span>
               <span class="mono">{{ c.instance }}</span>
               <span class="muted">/</span>

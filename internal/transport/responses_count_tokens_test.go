@@ -3,7 +3,6 @@ package transport
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -159,9 +158,18 @@ func TestConversationPrefixResponsesInput(t *testing.T) {
 	turn2 := []byte(`{"model":"m","instructions":"you are helpful","input":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"next"}]}`)
 	other := []byte(`{"model":"m","instructions":"you are helpful","input":[{"role":"user","content":"different"}]}`)
 
-	p1 := conversationPrefix(turn1)
-	p2 := conversationPrefix(turn2)
-	p3 := conversationPrefix(other)
+	p1, err := conversationPrefix(turn1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := conversationPrefix(turn2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p3, err := conversationPrefix(other)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if p1 == "" || p1 != p2 {
 		t.Fatalf("same conversation across turns should keep same prefix: %q vs %q", p1, p2)
 	}
@@ -242,5 +250,4 @@ func TestAnthropicCountTokensSkipsTokenEstimation(t *testing.T) {
 	if got.PromptTokens != 0 || got.CompletionTokens != 0 || got.UsageEstimated {
 		t.Fatalf("count_tokens should log zero tokens without estimation: %+v", got)
 	}
-	_ = fmt.Sprint(got)
 }

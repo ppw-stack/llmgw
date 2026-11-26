@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +11,32 @@ import (
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/store"
 )
+
+// validateKeyLimits rejects negative per-key rate or concurrency limits.
+func validateKeyLimits(rpm, maxConcurrent *int) error {
+	if rpm != nil && *rpm < 0 {
+		return fmt.Errorf("rpm_limit must be non-negative")
+	}
+	if maxConcurrent != nil && *maxConcurrent < 0 {
+		return fmt.Errorf("max_concurrent must be non-negative")
+	}
+	return nil
+}
+
+// parseExpiresAt parses an optional RFC3339 expiration timestamp. An empty
+// string clears the value.
+func parseExpiresAt(raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, fmt.Errorf("expires_at must be an RFC3339 timestamp: %w", err)
+	}
+	u := parsed.UTC()
+	return &u, nil
+}
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -105,19 +132,14 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 			writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
-		if in.RPMLimit < 0 || in.MaxConcurrent < 0 {
-			writeAdminError(w, http.StatusBadRequest, "rpm_limit and max_concurrent must be non-negative")
+		if err := validateKeyLimits(&in.RPMLimit, &in.MaxConcurrent); err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		var expiresAt *time.Time
-		if raw := strings.TrimSpace(in.ExpiresAt); raw != "" {
-			parsed, err := time.Parse(time.RFC3339, raw)
-			if err != nil {
-				writeAdminError(w, http.StatusBadRequest, "expires_at must be an RFC3339 timestamp")
-				return
-			}
-			u := parsed.UTC()
-			expiresAt = &u
+		expiresAt, err := parseExpiresAt(in.ExpiresAt)
+		if err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		if strings.TrimSpace(in.Name) == "" {
 			in.Name = "default"
@@ -200,25 +222,18 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, id *adminI
 			}
 			patch.Name = &trimmed
 		}
-		if in.RPMLimit != nil && *in.RPMLimit < 0 {
-			writeAdminError(w, http.StatusBadRequest, "rpm_limit must be non-negative")
-			return
-		}
-		if in.MaxConcurrent != nil && *in.MaxConcurrent < 0 {
-			writeAdminError(w, http.StatusBadRequest, "max_concurrent must be non-negative")
+		if err := validateKeyLimits(in.RPMLimit, in.MaxConcurrent); err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if in.ExpiresAt != nil {
 			patch.SetExpiresAt = true
-			if raw := strings.TrimSpace(*in.ExpiresAt); raw != "" {
-				parsed, err := time.Parse(time.RFC3339, raw)
-				if err != nil {
-					writeAdminError(w, http.StatusBadRequest, "expires_at must be an RFC3339 timestamp")
-					return
-				}
-				u := parsed.UTC()
-				patch.ExpiresAt = &u
+			expiresAt, err := parseExpiresAt(*in.ExpiresAt)
+			if err != nil {
+				writeAdminError(w, http.StatusBadRequest, err.Error())
+				return
 			}
+			patch.ExpiresAt = expiresAt
 		}
 		updated, err := s.store.UpdateKey(keyID, patch)
 		if err != nil {

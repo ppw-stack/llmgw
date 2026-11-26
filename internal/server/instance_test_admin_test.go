@@ -77,10 +77,11 @@ func TestSavedInstanceConnectivityTest(t *testing.T) {
 		t.Fatalf("anthropic endpoint = %+v", out.Endpoints[1])
 	}
 
-	// Test draft reusing stored key via instance_id.
+	// Test draft reusing stored key via instance_id. Caller-supplied endpoints
+	// must be ignored: the stored key may only be sent to the saved targets.
 	draftBody := `{"instance_id":` + itoa(created.ID) + `,
 		"allow_private_upstream":true,
-		"endpoints":[{"protocol":"openai","base_url":"` + upstream.URL + `"}]}`
+		"endpoints":[{"protocol":"openai","base_url":"http://127.0.0.1:1/attacker"}]}`
 	resp = adminRequest(t, http.MethodPost, gw.URL+"/admin/api/instances/test", draftBody)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -93,8 +94,13 @@ func TestSavedInstanceConnectivityTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if !out.OK || len(out.Endpoints) != 1 || out.Endpoints[0].Status != "ok" {
-		t.Fatalf("unexpected draft result: %+v", out)
+	if !out.OK || len(out.Endpoints) != 2 {
+		t.Fatalf("draft must probe the stored endpoints, got %+v", out)
+	}
+	for _, ep := range out.Endpoints {
+		if ep.BaseURL != upstream.URL {
+			t.Fatalf("draft probed caller-supplied endpoint %q instead of %q", ep.BaseURL, upstream.URL)
+		}
 	}
 
 	// Test draft with wrong key -> auth_error.

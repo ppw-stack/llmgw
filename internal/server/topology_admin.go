@@ -454,7 +454,11 @@ func (s *Server) adminResetInstanceBreaker(w http.ResponseWriter, r *http.Reques
 	}
 	rec, err := s.findInstanceRecord(instanceID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		// Internal storage details stay in the server log; the client only
+		// gets a generic failure message.
+		s.log.Error("find instance for breaker reset",
+			"request_id", requestID(r), "instance_id", instanceID, "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if rec == nil {

@@ -132,6 +132,7 @@ func (s *Server) adminTestInstanceDraft(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var apiKey string
+	usingStoredKey := false
 	if in.APIKey != nil && strings.TrimSpace(*in.APIKey) != "" {
 		apiKey = strings.TrimSpace(*in.APIKey)
 	} else if existing != nil {
@@ -143,10 +144,20 @@ func (s *Server) adminTestInstanceDraft(w http.ResponseWriter, r *http.Request) 
 			writeAdminError(w, http.StatusInternalServerError, "cannot decrypt stored API key")
 			return
 		}
+		usingStoredKey = strings.TrimSpace(apiKey) != ""
 	}
 
 	var rawProxy string
-	if in.ProxyURL != nil {
+	if usingStoredKey {
+		var err error
+		rawProxy, err = s.decryptOptional(existing.EncryptedProxyURL)
+		if err != nil {
+			s.log.Error("decrypt proxy url for draft connectivity test",
+				"request_id", requestID(r), "instance", existing.Name, "err", err)
+			writeAdminError(w, http.StatusInternalServerError, "cannot decrypt stored proxy url")
+			return
+		}
+	} else if in.ProxyURL != nil {
 		rawProxy = strings.TrimSpace(*in.ProxyURL)
 	} else if existing != nil {
 		var err error
@@ -171,13 +182,22 @@ func (s *Server) adminTestInstanceDraft(w http.ResponseWriter, r *http.Request) 
 			BaseURL:  strings.TrimRight(strings.TrimSpace(ep.BaseURL), "/"),
 		})
 	}
-	endpoints, err := resolveTestEndpoints(presetID, rawEndpoints, in.AllowPrivateUpstream)
+	allowPrivate := in.AllowPrivateUpstream
+	if usingStoredKey {
+		// Reusing a stored key must not let the caller pick where that
+		// credential is sent: always probe the endpoints and proxy saved on
+		// the instance instead of the caller-supplied ones.
+		presetID = existing.Preset
+		rawEndpoints = existing.Endpoints
+		allowPrivate = existing.AllowPrivateUpstream
+	}
+	endpoints, err := resolveTestEndpoints(presetID, rawEndpoints, allowPrivate)
 	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	resp := s.runInstanceConnectivityTest(r.Context(), endpoints, apiKey, proxyURL, in.AllowPrivateUpstream)
+	resp := s.runInstanceConnectivityTest(r.Context(), endpoints, apiKey, proxyURL, allowPrivate)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -212,7 +232,7 @@ func parseOptionalProxyURL(owner, raw string) (*url.URL, error) {
 	}
 	parsed, err := url.Parse(normalized)
 	if err != nil {
-		return nil, fmt.Errorf("%s: invalid proxy_url", owner)
+		return nil, fmt.Errorf("%s: invalid proxy_url: %w", owner, err)
 	}
 	return parsed, nil
 }
@@ -397,7 +417,12 @@ func probeEndpoint(
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, instanceTestMaxResponseBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, instanceTestMaxResponseBytes))
+	if err != nil {
+		res.Status = "error"
+		res.Message = netproxy.SanitizeError(err, proxyURL)
+		return res
+	}
 	res.HTTPStatus = resp.StatusCode
 
 	switch {

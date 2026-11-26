@@ -22,17 +22,20 @@ var sessionHeaderCandidates = []string{
 // Client-supplied session headers take precedence; otherwise the gateway
 // fingerprints the gateway key ID together with the conversation prefix so
 // multi-turn requests land on the same upstream account.
-func SessionKey(h http.Header, apiKeyID int64, body []byte) string {
+func SessionKey(h http.Header, apiKeyID int64, body []byte) (string, error) {
 	for _, name := range sessionHeaderCandidates {
 		if v := strings.TrimSpace(h.Get(name)); v != "" {
-			return "hdr:" + name + ":" + v
+			return "hdr:" + name + ":" + v, nil
 		}
 	}
-	prefix := ConversationPrefix(body)
-	if prefix == "" {
-		return ""
+	prefix, err := ConversationPrefix(body)
+	if err != nil {
+		return "", fmt.Errorf("derive session key from conversation prefix: %w", err)
 	}
-	return fmt.Sprintf("key:%d:prefix:%s", apiKeyID, prefix)
+	if prefix == "" {
+		return "", nil
+	}
+	return fmt.Sprintf("key:%d:prefix:%s", apiKeyID, prefix), nil
 }
 
 // ConversationPrefix fingerprints the part of a request that identifies a
@@ -41,7 +44,7 @@ func SessionKey(h http.Header, apiKeyID int64, body []byte) string {
 // conversation starts from a different prefix. Supports Chat Completions /
 // Anthropic Messages (`system` + `messages`) and OpenAI Responses API
 // (`instructions` + `input`).
-func ConversationPrefix(body []byte) string {
+func ConversationPrefix(body []byte) (string, error) {
 	var payload struct {
 		System       json.RawMessage `json:"system"`
 		Instructions json.RawMessage `json:"instructions"`
@@ -52,10 +55,10 @@ func ConversationPrefix(body []byte) string {
 		Input json.RawMessage `json:"input"`
 	}
 	if len(body) == 0 {
-		return ""
+		return "", nil
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
+		return "", fmt.Errorf("parse conversation prefix: %w", err)
 	}
 	h := sha256.New()
 	wrote := false
@@ -101,12 +104,13 @@ func ConversationPrefix(body []byte) string {
 				}
 			}
 		} else {
+			// Responses API also accepts a plain string input; hash it raw.
 			h.Write(payload.Input)
 			wrote = true
 		}
 	}
 	if !wrote {
-		return ""
+		return "", nil
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

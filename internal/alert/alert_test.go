@@ -49,3 +49,13 @@ func TestNotifierDeliversAndDeduplicates(t *testing.T) {
 		t.Fatalf("unexpected second event: %+v", received[1])
 	}
 }
+
+// TestNotifierEmitAfterCloseDoesNotPanic guards the close/Emit race: sending
+// on a closed channel would crash the gateway during shutdown.
+func TestNotifierEmitAfterCloseDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	n := New("http://127.0.0.1:1", time.Minute, logger)
+	n.Close()
+	n.Emit(Event{Type: EventBreakerOpen, Instance: "a", Title: "breaker", Message: "late"})
+}

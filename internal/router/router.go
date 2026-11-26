@@ -323,6 +323,9 @@ func (r *Router) ResolveAtWithOptions(protocol, model string, now time.Time, opt
 
 // PreviewModel returns the candidates of one model with their current routing
 // state, including live quota degradation from the attached QuotaProvider.
+//
+// The order is display-only: round_robin and sticky select their primary at
+// request time, so the first preview entry is not necessarily the next target.
 func (r *Router) PreviewModel(model string, now time.Time) []Preview {
 	snap := r.snap.Load()
 	if snap == nil {

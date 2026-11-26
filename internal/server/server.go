@@ -485,9 +485,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol, en
 		return
 	}
 
-	targets, err := s.router.ResolveWithOptions(protocol, meta.Model, router.ResolveOptions{
-		SessionKey: ingress.SessionKey(r.Header, key.ID, body),
-	})
+	opts := router.ResolveOptions{}
+	if snap := s.router.Snapshot(); snap != nil && snap.Strategies[meta.Model] == config.StrategySticky {
+		sessionKey, err := ingress.SessionKey(r.Header, key.ID, body)
+		if err != nil {
+			// The body was already validated; a fingerprint failure only
+			// costs session affinity, so route without it instead of failing
+			// an otherwise valid request.
+			s.log.Warn("derive sticky session key failed; routing without session affinity",
+				"request_id", requestID(r), "model", meta.Model, "err", err)
+		} else {
+			opts.SessionKey = sessionKey
+		}
+	}
+	targets, err := s.router.ResolveWithOptions(protocol, meta.Model, opts)
 	if err != nil {
 		var nf *router.ModelNotFoundError
 		if errors.As(err, &nf) && nf.Hint != "" {

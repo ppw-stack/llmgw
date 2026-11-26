@@ -233,6 +233,13 @@ type Preview struct {
 
 // PreviewModel returns the candidates of one model with their current
 // routing state without quota awareness.
+//
+// The returned order is a static failover order (active state, quota
+// degradation, effective priority, then configured priority). Strategy-driven
+// choices that depend on per-request state (round_robin rotation, sticky
+// session hashing) are not applied here, so callers must not present the first
+// entry as the node that will actually serve the next request when such a
+// strategy is configured.
 func (s *Snapshot) PreviewModel(model string, now time.Time) []Preview {
 	return s.previewModelWithQuota(model, now, nil)
 }

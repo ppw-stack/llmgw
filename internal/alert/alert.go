@@ -17,11 +17,14 @@ import (
 )
 
 const (
-	EventBreakerOpen       = "breaker_open"
+	// EventBreakerOpen fires when an upstream circuit breaker trips.
+	EventBreakerOpen = "breaker_open"
+	// EventUpstreamAuthError fires when an upstream rejects the configured credentials.
 	EventUpstreamAuthError = "upstream_auth_error"
 )
 
 const (
+	// DefaultCooldown is the deduplication window used when none is configured.
 	DefaultCooldown = 5 * time.Minute
 	queueCapacity   = 64
 	sendTimeout     = 5 * time.Second
@@ -39,6 +42,10 @@ type Event struct {
 	Message   string `json:"message"`
 	Text      string `json:"text"`
 	Timestamp string `json:"timestamp"`
+
+	// dedupAt records when the event was accepted for delivery so a failed
+	// delivery can release exactly its own cooldown reservation.
+	dedupAt time.Time
 }
 
 // Notifier deduplicates and asynchronously sends alert events to a webhook.
@@ -51,6 +58,7 @@ type Notifier struct {
 	cooldown time.Duration
 	lastSent map[string]time.Time
 	now      func() time.Time
+	closed   bool
 
 	ch   chan Event
 	done chan struct{}
@@ -99,15 +107,15 @@ func (n *Notifier) SetWebhook(webhookURL string, cooldown time.Duration) {
 	n.mu.Unlock()
 }
 
-// Emit enqueues an event unless the webhook is disabled or the same
-// (type, instance) key was already sent within the cooldown window.
+// Emit enqueues an event unless the webhook is disabled, the notifier is
+// closing, or the same (type, instance) key was already accepted within the
+// cooldown window.
 func (n *Notifier) Emit(ev Event) {
 	if n == nil {
 		return
 	}
 	n.mu.Lock()
-	url := n.webhook
-	if url == "" {
+	if n.closed || n.webhook == "" {
 		n.mu.Unlock()
 		return
 	}
@@ -117,8 +125,6 @@ func (n *Notifier) Emit(ev Event) {
 		n.mu.Unlock()
 		return
 	}
-	n.lastSent[key] = now
-	n.mu.Unlock()
 
 	if ev.Timestamp == "" {
 		ev.Timestamp = now.UTC().Format(time.RFC3339)
@@ -126,10 +132,17 @@ func (n *Notifier) Emit(ev Event) {
 	if ev.Text == "" {
 		ev.Text = "[" + ev.Title + "] " + ev.Message
 	}
+	ev.dedupAt = now
 
+	// Send while holding mu so Close cannot close the channel between the
+	// closed check and the send. The send is non-blocking, so it never waits
+	// on the delivery worker.
 	select {
 	case n.ch <- ev:
+		n.lastSent[key] = now
+		n.mu.Unlock()
 	default:
+		n.mu.Unlock()
 		n.log.Warn("alert webhook queue full; dropping event", "type", ev.Type, "instance", ev.Instance)
 	}
 }
@@ -140,7 +153,10 @@ func (n *Notifier) Close() {
 		return
 	}
 	n.once.Do(func() {
+		n.mu.Lock()
+		n.closed = true
 		close(n.ch)
+		n.mu.Unlock()
 		<-n.done
 	})
 }
@@ -152,21 +168,36 @@ func (n *Notifier) loop() {
 	}
 }
 
+// releaseCooldown drops an event's deduplication reservation after it could
+// not be delivered, so the next alert is not silently suppressed.
+func (n *Notifier) releaseCooldown(ev Event) {
+	key := ev.Type + ":" + ev.Instance
+	n.mu.Lock()
+	if prev, ok := n.lastSent[key]; ok && prev.Equal(ev.dedupAt) {
+		delete(n.lastSent, key)
+	}
+	n.mu.Unlock()
+}
+
 func (n *Notifier) deliver(ev Event) {
 	n.mu.Lock()
 	target := n.webhook
 	n.mu.Unlock()
 	if target == "" {
+		n.releaseCooldown(ev)
 		return
 	}
 	body, err := json.Marshal(ev)
 	if err != nil {
+		n.releaseCooldown(ev)
+		n.log.Warn("marshal alert webhook payload failed", "type", ev.Type, "instance", ev.Instance, "err", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
+		n.releaseCooldown(ev)
 		n.log.Warn("build alert webhook request failed", "err", err)
 		return
 	}
@@ -174,11 +205,13 @@ func (n *Notifier) deliver(ev Event) {
 	req.Header.Set("User-Agent", "llmgw-alert/1.0")
 	resp, err := n.client.Do(req)
 	if err != nil {
+		n.releaseCooldown(ev)
 		n.log.Warn("deliver alert webhook failed", "type", ev.Type, "instance", ev.Instance, "err", err)
 		return
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		n.releaseCooldown(ev)
 		n.log.Warn("alert webhook returned non-2xx", "type", ev.Type, "instance", ev.Instance, "status", resp.StatusCode)
 	}
 }

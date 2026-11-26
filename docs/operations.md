@@ -262,6 +262,8 @@ GROUP BY model, ingress_protocol;
 - 回滚：保留上一个二进制与 `config.yaml`。
 - **自动迁移**：新版本打开旧库时会执行 `ALTER TABLE ... ADD COLUMN`（如 `model_instances.windows_json`，`TEXT NOT NULL DEFAULT '[]'`；以及 `instances.allow_private`，`INTEGER NOT NULL DEFAULT 0`）。
   SQLite 加列只改表结构、不重写行数据，持锁时间与表规模无关（毫秒级），大库也不会长时间阻塞写请求；但升级前仍建议先 `.backup` 留一份快照。
+  本版本还会一次性为 `api_keys` 补齐治理列：`rpm_limit` / `max_concurrent`（`INTEGER NOT NULL DEFAULT 0`）、`allowed_models_json`（`TEXT NOT NULL DEFAULT '[]'`）以及可空的 `expires_at`（NULL 表示永不过期）。存量 Key 因此沿用“不限流、不限模型、不过期”的旧行为；`expires_at` 保持可空是为了区分“从未设置”和“设置后清除”，其余列使用常量默认值避免启动时回填大表。
+  所有 `SELECT` 都显式列出列名，旧二进制可以打开迁移后的库继续读写原有字段；要彻底回退，停机后用升级前的快照覆盖 `data/llmgw.db`（并保留 `master.key`），再换回旧二进制即可。
   迁移失败时网关启动即报错退出，不会带病运行。
 - **迁移后的回退路径**：旧二进制不认识新列，但 SQLite 会忽略未使用的列，旧版本可以直接打开迁移后的库继续工作（只是不再使用窗口数据）。
   要彻底还原，用升级前的快照覆盖 `data/llmgw.db`（并保留 `master.key`），再换回旧二进制即可。

@@ -1119,18 +1119,20 @@ type KeyRecord struct {
 	Key  APIKey
 }
 
-func parseAllowedModelsJSON(raw string) []string {
+func parseAllowedModelsJSON(raw string) ([]string, error) {
 	var out []string
 	if raw != "" {
-		_ = json.Unmarshal([]byte(raw), &out)
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			return nil, fmt.Errorf("parse allowed_models_json: %w", err)
+		}
 	}
 	if out == nil {
-		return []string{}
+		return []string{}, nil
 	}
-	return out
+	return out, nil
 }
 
-func encodeAllowedModelsJSON(models []string) string {
+func normalizeAllowedModels(models []string) []string {
 	cleaned := make([]string, 0, len(models))
 	seen := make(map[string]bool, len(models))
 	for _, m := range models {
@@ -1141,7 +1143,11 @@ func encodeAllowedModelsJSON(models []string) string {
 		seen[m] = true
 		cleaned = append(cleaned, m)
 	}
-	b, _ := json.Marshal(cleaned)
+	return cleaned
+}
+
+func encodeAllowedModelsJSON(models []string) string {
+	b, _ := json.Marshal(normalizeAllowedModels(models))
 	return string(b)
 }
 
@@ -1177,7 +1183,11 @@ func (s *Store) KeyRecords() ([]KeyRecord, error) {
 				rec.Key.ExpiresAt = &t
 			}
 		}
-		rec.Key.AllowedModels = parseAllowedModelsJSON(allowedJSON)
+		allowedModels, err := parseAllowedModelsJSON(allowedJSON)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", rec.Key.ID, err)
+		}
+		rec.Key.AllowedModels = allowedModels
 		out = append(out, rec)
 	}
 	return out, rows.Err()
@@ -1187,6 +1197,8 @@ func (s *Store) CreateKey(name, hash, prefix, encrypted string) (*APIKey, error)
 	return s.CreateKeyWithPolicy(name, hash, prefix, encrypted, KeyPolicy{})
 }
 
+// CreateKeyWithPolicy creates a gateway key with optional RPM, concurrency,
+// expiration, and model allowlist limits.
 func (s *Store) CreateKeyWithPolicy(name, hash, prefix, encrypted string, policy KeyPolicy) (*APIKey, error) {
 	now := time.Now().UTC()
 	var expiresArg any
@@ -1196,7 +1208,8 @@ func (s *Store) CreateKeyWithPolicy(name, hash, prefix, encrypted string, policy
 		expiresArg = t.Format(time.RFC3339Nano)
 		expiresOut = &t
 	}
-	allowedJSON := encodeAllowedModelsJSON(policy.AllowedModels)
+	allowedModels := normalizeAllowedModels(policy.AllowedModels)
+	allowedJSON := encodeAllowedModelsJSON(allowedModels)
 	res, err := s.db.Exec(
 		`INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, key_enc, rpm_limit, max_concurrent, expires_at, allowed_models_json)
 		 VALUES(?,?,?,1,?,?,?,?,?,?)`,
@@ -1215,7 +1228,7 @@ func (s *Store) CreateKeyWithPolicy(name, hash, prefix, encrypted string, policy
 		RPMLimit:      policy.RPMLimit,
 		MaxConcurrent: policy.MaxConcurrent,
 		ExpiresAt:     expiresOut,
-		AllowedModels: parseAllowedModelsJSON(allowedJSON),
+		AllowedModels: allowedModels,
 	}, nil
 }
 
@@ -1251,13 +1264,62 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 				k.ExpiresAt = &t
 			}
 		}
-		k.AllowedModels = parseAllowedModelsJSON(allowedJSON)
+		allowedModels, err := parseAllowedModelsJSON(allowedJSON)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", k.ID, err)
+		}
+		k.AllowedModels = allowedModels
 		out = append(out, k)
 	}
 	return out, rows.Err()
 }
 
+// UpdateKey applies only the fields present in the patch, then returns the
+// freshly read key. Updating only changed columns avoids overwriting
+// concurrent PATCH changes to other fields.
 func (s *Store) UpdateKey(id int64, patch KeyPatch) (*APIKey, error) {
+	setClauses := make([]string, 0, 6)
+	args := make([]any, 0, 7)
+	if patch.Name != nil {
+		setClauses = append(setClauses, "name=?")
+		args = append(args, *patch.Name)
+	}
+	if patch.Enabled != nil {
+		setClauses = append(setClauses, "enabled=?")
+		args = append(args, boolInt(*patch.Enabled))
+	}
+	if patch.RPMLimit != nil {
+		setClauses = append(setClauses, "rpm_limit=?")
+		args = append(args, *patch.RPMLimit)
+	}
+	if patch.MaxConcurrent != nil {
+		setClauses = append(setClauses, "max_concurrent=?")
+		args = append(args, *patch.MaxConcurrent)
+	}
+	if patch.SetExpiresAt {
+		setClauses = append(setClauses, "expires_at=?")
+		var expiresArg any
+		if patch.ExpiresAt != nil {
+			expiresArg = patch.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		args = append(args, expiresArg)
+	}
+	if patch.AllowedModels != nil {
+		setClauses = append(setClauses, "allowed_models_json=?")
+		args = append(args, encodeAllowedModelsJSON(*patch.AllowedModels))
+	}
+	if len(setClauses) > 0 {
+		args = append(args, id)
+		if _, err := s.db.Exec(
+			`UPDATE api_keys SET `+strings.Join(setClauses, ", ")+` WHERE id=?`, args...); err != nil {
+			return nil, err
+		}
+	}
+	return s.keyByID(id)
+}
+
+// keyByID reads one gateway key row with its full policy state.
+func (s *Store) keyByID(id int64) (*APIKey, error) {
 	var k APIKey
 	var enabled int
 	var created string
@@ -1287,42 +1349,11 @@ func (s *Store) UpdateKey(id int64, patch KeyPatch) (*APIKey, error) {
 			k.ExpiresAt = &t
 		}
 	}
-	k.AllowedModels = parseAllowedModelsJSON(allowedJSON)
-
-	if patch.Name != nil {
-		k.Name = *patch.Name
+	allowedModels, err := parseAllowedModelsJSON(allowedJSON)
+	if err != nil {
+		return nil, fmt.Errorf("key %d: %w", id, err)
 	}
-	if patch.Enabled != nil {
-		k.Enabled = *patch.Enabled
-	}
-	if patch.RPMLimit != nil {
-		k.RPMLimit = *patch.RPMLimit
-	}
-	if patch.MaxConcurrent != nil {
-		k.MaxConcurrent = *patch.MaxConcurrent
-	}
-	if patch.SetExpiresAt {
-		if patch.ExpiresAt != nil {
-			t := patch.ExpiresAt.UTC()
-			k.ExpiresAt = &t
-		} else {
-			k.ExpiresAt = nil
-		}
-	}
-	if patch.AllowedModels != nil {
-		k.AllowedModels = parseAllowedModelsJSON(encodeAllowedModelsJSON(*patch.AllowedModels))
-	}
-
-	var expiresArg any
-	if k.ExpiresAt != nil {
-		expiresArg = k.ExpiresAt.UTC().Format(time.RFC3339Nano)
-	}
-	if _, err := s.db.Exec(
-		`UPDATE api_keys SET name=?, enabled=?, rpm_limit=?, max_concurrent=?, expires_at=?, allowed_models_json=? WHERE id=?`,
-		k.Name, boolInt(k.Enabled), k.RPMLimit, k.MaxConcurrent, expiresArg,
-		encodeAllowedModelsJSON(k.AllowedModels), id); err != nil {
-		return nil, err
-	}
+	k.AllowedModels = allowedModels
 	return &k, nil
 }
 

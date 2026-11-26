@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pw/llmgw/internal/alert"
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/clientip"
 	"github.com/pw/llmgw/internal/config"
@@ -51,6 +52,8 @@ type Options struct {
 	// Quota asks the built-in providers about their subscription quota.
 	// Tests replace it to point at a local server.
 	Quota *quota.Service
+	// Alert dispatches optional asynchronous webhook notifications.
+	Alert *alert.Notifier
 }
 
 type Server struct {
@@ -80,6 +83,7 @@ type Server struct {
 	keyLimiter   *keyLimiter
 	loginSem     chan struct{}
 	quota        *quota.Service
+	alert        *alert.Notifier
 }
 
 func New(o Options) (*Server, error) {
@@ -128,11 +132,15 @@ func New(o Options) (*Server, error) {
 		keyLimiter:     newKeyLimiter(o.KeyRPM, o.KeyMaxConcurrent),
 		loginSem:       make(chan struct{}, 4),
 		quota:          quotaService,
+		alert:          o.Alert,
 	}
 	s.SetMetricsToken(o.MetricsToken)
 	// A nil AdminEnabled means the management surface stays open.
 	s.adminEnabled.Store(o.AdminEnabled == nil || *o.AdminEnabled)
 	s.SetAdminPrefixes(o.AdminPrefixes)
+	if s.router != nil {
+		s.router.SetQuotaProvider(s.quota)
+	}
 	return s, nil
 }
 
@@ -170,6 +178,13 @@ func (s *Server) SetKeyLimits(rpm, maxConcurrent int) {
 	s.keyLimiter.setLimits(rpm, maxConcurrent)
 }
 
+// SetAlertWebhook updates the alert webhook URL and cooldown at runtime.
+func (s *Server) SetAlertWebhook(webhookURL string, cooldown time.Duration) {
+	if s.alert != nil {
+		s.alert.SetWebhook(webhookURL, cooldown)
+	}
+}
+
 // SetMetricsToken swaps the token that guards the /metrics endpoint. An
 // empty token disables the endpoint.
 //
@@ -196,10 +211,16 @@ func (s *Server) adminSurfaceOpen() bool {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/openai/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		s.handleChat(w, r, config.ProtocolOpenAI)
+		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointDefault)
+	})
+	mux.HandleFunc("/openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointOpenAIResponses)
 	})
 	mux.HandleFunc("/anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.handleChat(w, r, config.ProtocolAnthropic)
+		s.handleChat(w, r, config.ProtocolAnthropic, transport.EndpointDefault)
+	})
+	mux.HandleFunc("/anthropic/v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) {
+		s.handleChat(w, r, config.ProtocolAnthropic, transport.EndpointAnthropicCountTokens)
 	})
 	mux.HandleFunc("/openai/v1/models", s.handleModels)
 	mux.HandleFunc("/anthropic/v1/models", s.handleAnthropicModels)
@@ -398,8 +419,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 <p>Web 控制台未构建。运行 <code>make web</code> 后重新编译。</p>
 <ul>
   <li><code>POST /openai/v1/chat/completions</code></li>
+  <li><code>POST /openai/v1/responses</code></li>
   <li><code>GET  /openai/v1/models</code></li>
   <li><code>POST /anthropic/v1/messages</code></li>
+  <li><code>POST /anthropic/v1/messages/count_tokens</code></li>
+  <li><code>GET  /anthropic/v1/models</code></li>
   <li><code>GET  /admin/api/keys</code>（需 admin_token）</li>
 `+metricsLine+`</ul>
 </body></html>`)
@@ -416,7 +440,7 @@ func isDataPlanePath(path string) bool {
 	return false
 }
 
-func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol string) {
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol, endpoint string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		ingress.WriteError(w, protocol, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
@@ -452,7 +476,29 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 		return
 	}
 
-	targets, err := s.router.Resolve(protocol, meta.Model)
+	if endpoint == transport.EndpointAnthropicCountTokens {
+		meta.Stream = false
+	}
+	if !key.AllowsModel(meta.Model) {
+		ingress.WriteError(w, protocol, http.StatusForbidden, "permission_error",
+			"gateway key is not allowed to access model "+meta.Model)
+		return
+	}
+
+	opts := router.ResolveOptions{}
+	if snap := s.router.Snapshot(); snap != nil && snap.Strategies[meta.Model] == config.StrategySticky {
+		sessionKey, err := ingress.SessionKey(r.Header, key.ID, body)
+		if err != nil {
+			// The body was already validated; a fingerprint failure only
+			// costs session affinity, so route without it instead of failing
+			// an otherwise valid request.
+			s.log.Warn("derive sticky session key failed; routing without session affinity",
+				"request_id", requestID(r), "model", meta.Model, "err", err)
+		} else {
+			opts.SessionKey = sessionKey
+		}
+	}
+	targets, err := s.router.ResolveWithOptions(protocol, meta.Model, opts)
 	if err != nil {
 		var nf *router.ModelNotFoundError
 		if errors.As(err, &nf) && nf.Hint != "" {
@@ -477,6 +523,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 
 	s.forwarder.Forward(w, r, transport.Request{
 		Protocol:  protocol,
+		Endpoint:  endpoint,
 		Meta:      meta,
 		Targets:   targets,
 		APIKeyID:  key.ID,
@@ -517,6 +564,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		Data   []model `json:"data"`
 	}{Object: "list", Data: []model{}}
 	for _, info := range s.router.ModelInfos(config.ProtocolOpenAI) {
+		if !key.AllowsModel(info.Name) {
+			continue
+		}
 		out.Data = append(out.Data, model{
 			ID:              info.Name,
 			Object:          "model",
@@ -568,6 +618,9 @@ func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
 		LastID  string  `json:"last_id,omitempty"`
 	}{Data: []model{}}
 	for _, info := range s.router.ModelInfos(config.ProtocolAnthropic) {
+		if !key.AllowsModel(info.Name) {
+			continue
+		}
 		display := info.Metadata.DisplayName
 		if display == "" {
 			display = info.Name
@@ -610,12 +663,16 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, protocol s
 		ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "gateway key is disabled")
 		return nil, false
 	}
+	if k.IsExpired(time.Now()) {
+		ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "gateway key has expired")
+		return nil, false
+	}
 	return &k, true
 }
 
 // reserveKey applies the per-key budget before any expensive work happens.
 func (s *Server) reserveKey(w http.ResponseWriter, r *http.Request, key *store.APIKey, protocol string) (func(), bool) {
-	release, ok, retry := s.keyLimiter.acquire(key.ID)
+	release, ok, retry := s.keyLimiter.acquireWithLimits(key.ID, key.RPMLimit, key.MaxConcurrent)
 	if !ok {
 		if retry > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))

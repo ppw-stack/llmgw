@@ -78,13 +78,15 @@ web/                       Vue 3 + Vite 控制台源码
 ### 4.2 鉴权头处理
 
 ```go
-for _, h := range []string{"Authorization", "X-Api-Key", "Anthropic-Version", "Anthropic-Beta"} {
+for _, h := range []string{"Authorization", "X-Api-Key", "Anthropic-Version"} {
     req.Header.Del(h)
 }
 req.Header.Set("Authorization", "Bearer "+key)        // OpenAI
 req.Header.Set("x-api-key", key)                      // Anthropic
 req.Header.Set("anthropic-version", "2023-06-01")     // Anthropic 固定版本
 ```
+
+客户端传入的 `Anthropic-Beta` 与供应商会话头（如 `x-opencode-session`）会原样透传给上游。
 
 ### 4.3 SSE 透传
 

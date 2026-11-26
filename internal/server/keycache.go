@@ -45,6 +45,17 @@ func (c *keyCache) put(hash string, k store.APIKey) {
 	c.byID[k.ID] = hash
 }
 
+func (c *keyCache) update(k store.APIKey) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	hash, ok := c.byID[k.ID]
+	if !ok {
+		return false
+	}
+	c.byHash[hash] = k
+	return true
+}
+
 func (c *keyCache) setEnabled(id int64, enabled bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

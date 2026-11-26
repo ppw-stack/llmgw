@@ -57,6 +57,7 @@ type Config struct {
 	Database  Database   `yaml:"database"`
 	Log       Log        `yaml:"log"`
 	Schedule  Schedule   `yaml:"schedule"`
+	Alerts    Alerts     `yaml:"alerts"`
 	Instances []Instance `yaml:"instances"`
 	Models    []Model    `yaml:"models"`
 	Providers []Provider `yaml:"providers"`
@@ -64,6 +65,13 @@ type Config struct {
 	// UpstreamTimeout bounds non-streaming upstream calls and the idle gap of
 	// a streaming response. An instance may lower it, never raise it.
 	UpstreamTimeout Duration `yaml:"upstream_timeout"`
+}
+
+// Alerts configures optional outbound webhook notifications for operational
+// events such as circuit-breaker trips and upstream auth failures.
+type Alerts struct {
+	WebhookURL string   `yaml:"webhook_url"`
+	Cooldown   Duration `yaml:"cooldown"`
 }
 
 type Server struct {

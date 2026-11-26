@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pw/llmgw/internal/alert"
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/router"
@@ -119,6 +120,9 @@ func main() {
 	// from turning the gateway into an internal-network proxy.
 	forwarder.SetBlockPrivate(true)
 
+	notifier := alert.New(cfg.Alerts.WebhookURL, cfg.Alerts.Cooldown.Value(), logger)
+	forwarder.SetAlertNotifier(notifier)
+
 	srv, err := server.New(server.Options{
 		Router:           rt,
 		Forwarder:        forwarder,
@@ -136,6 +140,7 @@ func main() {
 		MaxBody:          cfg.Server.MaxBodyBytes,
 		Log:              logger,
 		UI:               webui.Handler(),
+		Alert:            notifier,
 	})
 	if err != nil {
 		logger.Error("initialize server", "err", err)
@@ -155,6 +160,7 @@ func main() {
 		logger.Warn("clean expired sessions", "err", err)
 	}
 	go cleanupSessions(ctx, st, logger)
+	go srv.StartQuotaRefresh(ctx)
 	if days := cfg.Database.RetentionDays; days > 0 {
 		go pruneHistory(ctx, st, logger, days)
 	}
@@ -190,6 +196,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout.Value())
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+	notifier.Close()
 	if err := st.Close(); err != nil {
 		logger.Error("close database", "err", err)
 	}
@@ -454,6 +461,7 @@ func reloadConfig(rt *router.Router, st *store.Store, box *secret.Box, srv *serv
 	srv.SetAdminPrefixes(c.Server.AdminPrefixes)
 	srv.SetKeyLimits(c.Server.KeyRPM, c.Server.KeyMaxConcurrent)
 	srv.SetMetricsToken(c.Server.MetricsToken)
+	srv.SetAlertWebhook(c.Alerts.WebhookURL, c.Alerts.Cooldown.Value())
 	return nil
 }
 

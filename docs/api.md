@@ -101,12 +101,21 @@ GET /admin/api/keys
 - `key` 是解密后的完整明文，用于控制台回显；密文用 AES-256-GCM 存储。
 - 该版本之前创建的 Key 只有哈希、没有密文，响应中不带 `key`，列表只能展示前缀。
 
-### 启停
+### 启停与策略更新
 
 ```
 PATCH /admin/api/keys/1
-{"enabled": false}
+{
+  "name": "cursor",
+  "enabled": true,
+  "rpm_limit": 60,
+  "max_concurrent": 4,
+  "expires_at": "2027-01-01T00:00:00Z",
+  "allowed_models": ["gpt-5", "claude-sonnet-4-5"]
+}
 ```
+
+所有字段均为可选（只更新传入的字段）；`rpm_limit` / `max_concurrent` 为 `0` 表示沿用全局配置，`expires_at` 传空字符串 `""` 清除过期时间，`allowed_models` 传空数组 `[]` 表示允许全部模型。
 
 ### 删除
 
@@ -313,6 +322,51 @@ DELETE /admin/api/instances/1   → 204
 ```
 
 仍被模型引用的接入点返回 `409`；先从模型的候选链里移除它才能删除。
+
+#### 连通性测试
+
+```
+# 测试已保存的接入点（使用已存 Key 与代理）
+POST /admin/api/instances/1/test
+
+# 测试未保存的表单草稿（编辑态可带 instance_id 复用已存 Key / 代理）
+POST /admin/api/instances/test
+{
+  "instance_id": 1,
+  "preset": "opencode-go",
+  "api_key": "...",
+  "proxy_url": "http://127.0.0.1:7890",
+  "allow_private_upstream": false
+}
+
+200 {
+  "ok": true,
+  "endpoints": [
+    {
+      "protocol": "openai",
+      "base_url": "https://opencode.ai/inference/go/openai/v1",
+      "status": "ok",
+      "ok": true,
+      "http_status": 200,
+      "latency_ms": 142,
+      "model_count": 8,
+      "message": "连接正常（返回 8 个模型）"
+    }
+  ]
+}
+```
+
+- 探测各协议端点的 `/models`（Anthropic 为 `/v1/models`），不消耗推理额度，也不影响数据面熔断计数。
+- `status` 取值：`ok`（2xx）、`reachable`（404/405，网络可达但上游未实现 `/models`）、`auth_error`（401/403）、`error`（超时、代理错误、5xx 等，错误信息已脱敏）。
+- 遵循与数据面一致的 SSRF 防护与代理安全拨号策略。
+
+#### 重置熔断
+
+```
+POST /admin/api/instances/1/reset-breaker   → 200 (返回最新 instanceView)
+```
+
+立即清除指定接入点的连续失败计数与熔断冷却期，并写入审计日志 `instance.reset_breaker`。
 
 ### 模型
 

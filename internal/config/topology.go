@@ -10,12 +10,20 @@ import (
 	"github.com/pw/llmgw/internal/preset"
 )
 
-// Routing strategies. Only failover is implemented in v1; the field exists so
-// the configuration shape does not have to change when the others arrive.
+// Routing strategies govern how candidates sharing the same effective priority
+// are ordered. Different priorities always stay strictly failover-ordered.
 const (
-	// StrategyFailover tries the primary instance first and falls back to the
-	// next candidate when it fails.
+	// StrategyFailover tries candidates in configured priority order.
 	StrategyFailover = "failover"
+	// StrategyRoundRobin rotates candidates that share the same effective priority.
+	StrategyRoundRobin = "round_robin"
+	// StrategyLeastUsed prefers the candidate with the lowest known quota usage
+	// among candidates sharing the same effective priority.
+	StrategyLeastUsed = "least_used"
+	// StrategySticky hashes the conversation session key so turns of the same
+	// conversation keep landing on the same same-priority candidate, preserving
+	// prompt cache locality while spreading different conversations across accounts.
+	StrategySticky = "sticky"
 )
 
 // Circuit breaker defaults for one instance.
@@ -417,9 +425,11 @@ func NormalizeModel(in *Model) error {
 	if in.Strategy == "" {
 		in.Strategy = StrategyFailover
 	}
-	if in.Strategy != StrategyFailover {
-		return fmt.Errorf("model %q: strategy %q is not supported yet (only %q)",
-			in.Name, in.Strategy, StrategyFailover)
+	switch in.Strategy {
+	case StrategyFailover, StrategyRoundRobin, StrategyLeastUsed, StrategySticky:
+	default:
+		return fmt.Errorf("model %q: strategy %q is not supported (want %q, %q, %q or %q)",
+			in.Name, in.Strategy, StrategyFailover, StrategyRoundRobin, StrategyLeastUsed, StrategySticky)
 	}
 	in.Metadata.Normalize()
 	if len(in.Instances) == 0 {

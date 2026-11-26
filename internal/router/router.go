@@ -56,6 +56,26 @@ type ModelInfo struct {
 	Metadata modelmeta.Metadata
 }
 
+// DefaultQuotaDegradePct is the window usage percentage at or above which an
+// instance is automatically demoted behind healthy candidates.
+const DefaultQuotaDegradePct = 98.0
+
+// QuotaProvider supplies cached subscription quota state for an upstream
+// instance without performing network or database I/O on the request path.
+type QuotaProvider interface {
+	QuotaState(instance string) (maxUsedPct float64, exhausted bool, ok bool)
+}
+
+type quotaProviderBox struct {
+	provider QuotaProvider
+}
+
+// ResolveOptions carries optional per-request context used by routing
+// strategies such as sticky session affinity.
+type ResolveOptions struct {
+	SessionKey string
+}
+
 // Snapshot is an immutable routing table swapped atomically on reload.
 type Snapshot struct {
 	Version          uint64
@@ -68,17 +88,39 @@ type Snapshot struct {
 	// protocol. The console uses it to show which candidate is in charge
 	// right now.
 	ByModel map[string][]Target
+	// Strategies maps each model name to its configured routing strategy.
+	Strategies map[string]string
 	// Location is the timezone every time window is evaluated in.
 	Location *time.Location
 }
 
 // Router holds the current snapshot. Reads are lock-free.
 type Router struct {
-	snap    atomic.Pointer[Snapshot]
-	version atomic.Uint64
+	snap      atomic.Pointer[Snapshot]
+	version   atomic.Uint64
+	quota     atomic.Pointer[quotaProviderBox]
+	rrCounter atomic.Uint64
 }
 
 func New() *Router { return &Router{} }
+
+// SetQuotaProvider attaches an optional quota provider used to demote
+// exhausted instances and rank least_used candidates. Passing nil disables
+// quota-aware routing.
+func (r *Router) SetQuotaProvider(p QuotaProvider) {
+	if p == nil {
+		r.quota.Store(nil)
+		return
+	}
+	r.quota.Store(&quotaProviderBox{provider: p})
+}
+
+func (r *Router) quotaProvider() QuotaProvider {
+	if box := r.quota.Load(); box != nil {
+		return box.provider
+	}
+	return nil
+}
 
 // Reload validates cfg and atomically installs a new snapshot.
 // On error the previous snapshot stays active.
@@ -101,6 +143,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 	idx := make(map[Key][]Target)
 	models := map[string]map[string]struct{}{}
 	infos := map[string]map[string]ModelInfo{}
+	strategies := make(map[string]string, len(eff.Models))
 
 	instances := make(map[string]config.EffectiveInstance, len(eff.Instances))
 	proxyURLs := make(map[string]*url.URL, len(eff.Instances))
@@ -121,6 +164,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 	}
 
 	for _, m := range eff.Models {
+		strategies[m.Name] = m.Strategy
 		for _, cand := range m.Instances {
 			inst, ok := instances[cand.Instance]
 			if !ok {
@@ -216,6 +260,7 @@ func Build(cfg *config.Config) (*Snapshot, error) {
 		ModelsByProtocol: modelsByProtocol,
 		InfosByProtocol:  infosByProtocol,
 		ByModel:          byModel,
+		Strategies:       strategies,
 		Location:         location,
 	}, nil
 }
@@ -228,15 +273,26 @@ func (r *Router) Ready() bool { return r.snap.Load() != nil }
 // The first entry is the primary upstream; the rest are fallbacks that are
 // tried when the previous ones fail.
 //
-// The order depends on the current time: a candidate whose time window is
-// active may take over a better priority.
+// The order depends on the current time, cached subscription quota, and the
+// model's routing strategy.
 func (r *Router) Resolve(protocol, model string) ([]Target, error) {
-	return r.ResolveAt(protocol, model, time.Now())
+	return r.ResolveAtWithOptions(protocol, model, time.Now(), ResolveOptions{})
+}
+
+// ResolveWithOptions is Resolve with per-request routing options such as a
+// sticky session key.
+func (r *Router) ResolveWithOptions(protocol, model string, opts ResolveOptions) ([]Target, error) {
+	return r.ResolveAtWithOptions(protocol, model, time.Now(), opts)
 }
 
 // ResolveAt is Resolve with an explicit moment. It exists so the tests can
 // pin the clock.
 func (r *Router) ResolveAt(protocol, model string, now time.Time) ([]Target, error) {
+	return r.ResolveAtWithOptions(protocol, model, now, ResolveOptions{})
+}
+
+// ResolveAtWithOptions is ResolveAt with explicit per-request routing options.
+func (r *Router) ResolveAtWithOptions(protocol, model string, now time.Time, opts ResolveOptions) ([]Target, error) {
 	snap := r.snap.Load()
 	if snap == nil {
 		return nil, &ModelNotFoundError{Model: model, Protocol: protocol, Hint: protocolHint(nil, protocol, model), Reason: "router is not ready"}
@@ -253,7 +309,8 @@ func (r *Router) ResolveAt(protocol, model string, now time.Time) ([]Target, err
 	// request, so hand out a copy to keep callers from mutating it.
 	candidates := make([]Target, len(t))
 	copy(candidates, t)
-	ordered := orderCandidates(candidates, snap.Location, now)
+	strategy := snap.Strategies[model]
+	ordered := orderCandidatesWithStrategy(candidates, snap.Location, now, strategy, r.quotaProvider(), opts, &r.rrCounter)
 	if len(ordered) == 0 {
 		return nil, &NoAvailableTargetError{
 			Model:    model,
@@ -262,6 +319,19 @@ func (r *Router) ResolveAt(protocol, model string, now time.Time) ([]Target, err
 		}
 	}
 	return ordered, nil
+}
+
+// PreviewModel returns the candidates of one model with their current routing
+// state, including live quota degradation from the attached QuotaProvider.
+//
+// The order is display-only: round_robin and sticky select their primary at
+// request time, so the first preview entry is not necessarily the next target.
+func (r *Router) PreviewModel(model string, now time.Time) []Preview {
+	snap := r.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	return snap.previewModelWithQuota(model, now, r.quotaProvider())
 }
 
 func protocolHint(snap *Snapshot, protocol, model string) string {

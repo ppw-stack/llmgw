@@ -17,6 +17,13 @@ export interface InstanceEndpoint {
   base_url: string;
 }
 
+/** 接入点实时熔断器状态 */
+export interface BreakerStatus {
+  open: boolean;
+  failures: number;
+  cooldown_secs?: number;
+}
+
 /** GET /admin/api/instances 中的单个上游接入点 */
 export interface Instance {
   id: number;
@@ -41,6 +48,8 @@ export interface Instance {
   proxy_url?: string;
   /** 已配置的代理是否包含认证密码 */
   proxy_has_auth?: boolean;
+  /** 实时熔断状态 */
+  breaker?: BreakerStatus;
   max_fails: number;
   cooldown_secs: number;
   timeout_secs: number;
@@ -83,6 +92,37 @@ export interface InstancePayload {
   max_fails?: number;
   cooldown_secs?: number;
   timeout_secs?: number;
+}
+
+/** 单个协议端点的连通性探测状态 */
+export type EndpointTestStatus = 'ok' | 'reachable' | 'auth_error' | 'error';
+
+/** 单个协议端点的连通性探测结果 */
+export interface EndpointTestResult {
+  protocol: 'openai' | 'anthropic';
+  base_url: string;
+  status: EndpointTestStatus;
+  ok: boolean;
+  http_status?: number;
+  latency_ms: number;
+  model_count?: number;
+  message: string;
+}
+
+/** POST /admin/api/instances/{id}/test 与 /admin/api/instances/test 的响应 */
+export interface InstanceTestResponse {
+  ok: boolean;
+  endpoints: EndpointTestResult[];
+}
+
+/** POST /admin/api/instances/test 测试未保存草稿时提交的内容 */
+export interface InstanceTestPayload {
+  instance_id?: number;
+  preset?: string;
+  api_key?: string;
+  endpoints?: InstanceEndpoint[];
+  allow_private_upstream: boolean;
+  proxy_url?: string;
 }
 
 /** POST /admin/api/preset-models 返回的一个上游模型候选 */
@@ -185,6 +225,9 @@ export interface ModelInstance {
   windows?: TimeWindow[];
 }
 
+/** 模型支持的路由调度策略 */
+export type RoutingStrategy = 'failover' | 'round_robin' | 'least_used' | 'sticky';
+
 /** 当前时刻某个候选的路由状态 */
 export interface EffectiveCandidate {
   instance: string;
@@ -198,6 +241,10 @@ export interface EffectiveCandidate {
   active: boolean;
   /** 当前命中的时间窗口 */
   window?: string;
+  /** 是否因套餐额度已满/告急被自动降级到备选 */
+  quota_degraded?: boolean;
+  /** 已知的最高套餐窗口已用百分比（0-100） */
+  quota_used_pct?: number;
 }
 
 /** GET /admin/api/models 中的单个模型 */
@@ -221,7 +268,7 @@ export interface ModelMetadata {
 export interface Model {
   id: number;
   name: string;
-  strategy: 'failover';
+  strategy: RoutingStrategy;
   /** 自定义元数据；为空时回退到内置预设的官方参数。 */
   metadata?: ModelMetadata;
   instances: ModelInstance[];
@@ -251,6 +298,14 @@ export interface GatewayKey {
   enabled: boolean;
   /** 完整 Key，仅在管理台列表回显；旧版本创建的 Key 没有该字段 */
   key?: string;
+  /** 单 Key 每分钟限速；0 表示沿用全局 server.key_rpm */
+  rpm_limit: number;
+  /** 单 Key 最大并发；0 表示沿用全局 server.key_max_concurrent */
+  max_concurrent: number;
+  /** 可选过期时间（RFC 3339） */
+  expires_at?: string;
+  /** 可选允许访问的模型名白名单；空数组表示不限制 */
+  allowed_models: string[];
   created_at: string;
   last_used_at?: string;
 }
@@ -262,6 +317,10 @@ export interface CreatedKey {
   key: string;
   prefix: string;
   enabled: boolean;
+  rpm_limit: number;
+  max_concurrent: number;
+  expires_at?: string;
+  allowed_models: string[];
   created_at: string;
 }
 

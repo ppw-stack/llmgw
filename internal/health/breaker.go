@@ -40,10 +40,18 @@ func (b *Breaker) Allow(instance string) bool {
 	return !b.now().Before(st.openUntil)
 }
 
+// Status is a point-in-time snapshot of an instance's circuit breaker.
+type Status struct {
+	Open           bool      `json:"open"`
+	Failures       int       `json:"failures"`
+	CooldownRemain int       `json:"cooldown_secs,omitempty"`
+	OpenUntil      time.Time `json:"-"`
+}
+
 // RecordFailure counts a failed attempt and opens the circuit once the
-// threshold is reached. The counter restarts after the cooldown so the
-// instance is probed again instead of being skipped forever.
-func (b *Breaker) RecordFailure(instance string, maxFails int, cooldown time.Duration) {
+// threshold is reached. It returns true when this call transitioned the
+// circuit into the open state.
+func (b *Breaker) RecordFailure(instance string, maxFails int, cooldown time.Duration) bool {
 	if maxFails <= 0 {
 		maxFails = 1
 	}
@@ -58,7 +66,9 @@ func (b *Breaker) RecordFailure(instance string, maxFails int, cooldown time.Dur
 	if st.failures >= maxFails {
 		st.failures = 0
 		st.openUntil = b.now().Add(cooldown)
+		return true
 	}
+	return false
 }
 
 // RecordSuccess clears the failure counter of an instance.
@@ -69,6 +79,37 @@ func (b *Breaker) RecordSuccess(instance string) {
 		st.failures = 0
 		st.openUntil = time.Time{}
 	}
+}
+
+// Reset manually closes an open circuit and clears the failure counter.
+func (b *Breaker) Reset(instance string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.states, instance)
+}
+
+// Status returns the current breaker state of one instance.
+func (b *Breaker) Status(instance string) Status {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	st, ok := b.states[instance]
+	if !ok {
+		return Status{}
+	}
+	now := b.now()
+	if now.Before(st.openUntil) {
+		remain := int(st.openUntil.Sub(now).Seconds())
+		if remain < 1 {
+			remain = 1
+		}
+		return Status{
+			Open:           true,
+			Failures:       st.failures,
+			CooldownRemain: remain,
+			OpenUntil:      st.openUntil,
+		}
+	}
+	return Status{Failures: st.failures}
 }
 
 // Open reports whether the instance is currently skipped.

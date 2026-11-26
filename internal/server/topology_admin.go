@@ -13,6 +13,7 @@ import (
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/discovery"
+	"github.com/pw/llmgw/internal/health"
 	"github.com/pw/llmgw/internal/modelmeta"
 	"github.com/pw/llmgw/internal/netproxy"
 	"github.com/pw/llmgw/internal/preset"
@@ -87,9 +88,11 @@ type instanceView struct {
 	// ProxyURL is the redacted proxy URL safe for display.
 	ProxyURL string `json:"proxy_url,omitempty"`
 	// ProxyHasAuth reports whether the stored proxy URL carries a password.
-	ProxyHasAuth bool   `json:"proxy_has_auth,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ProxyHasAuth bool `json:"proxy_has_auth,omitempty"`
+	// Breaker reports the live circuit-breaker state of this instance.
+	Breaker   *health.Status `json:"breaker,omitempty"`
+	CreatedAt string         `json:"created_at"`
+	UpdatedAt string         `json:"updated_at"`
 }
 
 type endpointView struct {
@@ -153,6 +156,10 @@ type effectiveCandidate struct {
 	Active bool `json:"active"`
 	// Window describes the time window that is active right now.
 	Window string `json:"window,omitempty"`
+	// QuotaDegraded reports whether the instance is demoted due to exhausted quota.
+	QuotaDegraded bool `json:"quota_degraded,omitempty"`
+	// QuotaUsedPct is the peak cached quota usage percentage when known.
+	QuotaUsedPct *float64 `json:"quota_used_pct,omitempty"`
 }
 
 func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
@@ -165,6 +172,28 @@ func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *admi
 		default:
 			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+		return
+	}
+	if rawID == "test" {
+		s.adminTestInstanceDraft(w, r)
+		return
+	}
+	if strings.HasSuffix(rawID, "/test") {
+		instanceID, ok := parseID(strings.TrimSuffix(rawID, "/test"))
+		if !ok {
+			writeAdminError(w, http.StatusBadRequest, "invalid instance id")
+			return
+		}
+		s.adminTestSavedInstance(w, r, instanceID)
+		return
+	}
+	if strings.HasSuffix(rawID, "/reset-breaker") {
+		instanceID, ok := parseID(strings.TrimSuffix(rawID, "/reset-breaker"))
+		if !ok {
+			writeAdminError(w, http.StatusBadRequest, "invalid instance id")
+			return
+		}
+		s.adminResetInstanceBreaker(w, r, id, instanceID)
 		return
 	}
 	instanceID, ok := parseID(rawID)
@@ -411,7 +440,36 @@ func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanc
 			}
 		}
 	}
+	if s.forwarder != nil {
+		st := s.forwarder.BreakerStatus(rec.Name)
+		view.Breaker = &st
+	}
 	return view
+}
+
+func (s *Server) adminResetInstanceBreaker(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rec, err := s.findInstanceRecord(instanceID)
+	if err != nil {
+		// Internal storage details stay in the server log; the client only
+		// gets a generic failure message.
+		s.log.Error("find instance for breaker reset",
+			"request_id", requestID(r), "instance_id", instanceID, "err", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if rec == nil {
+		writeAdminError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	if s.forwarder != nil {
+		s.forwarder.ResetBreaker(rec.Name)
+	}
+	s.audit(r, id.Username, "instance.reset_breaker", rec.Name, "success")
+	writeJSON(w, http.StatusOK, s.instanceView(r, *rec))
 }
 
 func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity) {
@@ -699,20 +757,21 @@ func (s *Server) modelViews(records []store.ModelRecord) []modelView {
 
 // effectiveCandidates describes the current routing state of one model.
 func (s *Server) effectiveCandidates(model string, now time.Time) []effectiveCandidate {
-	snap := s.router.Snapshot()
-	if snap == nil {
+	previews := s.router.PreviewModel(model, now)
+	if len(previews) == 0 {
 		return []effectiveCandidate{}
 	}
-	previews := snap.PreviewModel(model, now)
 	out := make([]effectiveCandidate, 0, len(previews))
 	for _, p := range previews {
 		out = append(out, effectiveCandidate{
-			Instance:     p.Instance,
-			Upstream:     p.Upstream,
-			Priority:     p.Priority,
-			BasePriority: p.BasePriority,
-			Active:       p.Active,
-			Window:       p.Window,
+			Instance:      p.Instance,
+			Upstream:      p.Upstream,
+			Priority:      p.Priority,
+			BasePriority:  p.BasePriority,
+			Active:        p.Active,
+			Window:        p.Window,
+			QuotaDegraded: p.QuotaDegraded,
+			QuotaUsedPct:  p.QuotaUsedPct,
 		})
 	}
 	return out

@@ -11,6 +11,7 @@ import type {
   ModelMetadata,
   ModelMetadataOverride,
   ModelPayload,
+  RoutingStrategy,
   TimeWindow,
 } from '../types';
 import { confirmAction } from '../utils/confirm';
@@ -70,10 +71,58 @@ interface MetadataForm {
   protocols: Record<ProtocolName, ProtocolMetadataForm>;
 }
 
+const STRATEGY_OPTIONS: { value: RoutingStrategy; label: string; hint: string }[] = [
+  {
+    value: 'failover',
+    label: '主备切换（failover）',
+    hint: '按优先级固定选主，主接入点失败时依次切到备选。',
+  },
+  {
+    value: 'sticky',
+    label: '会话粘性（sticky）',
+    hint: '同优先级多账号按对话指纹固定路由，既分摊流量又保持 Prompt 缓存命中。',
+  },
+  {
+    value: 'least_used',
+    label: '剩余额度优先（least_used）',
+    hint: '同优先级多账号优先选套餐已用比例最低的接入点，自动把流量压向空闲账号。',
+  },
+  {
+    value: 'round_robin',
+    label: '轮询分流（round_robin）',
+    hint: '同优先级多账号轮流担任主节点，其余同级与低优先级节点作为故障备选。',
+  },
+];
+
+function strategyLabel(strategy: RoutingStrategy): string {
+  return STRATEGY_OPTIONS.find((item) => item.value === strategy)?.label ?? strategy;
+}
+
+function strategyHint(strategy: RoutingStrategy): string {
+  return STRATEGY_OPTIONS.find((item) => item.value === strategy)?.hint ?? '';
+}
+
+/** 预览顺序是否等同于实际选主顺序；轮询与粘性要到请求时才确定主节点。 */
+function hasDeterministicPreviewOrder(strategy: RoutingStrategy): boolean {
+  return strategy === 'failover' || strategy === 'least_used';
+}
+
+/** 链路候选标签：非确定性策略下不再标「主/备」，避免误导流量去向。 */
+function candidateBadge(c: EffectiveCandidate, idx: number, strategy: RoutingStrategy): string {
+  if (c.quota_degraded) {
+    return '额度降级';
+  }
+  if (!hasDeterministicPreviewOrder(strategy)) {
+    return `候选${idx + 1}`;
+  }
+  return idx === 0 ? '主' : `备${idx}`;
+}
+
 /** 新增 / 编辑模型的表单状态。 */
 interface ModelForm {
   id: number | null;
   name: string;
+  strategy: RoutingStrategy;
   metadata: MetadataForm;
   candidates: CandidateRow[];
 }
@@ -143,6 +192,7 @@ function newForm(): ModelForm {
   return {
     id: null,
     name: '',
+    strategy: 'failover',
     metadata: newMetadataForm(),
     candidates: [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
@@ -466,6 +516,7 @@ function openEdit(m: Model) {
   const form: ModelForm = {
     id: m.id,
     name: m.name,
+    strategy: m.strategy,
     metadata: toMetadataForm(m.metadata),
     candidates: rows.length ? rows : [{ instance: '', upstream: '', priority: '0', windows: [] }],
   };
@@ -548,7 +599,7 @@ async function save() {
 
   const payload: ModelPayload = {
     name,
-    strategy: 'failover',
+    strategy: f.strategy,
     instances: list,
   };
   const metadata = buildMetadata(f.metadata);
@@ -659,7 +710,7 @@ onUnmounted(() => {
       <div class="entity-head">
         <div class="row">
           <h3 class="mono">{{ m.name }}</h3>
-          <span class="badge accent">{{ m.strategy }}</span>
+          <span class="badge accent">{{ strategyLabel(m.strategy) }}</span>
           <span class="muted small">时区 {{ m.timezone }}</span>
         </div>
         <div class="row">
@@ -680,20 +731,43 @@ onUnmounted(() => {
 
       <!-- 当前生效链路可视化 -->
       <div v-if="m.effective_candidates?.length" class="stack" style="gap: 6px">
-        <span class="muted small">当前生效链路</span>
+        <span class="muted small">
+          当前生效链路
+          <template v-if="!hasDeterministicPreviewOrder(m.strategy)">
+            （按优先级展示，主节点由策略在请求时决定）
+          </template>
+        </span>
         <div class="route-flow">
           <template
             v-for="(c, idx) in activeCandidates(m)"
             :key="`active-${c.instance}-${c.upstream}`"
           >
             <span v-if="idx > 0" class="route-arrow" aria-hidden="true">→</span>
-            <div class="route-node" :class="{ 'primary-node': idx === 0 }">
-              <span class="badge" :class="idx === 0 ? 'ok' : 'off'">
-                {{ idx === 0 ? '主' : `备${idx}` }}
+            <div
+              class="route-node"
+              :class="{
+                'primary-node':
+                  idx === 0 && !c.quota_degraded && hasDeterministicPreviewOrder(m.strategy),
+              }"
+            >
+              <span
+                class="badge"
+                :class="
+                  c.quota_degraded
+                    ? 'danger'
+                    : idx === 0 && hasDeterministicPreviewOrder(m.strategy)
+                      ? 'ok'
+                      : 'off'
+                "
+              >
+                {{ candidateBadge(c, idx, m.strategy) }}
               </span>
               <span class="mono">{{ c.instance }}</span>
               <span class="muted">/</span>
               <span class="mono">{{ c.upstream }}</span>
+              <span v-if="c.quota_used_pct !== undefined" class="muted small">
+                {{ Math.round(c.quota_used_pct) }}%
+              </span>
               <span v-if="c.window" class="badge accent">{{ c.window }}</span>
             </div>
           </template>
@@ -738,11 +812,13 @@ onUnmounted(() => {
             <input id="model-name" v-model="editing.name" placeholder="例如 claude-sonnet-4-5" />
           </div>
           <div class="field">
-            <span class="field-caption">调度策略</span>
-            <div class="row" style="min-height: 36px">
-              <span class="badge ok">failover</span>
-              <span class="field-hint">主节点失败自动切到下一候选</span>
-            </div>
+            <label for="model-strategy">调度策略</label>
+            <select id="model-strategy" v-model="editing.strategy">
+              <option v-for="opt in STRATEGY_OPTIONS" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+            <p class="field-hint">{{ strategyHint(editing.strategy) }}</p>
           </div>
         </div>
 

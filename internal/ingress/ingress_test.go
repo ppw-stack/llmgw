@@ -3,16 +3,25 @@ package ingress
 import "testing"
 
 func TestNormalize(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
-		"/anthropic/v1/messages":         PathAnthropicMsgs,
-		"/anthropic/messages":            PathAnthropicMsgs,
-		"/anthropic/v1/v1/messages":      PathAnthropicMsgs,
-		"/openai/v1/chat/completions":    PathOpenAIChat,
-		"/openai/chat/completions":       PathOpenAIChat,
-		"/openai/v1/v1/chat/completions": PathOpenAIChat,
-		"/openai/v1/models":              PathOpenAIModels,
-		"/metrics":                       "/metrics",
-		"/":                              "/",
+		"/anthropic/v1/messages":                 PathAnthropicMsgs,
+		"/anthropic/messages":                    PathAnthropicMsgs,
+		"/anthropic/v1/v1/messages":              PathAnthropicMsgs,
+		"/anthropic/v1/messages/count_tokens":    PathAnthropicCountTokens,
+		"/anthropic/messages/count_tokens":       PathAnthropicCountTokens,
+		"/anthropic/v1/v1/messages/count_tokens": PathAnthropicCountTokens,
+		"/anthropic/v1/models":                   PathAnthropicModels,
+		"/anthropic/models":                      PathAnthropicModels,
+		"/openai/v1/chat/completions":            PathOpenAIChat,
+		"/openai/chat/completions":               PathOpenAIChat,
+		"/openai/v1/v1/chat/completions":         PathOpenAIChat,
+		"/openai/v1/responses":                   PathOpenAIResponses,
+		"/openai/responses":                      PathOpenAIResponses,
+		"/openai/v1/v1/responses":                PathOpenAIResponses,
+		"/openai/v1/models":                      PathOpenAIModels,
+		"/metrics":                               "/metrics",
+		"/":                                      "/",
 	}
 	for in, want := range cases {
 		if got := Normalize(in); got != want {
@@ -22,11 +31,21 @@ func TestNormalize(t *testing.T) {
 }
 
 func TestProtocolOf(t *testing.T) {
+	t.Parallel()
 	if p, ok := ProtocolOf(PathAnthropicMsgs); !ok || p != "anthropic" {
 		t.Fatalf("anthropic path -> %q %v", p, ok)
 	}
+	if p, ok := ProtocolOf(PathAnthropicCountTokens); !ok || p != "anthropic" {
+		t.Fatalf("anthropic count_tokens path -> %q %v", p, ok)
+	}
+	if p, ok := ProtocolOf(PathAnthropicModels); !ok || p != "anthropic" {
+		t.Fatalf("anthropic models path -> %q %v", p, ok)
+	}
 	if p, ok := ProtocolOf(PathOpenAIChat); !ok || p != "openai" {
 		t.Fatalf("openai path -> %q %v", p, ok)
+	}
+	if p, ok := ProtocolOf(PathOpenAIResponses); !ok || p != "openai" {
+		t.Fatalf("openai responses path -> %q %v", p, ok)
 	}
 	if _, ok := ProtocolOf("/nope"); ok {
 		t.Fatal("unexpected protocol")

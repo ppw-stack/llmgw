@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pw/llmgw/internal/alert"
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/health"
 	"github.com/pw/llmgw/internal/ingress"
@@ -43,12 +43,13 @@ var maxUpstreamResponse int64 = maxUpstreamResponseDefault
 // several candidates it tries them in priority order and moves on to the next
 // one when the current upstream fails in a retryable way.
 type Forwarder struct {
-	router  *router.Router
-	store   *store.Store
-	log     *slog.Logger
-	client  *http.Client
-	timeout time.Duration
-	breaker *health.Breaker
+	router   *router.Router
+	store    *store.Store
+	log      *slog.Logger
+	client   *http.Client
+	timeout  time.Duration
+	breaker  *health.Breaker
+	notifier *alert.Notifier
 
 	// blockPrivate refuses to dial loopback and private addresses, so a
 	// mistyped or attacker-supplied upstream URL cannot reach the internal
@@ -57,9 +58,52 @@ type Forwarder struct {
 	blockPrivate atomic.Bool
 }
 
+// SetAlertNotifier attaches an optional asynchronous webhook notifier.
+func (f *Forwarder) SetAlertNotifier(n *alert.Notifier) { f.notifier = n }
+
+// BreakerStatus returns the live circuit-breaker snapshot of one instance.
+func (f *Forwarder) BreakerStatus(instance string) health.Status {
+	return f.breaker.Status(instance)
+}
+
+// ResetBreaker manually clears the circuit-breaker state of one instance.
+func (f *Forwarder) ResetBreaker(instance string) {
+	f.breaker.Reset(instance)
+}
+
+func (f *Forwarder) recordFailureAndAlert(target router.Target, reason string, status int) {
+	if f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown) && f.notifier != nil {
+		f.notifier.Emit(alert.Event{
+			Type:     alert.EventBreakerOpen,
+			Severity: "warning",
+			Instance: target.Instance,
+			Status:   status,
+			Title:    "上游接入点触发熔断",
+			Message:  fmt.Sprintf("接入点 %s 连续失败达到阈值（原因：%s），已进入 %s 冷却期", target.Instance, reason, target.Cooldown),
+		})
+	}
+}
+
+func (f *Forwarder) notifyAuthError(target router.Target, status int) {
+	if f.notifier == nil {
+		return
+	}
+	f.notifier.Emit(alert.Event{
+		Type:     alert.EventUpstreamAuthError,
+		Severity: "critical",
+		Instance: target.Instance,
+		Status:   status,
+		Title:    "上游接入点鉴权失败",
+		Message:  fmt.Sprintf("接入点 %s 返回 HTTP %d，请检查上游 API Key 是否失效或无权限", target.Instance, status),
+	})
+}
+
 // SetBlockPrivate turns the private-address guard on. Instances that opted in
 // with allow_private_upstream still reach their local mock.
 func (f *Forwarder) SetBlockPrivate(block bool) { f.blockPrivate.Store(block) }
+
+// BlockPrivate reports whether private/loopback upstream addresses are blocked.
+func (f *Forwarder) BlockPrivate() bool { return f.blockPrivate.Load() }
 
 // allowPrivateKey marks one outgoing request as allowed to reach a private
 // address. It is set only for targets whose instance opted in.
@@ -136,8 +180,17 @@ func (f *Forwarder) dialContext(ctx context.Context, network, addr string) (net.
 	return nil, fmt.Errorf("upstream host %q resolves only to private or reserved addresses", host)
 }
 
+// Endpoint kinds select which upstream path a data-plane request targets.
+// Empty keeps the protocol default (/chat/completions or /v1/messages).
+const (
+	EndpointDefault              = ""
+	EndpointOpenAIResponses      = "responses"
+	EndpointAnthropicCountTokens = "count_tokens"
+)
+
 type Request struct {
 	Protocol  string
+	Endpoint  string
 	Meta      ingress.Meta
 	Targets   []router.Target
 	APIKeyID  int64
@@ -195,58 +248,26 @@ var sessionHeaderAliases = []string{
 // fingerprint of the conversation prefix, so every turn of one conversation
 // maps to the same value while different conversations diverge. A per-request
 // random value would satisfy the upstream check and destroy the cache.
-func sessionHeaderValue(r *http.Request, in Request, target router.Target) string {
+func sessionHeaderValue(r *http.Request, in Request, target router.Target) (string, error) {
 	if v := strings.TrimSpace(r.Header.Get(target.SessionHeader)); v != "" {
-		return v
+		return v, nil
 	}
 	for _, alias := range sessionHeaderAliases {
 		if v := strings.TrimSpace(r.Header.Get(alias)); v != "" {
 			sum := sha256.Sum256([]byte("header:" + alias + ":" + v))
-			return "ses_" + hex.EncodeToString(sum[:16])
+			return "ses_" + hex.EncodeToString(sum[:16]), nil
 		}
+	}
+	prefix, err := conversationPrefix(in.Meta.RawBody)
+	if err != nil {
+		return "", fmt.Errorf("derive upstream session header: %w", err)
 	}
 	seed := fmt.Sprintf("key:%d\nprefix:", in.APIKeyID)
-	return "ses_" + hex.EncodeToString(byteSeed(seed+conversationPrefix(in.Meta.RawBody)))
+	return "ses_" + hex.EncodeToString(byteSeed(seed+prefix)), nil
 }
 
-// conversationPrefix fingerprints the part of a request that identifies a
-// conversation: its system prompt and first user message. Later turns repeat
-// that prefix, which keeps the derived session stable, while a different
-// conversation starts from a different prefix.
-func conversationPrefix(body []byte) string {
-	var payload struct {
-		System   json.RawMessage `json:"system"`
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-	}
-	if len(body) == 0 {
-		return ""
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-	h := sha256.New()
-	if len(payload.System) > 0 {
-		h.Write(payload.System)
-	}
-	// Every system prompt the client sends, whichever shape it uses: the
-	// top-level field above for Anthropic, a message here for OpenAI.
-	for _, m := range payload.Messages {
-		if m.Role == "system" {
-			h.Write(m.Content)
-		}
-	}
-	// Then the first user turn, which is where two conversations sharing a
-	// system prompt diverge.
-	for _, m := range payload.Messages {
-		if m.Role == "user" {
-			h.Write(m.Content)
-			break
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil))
+func conversationPrefix(body []byte) (string, error) {
+	return ingress.ConversationPrefix(body)
 }
 
 // byteSeed spreads the seed over 16 bytes so the caller can hex-encode it into
@@ -334,17 +355,18 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		return attemptOutcome{handled: true}
 	}
 
-	// OpenAI streaming does not report usage unless asked to. Inject the flag,
-	// and remember so a rejecting upstream can be retried without it.
+	// OpenAI Chat Completions streaming does not report usage unless asked to.
+	// Responses API always reports usage in response.completed and rejects
+	// stream_options, so never inject it there.
 	injected := false
-	if in.Protocol == config.ProtocolOpenAI && in.Meta.Stream {
+	if in.Protocol == config.ProtocolOpenAI && in.Endpoint == EndpointDefault && in.Meta.Stream {
 		if b, err := sjson.SetBytes(body, "stream_options.include_usage", true); err == nil {
 			body = b
 			injected = true
 		}
 	}
 
-	upstreamURL := upstreamURL(target)
+	upstreamURL := upstreamURL(target, in.Endpoint)
 
 	send := func(payload []byte) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
@@ -365,7 +387,17 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			req.Header.Set("Authorization", "Bearer "+target.Key)
 		}
 		if target.SessionHeader != "" {
-			req.Header.Set(target.SessionHeader, sessionHeaderValue(r, in, target))
+			value, err := sessionHeaderValue(r, in, target)
+			if err != nil {
+				// The body was already validated before forwarding; this
+				// fallback keeps the required header non-empty while making
+				// the derivation failure visible in the logs.
+				f.log.Warn("derive upstream session header failed; falling back to a per-request value",
+					"method", r.Method, "path", r.URL.Path,
+					"request_id", in.RequestID, "instance", target.Instance, "err", err)
+				value = "ses_" + hex.EncodeToString(byteSeed("request:"+in.RequestID))
+			}
+			req.Header.Set(target.SessionHeader, value)
 		}
 		return f.client.Do(req)
 	}
@@ -401,7 +433,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			"endpoint", target.Endpoint, "err", netproxy.SanitizeError(lastErr, target.ProxyURL), "class", code)
 		observ.UpstreamErrors.WithLabelValues(target.Instance, code).Inc()
 		f.record(in, target, status, start, 0, usageAcc{estimated: true}, code)
-		f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)
+		f.recordFailureAndAlert(target, code, status)
 		return attemptOutcome{retryable: true, status: status, code: code}
 	}
 	defer resp.Body.Close()
@@ -412,7 +444,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponse+1))
 		code := responseCode(resp.StatusCode)
 		f.record(in, target, resp.StatusCode, start, 0, usageAcc{estimated: true}, code)
-		f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)
+		f.recordFailureAndAlert(target, code, resp.StatusCode)
 		return attemptOutcome{
 			retryable: true,
 			status:    resp.StatusCode,
@@ -441,7 +473,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			return attemptOutcome{handled: true}
 		}
 		acc.observeBody(in.Protocol, raw)
-		if !acc.seen && resp.StatusCode < 300 {
+		if !acc.seen && resp.StatusCode < 300 && in.Endpoint != EndpointAnthropicCountTokens {
 			acc.prompt = estimateTokens(len(body))
 			acc.completion = estimateTokens(len(raw))
 			acc.estimated = true
@@ -450,10 +482,15 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		f.record(in, target, resp.StatusCode, start, 0, acc, responseCode(resp.StatusCode))
 		if resp.StatusCode < 300 {
 			f.breaker.RecordSuccess(target.Instance)
-		} else if shouldFailover(resp.StatusCode, target.FailoverStatuses) {
-			// The last candidate failed as well: count it so the instance
-			// is skipped for a while instead of failing every request.
-			f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)
+		} else {
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				f.notifyAuthError(target, resp.StatusCode)
+			}
+			if shouldFailover(resp.StatusCode, target.FailoverStatuses) {
+				// The last candidate failed as well: count it so the instance
+				// is skipped for a while instead of failing every request.
+				f.recordFailureAndAlert(target, responseCode(resp.StatusCode), resp.StatusCode)
+			}
 		}
 		return attemptOutcome{handled: true}
 	}
@@ -582,7 +619,13 @@ func (f *Forwarder) record(in Request, target router.Target, status int, start t
 	}
 }
 
-func upstreamURL(t router.Target) string {
+func upstreamURL(t router.Target, endpoint string) string {
+	switch endpoint {
+	case EndpointOpenAIResponses:
+		return t.BaseURL + "/responses"
+	case EndpointAnthropicCountTokens:
+		return t.BaseURL + "/v1/messages/count_tokens"
+	}
 	switch t.Protocol {
 	case config.ProtocolAnthropic:
 		return t.BaseURL + "/v1/messages"

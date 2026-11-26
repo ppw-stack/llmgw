@@ -2,25 +2,44 @@
 import { onMounted, ref } from 'vue';
 import { api, formatTime } from '../api';
 import AppIcon from '../components/AppIcon.vue';
+import BaseModal from '../components/BaseModal.vue';
 import CopyButton from '../components/CopyButton.vue';
-import type { CreatedKey, GatewayKey } from '../types';
+import type { CreatedKey, GatewayKey, Model } from '../types';
 import { confirmAction } from '../utils/confirm';
 import { errorMessage } from '../utils/error';
 import { showToast } from '../utils/toast';
 
+interface KeyEditForm {
+  id: number;
+  name: string;
+  rpmLimit: string;
+  maxConcurrent: string;
+  expiresAtLocal: string;
+  allowedModels: string[];
+}
+
 const keys = ref<GatewayKey[]>([]);
+const models = ref<Model[]>([]);
 const loading = ref(true);
 const creating = ref(false);
+const saving = ref(false);
 const error = ref('');
+const modalError = ref('');
 const name = ref('');
 const created = ref<CreatedKey | null>(null);
 const revealedIds = ref<number[]>([]);
+const editing = ref<KeyEditForm | null>(null);
 
 async function load() {
   loading.value = true;
   error.value = '';
   try {
-    keys.value = await api<GatewayKey[]>('/keys');
+    const [keyList, modelList] = await Promise.all([
+      api<GatewayKey[]>('/keys'),
+      api<Model[]>('/models'),
+    ]);
+    keys.value = keyList;
+    models.value = modelList;
   } catch (e) {
     error.value = errorMessage(e);
   } finally {
@@ -54,7 +73,7 @@ async function toggle(k: GatewayKey) {
   error.value = '';
   const nextEnabled = !k.enabled;
   try {
-    await api<null>(`/keys/${k.id}`, {
+    await api<GatewayKey>(`/keys/${k.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ enabled: nextEnabled }),
     });
@@ -62,6 +81,101 @@ async function toggle(k: GatewayKey) {
     showToast(nextEnabled ? `已启用「${k.name}」` : `已停用「${k.name}」`);
   } catch (e) {
     error.value = errorMessage(e);
+  }
+}
+
+function toDatetimeLocal(iso?: string): string {
+  if (!iso) {
+    return '';
+  }
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    return '';
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function openEdit(k: GatewayKey) {
+  modalError.value = '';
+  editing.value = {
+    id: k.id,
+    name: k.name,
+    rpmLimit: k.rpm_limit > 0 ? String(k.rpm_limit) : '',
+    maxConcurrent: k.max_concurrent > 0 ? String(k.max_concurrent) : '',
+    expiresAtLocal: toDatetimeLocal(k.expires_at),
+    allowedModels: [...k.allowed_models],
+  };
+}
+
+function toggleAllowedModel(modelName: string) {
+  const form = editing.value;
+  if (!form) {
+    return;
+  }
+  if (form.allowedModels.includes(modelName)) {
+    form.allowedModels = form.allowedModels.filter((m) => m !== modelName);
+  } else {
+    form.allowedModels = [...form.allowedModels, modelName];
+  }
+}
+
+function parseOptionalNonNegInt(raw: string, label: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return 0;
+  }
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 0) {
+    modalError.value = `${label}必须为 0 或正整数`;
+    return null;
+  }
+  return n;
+}
+
+async function saveEdit() {
+  const form = editing.value;
+  if (!form || saving.value) {
+    return;
+  }
+  modalError.value = '';
+  const rpm = parseOptionalNonNegInt(form.rpmLimit, '每分钟请求上限');
+  if (rpm === null) {
+    return;
+  }
+  const maxConc = parseOptionalNonNegInt(form.maxConcurrent, '最大并发数');
+  if (maxConc === null) {
+    return;
+  }
+  let expiresAt = '';
+  if (form.expiresAtLocal.trim()) {
+    const parsed = new Date(form.expiresAtLocal);
+    if (Number.isNaN(parsed.getTime())) {
+      modalError.value = '过期时间格式无效';
+      return;
+    }
+    expiresAt = parsed.toISOString();
+  }
+
+  saving.value = true;
+  try {
+    await api<GatewayKey>(`/keys/${form.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name: form.name.trim() || 'default',
+        rpm_limit: rpm,
+        max_concurrent: maxConc,
+        expires_at: expiresAt,
+        allowed_models: form.allowedModels,
+      }),
+    });
+    editing.value = null;
+    await load();
+    showToast('已保存网关 Key 配置');
+  } catch (e) {
+    modalError.value = errorMessage(e);
+  } finally {
+    saving.value = false;
   }
 }
 
@@ -77,6 +191,14 @@ async function remove(k: GatewayKey) {
   } catch (e) {
     error.value = errorMessage(e);
   }
+}
+
+function isExpired(k: GatewayKey): boolean {
+  if (!k.expires_at) {
+    return false;
+  }
+  const t = new Date(k.expires_at).getTime();
+  return !Number.isNaN(t) && t <= Date.now();
 }
 
 function isRevealed(id: number): boolean {
@@ -110,7 +232,8 @@ onMounted(() => {
       <div class="page-title-group">
         <h2>网关 Key</h2>
         <p class="page-desc">
-          客户端使用网关 Key 鉴权访问；上游厂商 API Key 始终留在网关内部，不会暴露给调用方。
+          客户端使用网关 Key 鉴权访问；可按 Key
+          配置独立限速、并发上限、过期时间与允许访问的模型范围。
         </p>
       </div>
       <div class="row">
@@ -152,7 +275,7 @@ onMounted(() => {
         <code class="secret-code">{{ created.key }}</code>
         <CopyButton :text="created.key" toast-message="网关 Key 已复制" />
       </div>
-      <p class="secondary small">已保存，可随时在下方列表中查看或复制。</p>
+      <p class="secondary small">已保存，可随时在下方列表中查看、复制或配置限速与模型白名单。</p>
     </div>
 
     <div class="card table-card">
@@ -173,7 +296,7 @@ onMounted(() => {
               <th>名称</th>
               <th>密钥</th>
               <th>状态</th>
-              <th>创建时间</th>
+              <th>配额与范围</th>
               <th>最后使用</th>
               <th class="num">操作</th>
             </tr>
@@ -198,15 +321,35 @@ onMounted(() => {
                 <span v-else class="muted small">{{ k.prefix }}…（旧版 Key 仅存前缀）</span>
               </td>
               <td>
-                <span class="badge" :class="k.enabled ? 'ok' : 'off'">
+                <span class="badge" :class="!k.enabled ? 'off' : isExpired(k) ? 'danger' : 'ok'">
                   <span class="status-dot" />
-                  {{ k.enabled ? '启用' : '停用' }}
+                  {{ !k.enabled ? '停用' : isExpired(k) ? '已过期' : '启用' }}
                 </span>
               </td>
-              <td class="muted nowrap tabular">{{ formatTime(k.created_at) }}</td>
+              <td>
+                <div class="row small" style="flex-wrap: wrap; gap: 6px">
+                  <span v-if="k.rpm_limit > 0" class="badge">{{ k.rpm_limit }} RPM</span>
+                  <span v-if="k.max_concurrent > 0" class="badge">并发 {{ k.max_concurrent }}</span>
+                  <span v-if="k.allowed_models.length" class="badge accent">
+                    限 {{ k.allowed_models.length }} 个模型
+                  </span>
+                  <span v-if="k.expires_at" class="badge" :class="isExpired(k) ? 'danger' : 'off'">
+                    截止 {{ formatTime(k.expires_at) }}
+                  </span>
+                  <span
+                    v-if="
+                      !k.rpm_limit && !k.max_concurrent && !k.allowed_models.length && !k.expires_at
+                    "
+                    class="muted"
+                  >
+                    全局默认 · 全部模型
+                  </span>
+                </div>
+              </td>
               <td class="muted nowrap tabular">{{ formatTime(k.last_used_at) }}</td>
               <td>
                 <div class="actions">
+                  <button type="button" class="ghost sm" @click="openEdit(k)">编辑</button>
                   <button type="button" class="ghost sm" @click="toggle(k)">
                     {{ k.enabled ? '停用' : '启用' }}
                   </button>
@@ -218,5 +361,86 @@ onMounted(() => {
         </table>
       </div>
     </div>
+
+    <BaseModal v-if="editing" title="编辑网关 Key 策略" @close="editing = null">
+      <form id="key-edit-form" class="stack" @submit.prevent="saveEdit">
+        <div class="field">
+          <label for="edit-key-name">名称</label>
+          <input id="edit-key-name" v-model="editing.name" placeholder="例如 cursor / ci-bot" />
+        </div>
+
+        <div class="form-grid">
+          <div class="field">
+            <label for="edit-key-rpm">每分钟请求上限（RPM）</label>
+            <input
+              id="edit-key-rpm"
+              v-model="editing.rpmLimit"
+              type="text"
+              inputmode="numeric"
+              placeholder="留空或 0 表示沿用全局"
+            />
+          </div>
+          <div class="field">
+            <label for="edit-key-concurrent">最大并发数</label>
+            <input
+              id="edit-key-concurrent"
+              v-model="editing.maxConcurrent"
+              type="text"
+              inputmode="numeric"
+              placeholder="留空或 0 表示沿用全局"
+            />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="edit-key-expires">过期时间（可选，留空表示永不过期）</label>
+          <div class="row">
+            <input
+              id="edit-key-expires"
+              v-model="editing.expiresAtLocal"
+              type="datetime-local"
+              style="flex: 1"
+            />
+            <button
+              v-if="editing.expiresAtLocal"
+              type="button"
+              class="ghost sm"
+              @click="editing.expiresAtLocal = ''"
+            >
+              清空
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="field-caption">
+            允许访问的模型（全不选表示允许全部模型，当前已选 {{ editing.allowedModels.length }} 个）
+          </span>
+          <div v-if="models.length" class="tag-list">
+            <button
+              v-for="m in models"
+              :key="m.id"
+              type="button"
+              class="chip-btn"
+              :class="{ active: editing.allowedModels.includes(m.name) }"
+              @click="toggleAllowedModel(m.name)"
+            >
+              <span class="mono">{{ m.name }}</span>
+            </button>
+          </div>
+          <p v-else class="field-hint">当前尚未配置任何模型。</p>
+        </div>
+      </form>
+
+      <template #footer>
+        <p v-if="modalError" class="error">{{ modalError }}</p>
+        <div class="row space-between">
+          <button type="button" class="ghost" @click="editing = null">取消</button>
+          <button type="submit" form="key-edit-form" class="primary" :disabled="saving">
+            {{ saving ? '保存中…' : '保存策略' }}
+          </button>
+        </div>
+      </template>
+    </BaseModal>
   </section>
 </template>

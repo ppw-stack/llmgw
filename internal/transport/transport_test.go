@@ -135,7 +135,7 @@ func TestPresetUpstreamURLs(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		if got := upstreamURL(tc.target); got != tc.want {
+		if got := upstreamURL(tc.target, EndpointDefault); got != tc.want {
 			t.Fatalf("%s: upstream url = %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -763,6 +763,17 @@ func TestNoFailoverOnUnconfiguredStatus(t *testing.T) {
 	}
 }
 
+// mustSessionHeaderValue fails the test when the derived session header cannot
+// be computed.
+func mustSessionHeaderValue(t *testing.T, r *http.Request, in Request, target router.Target) string {
+	t.Helper()
+	value, err := sessionHeaderValue(r, in, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
 // TestSessionHeaderValueIsStablePerConversation: every turn of one
 // conversation maps to the same value while a different conversation starts
 // from a different prefix. A per-request random value would satisfy the
@@ -774,9 +785,9 @@ func TestSessionHeaderValueIsStablePerConversation(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"system","content":"you are a bot"},{"role":"user","content":"` + first + `"}]}`)
 		return Request{Protocol: config.ProtocolOpenAI, Meta: ingress.Meta{RawBody: body}, APIKeyID: 7}
 	}
-	one := sessionHeaderValue(httptest.NewRequest(http.MethodPost, "/", nil), conv("hello"), target)
-	two := sessionHeaderValue(httptest.NewRequest(http.MethodPost, "/", nil), conv("hello"), target)
-	other := sessionHeaderValue(httptest.NewRequest(http.MethodPost, "/", nil), conv("different"), target)
+	one := mustSessionHeaderValue(t, httptest.NewRequest(http.MethodPost, "/", nil), conv("hello"), target)
+	two := mustSessionHeaderValue(t, httptest.NewRequest(http.MethodPost, "/", nil), conv("hello"), target)
+	other := mustSessionHeaderValue(t, httptest.NewRequest(http.MethodPost, "/", nil), conv("different"), target)
 
 	if one != two {
 		t.Fatalf("same conversation derived %q and %q", one, two)
@@ -796,7 +807,7 @@ func TestSessionHeaderValuePrefersClientHeader(t *testing.T) {
 	target := router.Target{SessionHeader: "x-opencode-session"}
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("x-opencode-session", "ses_from_client")
-	if got := sessionHeaderValue(req, Request{APIKeyID: 1}, target); got != "ses_from_client" {
+	if got := mustSessionHeaderValue(t, req, Request{APIKeyID: 1}, target); got != "ses_from_client" {
 		t.Fatalf("value = %q, want the client's own header", got)
 	}
 }
@@ -809,18 +820,18 @@ func TestSessionHeaderValueReusesAliases(t *testing.T) {
 	alias := httptest.NewRequest(http.MethodPost, "/", nil)
 	alias.Header.Set("x-session-id", "conv-42")
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	got := sessionHeaderValue(alias, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target)
+	got := mustSessionHeaderValue(t, alias, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target)
 
 	same := httptest.NewRequest(http.MethodPost, "/", nil)
 	same.Header.Set("x-session-id", "conv-42")
-	again := sessionHeaderValue(same, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target)
+	again := mustSessionHeaderValue(t, same, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target)
 	if got != again {
 		t.Fatalf("alias-derived value is not stable: %q vs %q", got, again)
 	}
 
 	different := httptest.NewRequest(http.MethodPost, "/", nil)
 	different.Header.Set("x-session-id", "conv-43")
-	if other := sessionHeaderValue(different, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target); other == got {
+	if other := mustSessionHeaderValue(t, different, Request{APIKeyID: 1, Meta: ingress.Meta{RawBody: body}}, target); other == got {
 		t.Fatalf("different alias values share %q", got)
 	}
 }

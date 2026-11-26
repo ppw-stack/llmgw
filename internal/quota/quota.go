@@ -95,6 +95,11 @@ type Target struct {
 // DefaultTTL is how long a quota report stays fresh.
 const DefaultTTL = 60 * time.Second
 
+// DefaultRoutingStaleTTL is the maximum age of a cached quota report that
+// routing may still act upon. Older reports are treated as unknown so a
+// transient quota-endpoint outage never leaves an instance degraded forever.
+const DefaultRoutingStaleTTL = 5 * time.Minute
+
 // Service answers quota questions about instances. Reports are cached for a
 // short while so a polling console does not hammer the vendor endpoints.
 type Service struct {
@@ -124,6 +129,17 @@ func NewServiceWithClient(client *Client, ttl time.Duration) *Service {
 // its credentials or proxy settings change.
 func (s *Service) Invalidate(instanceID int64) {
 	s.cache.delete(instanceID)
+}
+
+// QuotaState returns the cached peak window usage percentage and exhaustion
+// flag for instanceName without triggering any upstream I/O. It satisfies
+// router.QuotaProvider for zero-latency data-plane routing decisions.
+func (s *Service) QuotaState(instanceName string) (maxUsedPct float64, exhausted bool, ok bool) {
+	maxAge := DefaultRoutingStaleTTL
+	if s.ttl*5 > maxAge {
+		maxAge = s.ttl * 5
+	}
+	return s.cache.stateByName(instanceName, maxAge)
 }
 
 // Report returns the quota of one instance.

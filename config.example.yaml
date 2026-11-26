@@ -208,3 +208,10 @@ models:
         priority: 1
         # only: true 表示这个候选只在窗口内参与路由，窗口外直接跳过；
         # 完整示例见 docs/routing.md 的「按时段调度候选」一节。
+
+# 轻量异步 Webhook 告警（可选，支持热重载）：
+# 在接入点触发熔断或上游返回 401/403（API Key 失效）时异步推送 JSON 告警。
+# alerts:
+#   webhook_url: ""
+#   cooldown: 5m
+

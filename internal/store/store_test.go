@@ -36,6 +36,25 @@ func testStoreAt(t *testing.T, path string) *Store {
 	return st
 }
 
+// TestListKeysRejectsCorruptAllowedModels: corrupted allowlist JSON must
+// surface an error instead of silently degrading to "allow every model".
+func TestListKeysRejectsCorruptAllowedModels(t *testing.T) {
+	t.Parallel()
+	st := testStore(t)
+	key, err := st.CreateKeyWithPolicy("bot", "hash-corrupt", "prefix", "", KeyPolicy{
+		AllowedModels: []string{"m1"},
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	if _, err := st.db.Exec(`UPDATE api_keys SET allowed_models_json=? WHERE id=?`, `not-json`, key.ID); err != nil {
+		t.Fatalf("corrupt allowed_models_json: %v", err)
+	}
+	if _, err := st.ListKeys(); err == nil {
+		t.Fatal("ListKeys should reject corrupted allowed_models_json")
+	}
+}
+
 func TestEnqueueDuringCloseDoesNotPanic(t *testing.T) {
 	st := testStore(t)
 

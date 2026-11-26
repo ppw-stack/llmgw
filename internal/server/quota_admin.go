@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/pw/llmgw/internal/config"
+	"github.com/pw/llmgw/internal/preset"
 	"github.com/pw/llmgw/internal/quota"
 )
 
@@ -46,6 +49,46 @@ func (s *Server) quotaReports(r *http.Request) []quota.Report {
 	}
 	wg.Wait()
 	return reports
+}
+
+// StartQuotaRefresh periodically refreshes subscription quota reports for all
+// built-in instances that expose a quota endpoint, keeping the router's
+// in-memory quota cache warm even when nobody has the console open.
+func (s *Server) StartQuotaRefresh(ctx context.Context) {
+	s.refreshQuotaOnce(ctx)
+	ticker := time.NewTicker(quota.DefaultTTL)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshQuotaOnce(ctx)
+		}
+	}
+}
+
+func (s *Server) refreshQuotaOnce(parent context.Context) {
+	targets, err := s.quotaTargets()
+	if err != nil {
+		s.log.Warn("background quota refresh: list instances failed", "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		pr, ok := preset.Lookup(target.PresetID)
+		if !ok || pr.Quota == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(t quota.Target) {
+			defer wg.Done()
+			_ = s.quota.Report(ctx, t)
+		}(target)
+	}
+	wg.Wait()
 }
 
 // quotaTargets lists the instances together with their plaintext upstream

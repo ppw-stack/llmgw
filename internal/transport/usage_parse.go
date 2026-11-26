@@ -51,12 +51,34 @@ func (u *usageAcc) observeLine(protocol string, line []byte) {
 		}
 	default:
 		if r := gjson.GetBytes(payload, "usage"); r.Exists() && r.IsObject() {
-			u.prompt = r.Get("prompt_tokens").Int()
-			u.completion = r.Get("completion_tokens").Int()
-			u.cacheRead = openAICacheRead(r)
-			u.seen = true
+			u.observeOpenAIUsage(r)
+			return
+		}
+		// OpenAI Responses API reports usage inside response.usage on terminal
+		// events (response.completed / response.incomplete).
+		switch gjson.GetBytes(payload, "type").String() {
+		case "response.completed", "response.incomplete":
+			if r := gjson.GetBytes(payload, "response.usage"); r.Exists() && r.IsObject() {
+				u.observeOpenAIUsage(r)
+			}
 		}
 	}
+}
+
+// observeOpenAIUsage parses both Chat Completions (prompt_tokens /
+// completion_tokens) and Responses API (input_tokens / output_tokens) shapes.
+func (u *usageAcc) observeOpenAIUsage(usage gjson.Result) {
+	if usage.Get("input_tokens").Exists() || usage.Get("output_tokens").Exists() {
+		u.prompt = usage.Get("input_tokens").Int()
+		u.completion = usage.Get("output_tokens").Int()
+		u.cacheRead = openAIResponsesCacheRead(usage)
+		u.seen = true
+		return
+	}
+	u.prompt = usage.Get("prompt_tokens").Int()
+	u.completion = usage.Get("completion_tokens").Int()
+	u.cacheRead = openAICacheRead(usage)
+	u.seen = true
 }
 
 // openAICacheRead reads the cached prompt tokens from the two usage shapes
@@ -67,6 +89,15 @@ func openAICacheRead(usage gjson.Result) int64 {
 		return v
 	}
 	return usage.Get("prompt_cache_hit_tokens").Int()
+}
+
+// openAIResponsesCacheRead reads cached input tokens from the OpenAI Responses
+// API usage object.
+func openAIResponsesCacheRead(usage gjson.Result) int64 {
+	if v := usage.Get("input_tokens_details.cached_tokens").Int(); v > 0 {
+		return v
+	}
+	return openAICacheRead(usage)
 }
 
 // observeBody extracts usage from a non-streaming JSON response.
@@ -85,10 +116,7 @@ func (u *usageAcc) observeBody(protocol string, body []byte) {
 		}
 	default:
 		if r := gjson.GetBytes(body, "usage"); r.Exists() && r.IsObject() {
-			u.prompt = r.Get("prompt_tokens").Int()
-			u.completion = r.Get("completion_tokens").Int()
-			u.cacheRead = openAICacheRead(r)
-			u.seen = true
+			u.observeOpenAIUsage(r)
 		}
 	}
 }

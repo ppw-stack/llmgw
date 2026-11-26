@@ -21,14 +21,18 @@ import (
 
 const schema = `
 CREATE TABLE IF NOT EXISTS api_keys (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT    NOT NULL,
-    key_hash     TEXT    NOT NULL UNIQUE,
-    prefix       TEXT    NOT NULL,
-    enabled      INTEGER NOT NULL DEFAULT 1,
-    created_at   TEXT    NOT NULL,
-    last_used_at TEXT,
-    key_enc      TEXT    NOT NULL DEFAULT ''
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                TEXT    NOT NULL,
+    key_hash            TEXT    NOT NULL UNIQUE,
+    prefix              TEXT    NOT NULL,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    created_at          TEXT    NOT NULL,
+    last_used_at        TEXT,
+    key_enc             TEXT    NOT NULL DEFAULT '',
+    rpm_limit           INTEGER NOT NULL DEFAULT 0,
+    max_concurrent      INTEGER NOT NULL DEFAULT 0,
+    expires_at          TEXT,
+    allowed_models_json TEXT    NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -155,6 +159,52 @@ type APIKey struct {
 	EncryptedKey string `json:"-"`
 	// Key 是解密后的明文，仅在管理台列表响应中回显；旧 Key 没有密文时为空。
 	Key string `json:"key,omitempty"`
+	// RPMLimit overrides the global server.key_rpm when > 0.
+	RPMLimit int `json:"rpm_limit"`
+	// MaxConcurrent overrides the global server.key_max_concurrent when > 0.
+	MaxConcurrent int `json:"max_concurrent"`
+	// ExpiresAt is the optional expiration timestamp in UTC. Nil means never expires.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// AllowedModels restricts which logical models this key may access. Empty means all models.
+	AllowedModels []string `json:"allowed_models"`
+}
+
+// AllowsModel reports whether this gateway key may access the given model.
+func (k APIKey) AllowsModel(model string) bool {
+	if len(k.AllowedModels) == 0 {
+		return true
+	}
+	for _, allowed := range k.AllowedModels {
+		if allowed == model {
+			return true
+		}
+	}
+	return false
+}
+
+// IsExpired reports whether the key has passed its configured expiration time.
+func (k APIKey) IsExpired(now time.Time) bool {
+	return k.ExpiresAt != nil && !now.Before(*k.ExpiresAt)
+}
+
+// KeyPolicy holds optional per-key limits and permissions.
+type KeyPolicy struct {
+	RPMLimit      int
+	MaxConcurrent int
+	ExpiresAt     *time.Time
+	AllowedModels []string
+}
+
+// KeyPatch selectively updates fields of an existing gateway key.
+type KeyPatch struct {
+	Name          *string
+	Enabled       *bool
+	RPMLimit      *int
+	MaxConcurrent *int
+	// SetExpiresAt indicates whether ExpiresAt should be updated (nil clears it).
+	SetExpiresAt  bool
+	ExpiresAt     *time.Time
+	AllowedModels *[]string
 }
 
 type LogEntry struct {
@@ -731,15 +781,29 @@ func migrateAPIKeySecret(ctx context.Context, db *sql.DB, log *slog.Logger) erro
 	if err != nil {
 		return fmt.Errorf("read api_keys table columns: %w", err)
 	}
-	if len(cols) == 0 || cols["key_enc"] {
+	if len(cols) == 0 {
 		return nil
 	}
-	if _, err := db.ExecContext(ctx,
-		`ALTER TABLE api_keys ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''`); err != nil {
-		return fmt.Errorf("add api_keys key_enc column: %w", err)
+	additions := []struct {
+		col string
+		ddl string
+	}{
+		{"key_enc", `ALTER TABLE api_keys ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''`},
+		{"rpm_limit", `ALTER TABLE api_keys ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0`},
+		{"max_concurrent", `ALTER TABLE api_keys ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`},
+		{"expires_at", `ALTER TABLE api_keys ADD COLUMN expires_at TEXT`},
+		{"allowed_models_json", `ALTER TABLE api_keys ADD COLUMN allowed_models_json TEXT NOT NULL DEFAULT '[]'`},
 	}
-	if log != nil {
-		log.Info("added the key_enc column to api_keys")
+	for _, add := range additions {
+		if cols[add.col] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, add.ddl); err != nil {
+			return fmt.Errorf("add api_keys %s column: %w", add.col, err)
+		}
+		if log != nil {
+			log.Info("added column to api_keys", "column", add.col)
+		}
 	}
 	return nil
 }
@@ -1055,8 +1119,44 @@ type KeyRecord struct {
 	Key  APIKey
 }
 
+func parseAllowedModelsJSON(raw string) ([]string, error) {
+	var out []string
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			return nil, fmt.Errorf("parse allowed_models_json: %w", err)
+		}
+	}
+	if out == nil {
+		return []string{}, nil
+	}
+	return out, nil
+}
+
+func normalizeAllowedModels(models []string) []string {
+	cleaned := make([]string, 0, len(models))
+	seen := make(map[string]bool, len(models))
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		cleaned = append(cleaned, m)
+	}
+	return cleaned
+}
+
+func encodeAllowedModelsJSON(models []string) (string, error) {
+	b, err := json.Marshal(normalizeAllowedModels(models))
+	if err != nil {
+		return "", fmt.Errorf("encode allowed_models_json: %w", err)
+	}
+	return string(b), nil
+}
+
 func (s *Store) KeyRecords() ([]KeyRecord, error) {
-	rows, err := s.db.Query(`SELECT key_hash, id, name, prefix, enabled, created_at, last_used_at
+	rows, err := s.db.Query(`SELECT key_hash, id, name, prefix, enabled, created_at, last_used_at,
+		rpm_limit, max_concurrent, expires_at, allowed_models_json
 		FROM api_keys`)
 	if err != nil {
 		return nil, err
@@ -1067,9 +1167,11 @@ func (s *Store) KeyRecords() ([]KeyRecord, error) {
 		var rec KeyRecord
 		var enabled int
 		var created string
-		var last sql.NullString
+		var last, expires sql.NullString
+		var allowedJSON string
 		if err := rows.Scan(&rec.Hash, &rec.Key.ID, &rec.Key.Name, &rec.Key.Prefix,
-			&enabled, &created, &last); err != nil {
+			&enabled, &created, &last, &rec.Key.RPMLimit, &rec.Key.MaxConcurrent,
+			&expires, &allowedJSON); err != nil {
 			return nil, err
 		}
 		rec.Key.Enabled = enabled == 1
@@ -1079,26 +1181,67 @@ func (s *Store) KeyRecords() ([]KeyRecord, error) {
 				rec.Key.LastUsedAt = &t
 			}
 		}
+		if expires.Valid && expires.String != "" {
+			if t, err := time.Parse(time.RFC3339Nano, expires.String); err == nil {
+				rec.Key.ExpiresAt = &t
+			}
+		}
+		allowedModels, err := parseAllowedModelsJSON(allowedJSON)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", rec.Key.ID, err)
+		}
+		rec.Key.AllowedModels = allowedModels
 		out = append(out, rec)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) CreateKey(name, hash, prefix, encrypted string) (*APIKey, error) {
+	return s.CreateKeyWithPolicy(name, hash, prefix, encrypted, KeyPolicy{})
+}
+
+// CreateKeyWithPolicy creates a gateway key with optional RPM, concurrency,
+// expiration, and model allowlist limits.
+func (s *Store) CreateKeyWithPolicy(name, hash, prefix, encrypted string, policy KeyPolicy) (*APIKey, error) {
 	now := time.Now().UTC()
+	var expiresArg any
+	var expiresOut *time.Time
+	if policy.ExpiresAt != nil {
+		t := policy.ExpiresAt.UTC()
+		expiresArg = t.Format(time.RFC3339Nano)
+		expiresOut = &t
+	}
+	allowedModels := normalizeAllowedModels(policy.AllowedModels)
+	allowedJSON, err := encodeAllowedModelsJSON(allowedModels)
+	if err != nil {
+		return nil, err
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, key_enc) VALUES(?,?,?,1,?,?)`,
-		name, hash, prefix, now.Format(time.RFC3339Nano), encrypted)
+		`INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, key_enc, rpm_limit, max_concurrent, expires_at, allowed_models_json)
+		 VALUES(?,?,?,1,?,?,?,?,?,?)`,
+		name, hash, prefix, now.Format(time.RFC3339Nano), encrypted,
+		policy.RPMLimit, policy.MaxConcurrent, expiresArg, allowedJSON)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &APIKey{ID: id, Name: name, Prefix: prefix, Enabled: true, CreatedAt: now}, nil
+	return &APIKey{
+		ID:            id,
+		Name:          name,
+		Prefix:        prefix,
+		Enabled:       true,
+		CreatedAt:     now,
+		RPMLimit:      policy.RPMLimit,
+		MaxConcurrent: policy.MaxConcurrent,
+		ExpiresAt:     expiresOut,
+		AllowedModels: allowedModels,
+	}, nil
 }
 
 func (s *Store) ListKeys() ([]APIKey, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, prefix, enabled, created_at, last_used_at, key_enc
+		`SELECT id, name, prefix, enabled, created_at, last_used_at, key_enc,
+		        rpm_limit, max_concurrent, expires_at, allowed_models_json
 		 FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -1109,9 +1252,10 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 		var k APIKey
 		var enabled int
 		var created string
-		var last sql.NullString
+		var last, expires sql.NullString
+		var allowedJSON string
 		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &enabled, &created, &last,
-			&k.EncryptedKey); err != nil {
+			&k.EncryptedKey, &k.RPMLimit, &k.MaxConcurrent, &expires, &allowedJSON); err != nil {
 			return nil, err
 		}
 		k.Enabled = enabled == 1
@@ -1121,9 +1265,106 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 				k.LastUsedAt = &t
 			}
 		}
+		if expires.Valid && expires.String != "" {
+			if t, err := time.Parse(time.RFC3339Nano, expires.String); err == nil {
+				k.ExpiresAt = &t
+			}
+		}
+		allowedModels, err := parseAllowedModelsJSON(allowedJSON)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", k.ID, err)
+		}
+		k.AllowedModels = allowedModels
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+// UpdateKey applies only the fields present in the patch, then returns the
+// freshly read key. Updating only changed columns avoids overwriting
+// concurrent PATCH changes to other fields.
+func (s *Store) UpdateKey(id int64, patch KeyPatch) (*APIKey, error) {
+	setClauses := make([]string, 0, 6)
+	args := make([]any, 0, 7)
+	if patch.Name != nil {
+		setClauses = append(setClauses, "name=?")
+		args = append(args, *patch.Name)
+	}
+	if patch.Enabled != nil {
+		setClauses = append(setClauses, "enabled=?")
+		args = append(args, boolInt(*patch.Enabled))
+	}
+	if patch.RPMLimit != nil {
+		setClauses = append(setClauses, "rpm_limit=?")
+		args = append(args, *patch.RPMLimit)
+	}
+	if patch.MaxConcurrent != nil {
+		setClauses = append(setClauses, "max_concurrent=?")
+		args = append(args, *patch.MaxConcurrent)
+	}
+	if patch.SetExpiresAt {
+		setClauses = append(setClauses, "expires_at=?")
+		var expiresArg any
+		if patch.ExpiresAt != nil {
+			expiresArg = patch.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		args = append(args, expiresArg)
+	}
+	if patch.AllowedModels != nil {
+		encoded, err := encodeAllowedModelsJSON(*patch.AllowedModels)
+		if err != nil {
+			return nil, err
+		}
+		setClauses = append(setClauses, "allowed_models_json=?")
+		args = append(args, encoded)
+	}
+	if len(setClauses) > 0 {
+		args = append(args, id)
+		if _, err := s.db.Exec(
+			`UPDATE api_keys SET `+strings.Join(setClauses, ", ")+` WHERE id=?`, args...); err != nil {
+			return nil, err
+		}
+	}
+	return s.keyByID(id)
+}
+
+// keyByID reads one gateway key row with its full policy state.
+func (s *Store) keyByID(id int64) (*APIKey, error) {
+	var k APIKey
+	var enabled int
+	var created string
+	var last, expires sql.NullString
+	var allowedJSON string
+	err := s.db.QueryRow(
+		`SELECT id, name, prefix, enabled, created_at, last_used_at, key_enc,
+		        rpm_limit, max_concurrent, expires_at, allowed_models_json
+		 FROM api_keys WHERE id=?`, id).
+		Scan(&k.ID, &k.Name, &k.Prefix, &enabled, &created, &last, &k.EncryptedKey,
+			&k.RPMLimit, &k.MaxConcurrent, &expires, &allowedJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	k.Enabled = enabled == 1
+	k.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	if last.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, last.String); err == nil {
+			k.LastUsedAt = &t
+		}
+	}
+	if expires.Valid && expires.String != "" {
+		if t, err := time.Parse(time.RFC3339Nano, expires.String); err == nil {
+			k.ExpiresAt = &t
+		}
+	}
+	allowedModels, err := parseAllowedModelsJSON(allowedJSON)
+	if err != nil {
+		return nil, fmt.Errorf("key %d: %w", id, err)
+	}
+	k.AllowedModels = allowedModels
+	return &k, nil
 }
 
 func (s *Store) SetKeyEnabled(id int64, enabled bool) error {

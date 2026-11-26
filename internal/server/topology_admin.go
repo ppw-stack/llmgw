@@ -153,6 +153,10 @@ type effectiveCandidate struct {
 	Active bool `json:"active"`
 	// Window describes the time window that is active right now.
 	Window string `json:"window,omitempty"`
+	// QuotaDegraded reports whether the instance is demoted due to exhausted quota.
+	QuotaDegraded bool `json:"quota_degraded,omitempty"`
+	// QuotaUsedPct is the peak cached quota usage percentage when known.
+	QuotaUsedPct *float64 `json:"quota_used_pct,omitempty"`
 }
 
 func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *adminIdentity, rawID string) {
@@ -712,20 +716,21 @@ func (s *Server) modelViews(records []store.ModelRecord) []modelView {
 
 // effectiveCandidates describes the current routing state of one model.
 func (s *Server) effectiveCandidates(model string, now time.Time) []effectiveCandidate {
-	snap := s.router.Snapshot()
-	if snap == nil {
+	previews := s.router.PreviewModel(model, now)
+	if len(previews) == 0 {
 		return []effectiveCandidate{}
 	}
-	previews := snap.PreviewModel(model, now)
 	out := make([]effectiveCandidate, 0, len(previews))
 	for _, p := range previews {
 		out = append(out, effectiveCandidate{
-			Instance:     p.Instance,
-			Upstream:     p.Upstream,
-			Priority:     p.Priority,
-			BasePriority: p.BasePriority,
-			Active:       p.Active,
-			Window:       p.Window,
+			Instance:      p.Instance,
+			Upstream:      p.Upstream,
+			Priority:      p.Priority,
+			BasePriority:  p.BasePriority,
+			Active:        p.Active,
+			Window:        p.Window,
+			QuotaDegraded: p.QuotaDegraded,
+			QuotaUsedPct:  p.QuotaUsedPct,
 		})
 	}
 	return out

@@ -340,10 +340,17 @@ func TestModelCannotListTheSameInstanceTwice(t *testing.T) {
 }
 
 func TestUnsupportedStrategyRejected(t *testing.T) {
+	for _, valid := range []string{StrategyFailover, StrategyRoundRobin, StrategyLeastUsed, StrategySticky} {
+		body := strings.Replace(topologyConfig, "  - name: MiniMax-M3.1-Flash",
+			"  - name: MiniMax-M3.1-Flash\n    strategy: "+valid, 1)
+		if _, err := Load(writeConfig(t, body)); err != nil {
+			t.Fatalf("strategy %q should be supported, got %v", valid, err)
+		}
+	}
 	body := strings.Replace(topologyConfig, "  - name: MiniMax-M3.1-Flash",
-		"  - name: MiniMax-M3.1-Flash\n    strategy: round_robin", 1)
+		"  - name: MiniMax-M3.1-Flash\n    strategy: weighted_random", 1)
 	_, err := Load(writeConfig(t, body))
-	if err == nil || !strings.Contains(err.Error(), "not supported yet") {
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("expected strategy error, got %v", err)
 	}
 }

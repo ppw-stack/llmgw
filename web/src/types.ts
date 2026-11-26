@@ -216,6 +216,9 @@ export interface ModelInstance {
   windows?: TimeWindow[];
 }
 
+/** 模型支持的路由调度策略 */
+export type RoutingStrategy = 'failover' | 'round_robin' | 'least_used' | 'sticky';
+
 /** 当前时刻某个候选的路由状态 */
 export interface EffectiveCandidate {
   instance: string;
@@ -229,6 +232,10 @@ export interface EffectiveCandidate {
   active: boolean;
   /** 当前命中的时间窗口 */
   window?: string;
+  /** 是否因套餐额度已满/告急被自动降级到备选 */
+  quota_degraded?: boolean;
+  /** 已知的最高套餐窗口已用百分比（0-100） */
+  quota_used_pct?: number;
 }
 
 /** GET /admin/api/models 中的单个模型 */
@@ -252,7 +259,7 @@ export interface ModelMetadata {
 export interface Model {
   id: number;
   name: string;
-  strategy: 'failover';
+  strategy: RoutingStrategy;
   /** 自定义元数据；为空时回退到内置预设的官方参数。 */
   metadata?: ModelMetadata;
   instances: ModelInstance[];

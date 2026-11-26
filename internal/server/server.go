@@ -133,6 +133,9 @@ func New(o Options) (*Server, error) {
 	// A nil AdminEnabled means the management surface stays open.
 	s.adminEnabled.Store(o.AdminEnabled == nil || *o.AdminEnabled)
 	s.SetAdminPrefixes(o.AdminPrefixes)
+	if s.router != nil {
+		s.router.SetQuotaProvider(s.quota)
+	}
 	return s, nil
 }
 
@@ -465,7 +468,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol, en
 		meta.Stream = false
 	}
 
-	targets, err := s.router.Resolve(protocol, meta.Model)
+	targets, err := s.router.ResolveWithOptions(protocol, meta.Model, router.ResolveOptions{
+		SessionKey: ingress.SessionKey(r.Header, key.ID, body),
+	})
 	if err != nil {
 		var nf *router.ModelNotFoundError
 		if errors.As(err, &nf) && nf.Hint != "" {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -221,75 +220,8 @@ func sessionHeaderValue(r *http.Request, in Request, target router.Target) strin
 	return "ses_" + hex.EncodeToString(byteSeed(seed+conversationPrefix(in.Meta.RawBody)))
 }
 
-// conversationPrefix fingerprints the part of a request that identifies a
-// conversation: its system prompt and first user message. Later turns repeat
-// that prefix, which keeps the derived session stable, while a different
-// conversation starts from a different prefix. Supports both Chat Completions /
-// Anthropic Messages (`system` + `messages`) and OpenAI Responses API
-// (`instructions` + `input`).
 func conversationPrefix(body []byte) string {
-	var payload struct {
-		System       json.RawMessage `json:"system"`
-		Instructions json.RawMessage `json:"instructions"`
-		Messages     []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-		Input json.RawMessage `json:"input"`
-	}
-	if len(body) == 0 {
-		return ""
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-	h := sha256.New()
-	if len(payload.System) > 0 {
-		h.Write(payload.System)
-	}
-	if len(payload.Instructions) > 0 {
-		h.Write(payload.Instructions)
-	}
-	if len(payload.Messages) > 0 {
-		// Every system prompt the client sends, whichever shape it uses: the
-		// top-level field above for Anthropic, a message here for OpenAI.
-		for _, m := range payload.Messages {
-			if m.Role == "system" || m.Role == "developer" {
-				h.Write(m.Content)
-			}
-		}
-		// Then the first user turn, which is where two conversations sharing a
-		// system prompt diverge.
-		for _, m := range payload.Messages {
-			if m.Role == "user" {
-				h.Write(m.Content)
-				break
-			}
-		}
-	} else if len(payload.Input) > 0 {
-		// OpenAI Responses API accepts input as either a plain string or an
-		// array of message/item objects.
-		var items []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}
-		if err := json.Unmarshal(payload.Input, &items); err == nil {
-			for _, m := range items {
-				if m.Role == "system" || m.Role == "developer" {
-					h.Write(m.Content)
-				}
-			}
-			for _, m := range items {
-				if m.Role == "user" {
-					h.Write(m.Content)
-					break
-				}
-			}
-		} else {
-			h.Write(payload.Input)
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	return ingress.ConversationPrefix(body)
 }
 
 // byteSeed spreads the seed over 16 bytes so the caller can hex-encode it into

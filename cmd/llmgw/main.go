@@ -155,6 +155,7 @@ func main() {
 		logger.Warn("clean expired sessions", "err", err)
 	}
 	go cleanupSessions(ctx, st, logger)
+	go srv.StartQuotaRefresh(ctx)
 	if days := cfg.Database.RetentionDays; days > 0 {
 		go pruneHistory(ctx, st, logger, days)
 	}

@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { api } from '../api';
+import { api, formatMs } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import BaseModal from '../components/BaseModal.vue';
 import CopyButton from '../components/CopyButton.vue';
 import type {
+  EndpointTestStatus,
   Instance,
   InstanceEndpoint,
   InstancePayload,
   InstancePreset,
+  InstanceTestPayload,
+  InstanceTestResponse,
   Model,
   PresetModelCandidate,
   PresetModelCandidates,
@@ -79,6 +82,16 @@ const candidateSearch = ref('');
 const candidatesLoading = ref(false);
 const candidatesWarning = ref('');
 const candidatesError = ref('');
+
+/** 接入点连通性测试状态：按接入点 id 索引。 */
+const testingIds = ref<Record<number, boolean>>({});
+const testResults = ref<Record<number, InstanceTestResponse>>({});
+const testErrors = ref<Record<number, string>>({});
+
+/** 弹窗草稿连通性测试状态。 */
+const draftTesting = ref(false);
+const draftTestResult = ref<InstanceTestResponse | null>(null);
+const draftTestError = ref('');
 
 /** 上游套餐额度：按接入点 id 索引。 */
 const quotaReports = ref<QuotaReport[]>([]);
@@ -582,7 +595,120 @@ function openEdit(inst: Instance) {
 
 function closeModal() {
   editing.value = null;
+  draftTestResult.value = null;
+  draftTestError.value = '';
   resetCandidates();
+}
+
+function testStatusLabel(status: EndpointTestStatus): string {
+  switch (status) {
+    case 'ok':
+      return '正常';
+    case 'reachable':
+      return '可达';
+    case 'auth_error':
+      return '鉴权失败';
+    case 'error':
+      return '失败';
+  }
+}
+
+function testStatusClass(status: EndpointTestStatus): string {
+  switch (status) {
+    case 'ok':
+      return 'ok';
+    case 'reachable':
+      return 'accent';
+    case 'auth_error':
+    case 'error':
+      return 'danger';
+  }
+}
+
+function omitKey<T>(record: Record<number, T>, id: number): Record<number, T> {
+  const key = String(id);
+  const out: Record<number, T> = {};
+  for (const [k, v] of Object.entries(record)) {
+    if (k !== key) {
+      out[Number(k)] = v;
+    }
+  }
+  return out;
+}
+
+function clearCardTest(id: number) {
+  testResults.value = omitKey(testResults.value, id);
+  testErrors.value = omitKey(testErrors.value, id);
+}
+
+/** 测试已保存的接入点。 */
+async function testInstance(inst: Instance) {
+  testingIds.value = { ...testingIds.value, [inst.id]: true };
+  clearCardTest(inst.id);
+  try {
+    const res = await api<InstanceTestResponse>(`/instances/${inst.id}/test`, {
+      method: 'POST',
+    });
+    testResults.value = { ...testResults.value, [inst.id]: res };
+  } catch (e) {
+    testErrors.value = { ...testErrors.value, [inst.id]: errorMessage(e) };
+  } finally {
+    testingIds.value = omitKey(testingIds.value, inst.id);
+  }
+}
+
+/** 在弹窗保存前测试当前表单草稿。 */
+async function testDraft() {
+  const f = editing.value;
+  if (!f) {
+    return;
+  }
+  draftTestError.value = '';
+  draftTestResult.value = null;
+
+  const payload: InstanceTestPayload = {
+    allow_private_upstream: f.allowPrivateUpstream,
+  };
+  if (f.id !== null) {
+    payload.instance_id = f.id;
+  }
+  if (f.mode === 'builtin') {
+    payload.preset = f.preset;
+  } else {
+    const endpoints = collectEndpoints(f);
+    if (!endpoints) {
+      draftTestError.value = error.value || '请先填写合法的端点地址';
+      return;
+    }
+    payload.endpoints = endpoints;
+  }
+  if (f.apiKey.trim()) {
+    payload.api_key = f.apiKey.trim();
+  } else if (f.id === null) {
+    draftTestError.value = '请先填写上游 API Key';
+    return;
+  }
+  if (f.proxyHasAuth) {
+    if (f.clearProxy) {
+      payload.proxy_url = '';
+    } else if (f.proxyUrl.trim()) {
+      payload.proxy_url = f.proxyUrl.trim();
+    }
+  } else {
+    payload.proxy_url = f.proxyUrl.trim();
+  }
+
+  draftTesting.value = true;
+  try {
+    draftTestResult.value = await api<InstanceTestResponse>('/instances/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    draftTestError.value = errorMessage(e);
+  } finally {
+    draftTesting.value = false;
+  }
 }
 
 async function save() {
@@ -813,6 +939,15 @@ onUnmounted(() => {
             <AppIcon name="external" :size="13" />
             <span>文档</span>
           </a>
+          <button
+            type="button"
+            class="ghost sm"
+            :disabled="Boolean(testingIds[inst.id])"
+            @click="testInstance(inst)"
+          >
+            <AppIcon name="activity" :size="13" />
+            <span>{{ testingIds[inst.id] ? '测试中…' : '测试' }}</span>
+          </button>
           <button type="button" class="ghost sm" @click="openEdit(inst)">
             <AppIcon name="edit" :size="13" />
             <span>编辑</span>
@@ -833,6 +968,34 @@ onUnmounted(() => {
           <span class="badge" :class="ep.protocol">{{ ep.protocol }}</span>
           <code class="endpoint-url">{{ ep.base_url }}</code>
           <CopyButton :text="ep.base_url" icon-only toast-message="Base URL 已复制" />
+        </div>
+      </div>
+
+      <div v-if="testResults[inst.id] || testErrors[inst.id]" class="quota-box">
+        <div class="row space-between">
+          <span class="quota-title">连通性测试</span>
+          <button
+            type="button"
+            class="icon-btn"
+            aria-label="关闭测试结果"
+            @click="clearCardTest(inst.id)"
+          >
+            <AppIcon name="close" :size="13" />
+          </button>
+        </div>
+        <p v-if="testErrors[inst.id]" class="small status-bad">{{ testErrors[inst.id] }}</p>
+        <div
+          v-for="ep in testResults[inst.id]?.endpoints ?? []"
+          :key="`${ep.protocol}:${ep.base_url}`"
+          class="row small"
+          style="flex-wrap: wrap; gap: 8px"
+        >
+          <span class="badge" :class="ep.protocol">{{ ep.protocol }}</span>
+          <span class="badge" :class="testStatusClass(ep.status)">
+            {{ testStatusLabel(ep.status) }}
+          </span>
+          <span class="mono muted">{{ formatMs(ep.latency_ms) }}</span>
+          <span>{{ ep.message }}</span>
         </div>
       </div>
 
@@ -1268,15 +1431,38 @@ onUnmounted(() => {
             </div>
           </div>
         </details>
+        <div v-if="draftTestResult || draftTestError" class="quota-box">
+          <span class="quota-title">连通性测试结果</span>
+          <p v-if="draftTestError" class="small status-bad">{{ draftTestError }}</p>
+          <div
+            v-for="ep in draftTestResult?.endpoints ?? []"
+            :key="`${ep.protocol}:${ep.base_url}`"
+            class="row small"
+            style="flex-wrap: wrap; gap: 8px"
+          >
+            <span class="badge" :class="ep.protocol">{{ ep.protocol }}</span>
+            <span class="badge" :class="testStatusClass(ep.status)">
+              {{ testStatusLabel(ep.status) }}
+            </span>
+            <span class="mono muted">{{ formatMs(ep.latency_ms) }}</span>
+            <span>{{ ep.message }}</span>
+          </div>
+        </div>
       </form>
 
       <template #footer>
         <p v-if="error" class="error">{{ error }}</p>
         <div class="row space-between">
           <button type="button" class="ghost" @click="closeModal">取消</button>
-          <button type="submit" form="instance-form" class="primary" :disabled="saving">
-            {{ saving ? '保存中…' : '保存接入点' }}
-          </button>
+          <div class="row">
+            <button type="button" class="ghost" :disabled="draftTesting" @click="testDraft">
+              <AppIcon name="activity" :size="14" />
+              <span>{{ draftTesting ? '测试中…' : '测试连接' }}</span>
+            </button>
+            <button type="submit" form="instance-form" class="primary" :disabled="saving">
+              {{ saving ? '保存中…' : '保存接入点' }}
+            </button>
+          </div>
         </div>
       </template>
     </BaseModal>

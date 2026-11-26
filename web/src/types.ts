@@ -85,6 +85,37 @@ export interface InstancePayload {
   timeout_secs?: number;
 }
 
+/** 单个协议端点的连通性探测状态 */
+export type EndpointTestStatus = 'ok' | 'reachable' | 'auth_error' | 'error';
+
+/** 单个协议端点的连通性探测结果 */
+export interface EndpointTestResult {
+  protocol: 'openai' | 'anthropic';
+  base_url: string;
+  status: EndpointTestStatus;
+  ok: boolean;
+  http_status?: number;
+  latency_ms: number;
+  model_count?: number;
+  message: string;
+}
+
+/** POST /admin/api/instances/{id}/test 与 /admin/api/instances/test 的响应 */
+export interface InstanceTestResponse {
+  ok: boolean;
+  endpoints: EndpointTestResult[];
+}
+
+/** POST /admin/api/instances/test 测试未保存草稿时提交的内容 */
+export interface InstanceTestPayload {
+  instance_id?: number;
+  preset?: string;
+  api_key?: string;
+  endpoints?: InstanceEndpoint[];
+  allow_private_upstream: boolean;
+  proxy_url?: string;
+}
+
 /** POST /admin/api/preset-models 返回的一个上游模型候选 */
 export interface PresetModelCandidate {
   id: string;

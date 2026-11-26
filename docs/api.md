@@ -314,6 +314,43 @@ DELETE /admin/api/instances/1   → 204
 
 仍被模型引用的接入点返回 `409`；先从模型的候选链里移除它才能删除。
 
+#### 连通性测试
+
+```
+# 测试已保存的接入点（使用已存 Key 与代理）
+POST /admin/api/instances/1/test
+
+# 测试未保存的表单草稿（编辑态可带 instance_id 复用已存 Key / 代理）
+POST /admin/api/instances/test
+{
+  "instance_id": 1,
+  "preset": "opencode-go",
+  "api_key": "...",
+  "proxy_url": "http://127.0.0.1:7890",
+  "allow_private_upstream": false
+}
+
+200 {
+  "ok": true,
+  "endpoints": [
+    {
+      "protocol": "openai",
+      "base_url": "https://opencode.ai/inference/go/openai/v1",
+      "status": "ok",
+      "ok": true,
+      "http_status": 200,
+      "latency_ms": 142,
+      "model_count": 8,
+      "message": "连接正常（返回 8 个模型）"
+    }
+  ]
+}
+```
+
+- 探测各协议端点的 `/models`（Anthropic 为 `/v1/models`），不消耗推理额度，也不影响数据面熔断计数。
+- `status` 取值：`ok`（2xx）、`reachable`（404/405，网络可达但上游未实现 `/models`）、`auth_error`（401/403）、`error`（超时、代理错误、5xx 等，错误信息已脱敏）。
+- 遵循与数据面一致的 SSRF 防护与代理安全拨号策略。
+
 ### 模型
 
 #### 列表

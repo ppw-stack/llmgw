@@ -35,15 +35,18 @@
 路径归一化（容忍填错）：
 
 - `/anthropic/messages` ≡ `/anthropic/v1/messages`
+- `/anthropic/messages/count_tokens` ≡ `/anthropic/v1/messages/count_tokens`
+- `/anthropic/models` ≡ `/anthropic/v1/models`
 - `/openai/chat/completions` ≡ `/openai/v1/chat/completions`
+- `/openai/responses` ≡ `/openai/v1/responses`
 - 连续 `/v1/v1/` 合并为 `/v1/`
 
 ## 4. 功能需求
 
 ### FR-01 双协议入口
 
-- OpenAI：`POST /openai/v1/chat/completions`、`GET /openai/v1/models`
-- Anthropic：`POST /anthropic/v1/messages`、`GET /anthropic/v1/models`
+- OpenAI：`POST /openai/v1/chat/completions`、`POST /openai/v1/responses`、`GET /openai/v1/models`
+- Anthropic：`POST /anthropic/v1/messages`、`POST /anthropic/v1/messages/count_tokens`、`GET /anthropic/v1/models`
 - 两个协议的鉴权头都接受：`Authorization: Bearer sk-xxx`、`x-api-key: sk-xxx`
 - 模型列表按协议返回可见模型，并可附带可选的元数据（上下文窗口、最大输出、能力标签）；未配置时不输出扩展字段
 - 流式（`stream=true`）逐块转发，不缓冲整条响应

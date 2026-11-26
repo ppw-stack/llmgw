@@ -167,6 +167,19 @@ func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *admi
 		}
 		return
 	}
+	if rawID == "test" {
+		s.adminTestInstanceDraft(w, r)
+		return
+	}
+	if strings.HasSuffix(rawID, "/test") {
+		instanceID, ok := parseID(strings.TrimSuffix(rawID, "/test"))
+		if !ok {
+			writeAdminError(w, http.StatusBadRequest, "invalid instance id")
+			return
+		}
+		s.adminTestSavedInstance(w, r, instanceID)
+		return
+	}
 	instanceID, ok := parseID(rawID)
 	if !ok {
 		writeAdminError(w, http.StatusBadRequest, "invalid instance id")

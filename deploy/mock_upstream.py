@@ -40,6 +40,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"ok")
+        elif self.path.endswith("/models"):
+            self.json_response({
+                "object": "list",
+                "data": [
+                    {"id": "mock-gpt", "object": "model"},
+                    {"id": "mock-claude", "object": "model"},
+                ],
+            })
         else:
             self.send_error(404)
 
@@ -86,8 +94,12 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
 
-        if self.path.endswith("/v1/messages"):
+        if self.path.endswith("/v1/messages/count_tokens"):
+            self.json_response({"input_tokens": 17})
+        elif self.path.endswith("/v1/messages"):
             self.anthropic(model, stream)
+        elif self.path.endswith("/responses"):
+            self.openai_responses(model, stream)
         elif self.path.endswith("/chat/completions"):
             self.openai(model, stream)
         else:
@@ -132,6 +144,47 @@ class Handler(BaseHTTPRequestHandler):
             self.write_sse("", event)
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+
+    def openai_responses(self, model, stream):
+        if not stream:
+            payload = {
+                "id": "resp_mock",
+                "object": "response",
+                "model": model,
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": OPENAI_TEXT}],
+                }],
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 4,
+                    "input_tokens_details": {"cached_tokens": 3},
+                },
+            }
+            return self.json_response(payload)
+
+        self.start_sse()
+        self.write_sse("response.created", {
+            "type": "response.created",
+            "response": {"id": "resp_mock", "model": model},
+        })
+        self.write_sse("response.output_text.delta", {
+            "type": "response.output_text.delta",
+            "delta": OPENAI_TEXT,
+        })
+        self.write_sse("response.completed", {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_mock",
+                "model": model,
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 4,
+                    "input_tokens_details": {"cached_tokens": 3},
+                },
+            },
+        })
 
     # ---- Anthropic ----
 

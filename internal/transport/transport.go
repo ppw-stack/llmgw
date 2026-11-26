@@ -61,6 +61,9 @@ type Forwarder struct {
 // with allow_private_upstream still reach their local mock.
 func (f *Forwarder) SetBlockPrivate(block bool) { f.blockPrivate.Store(block) }
 
+// BlockPrivate reports whether private/loopback upstream addresses are blocked.
+func (f *Forwarder) BlockPrivate() bool { return f.blockPrivate.Load() }
+
 // allowPrivateKey marks one outgoing request as allowed to reach a private
 // address. It is set only for targets whose instance opted in.
 type allowPrivateKey struct{}
@@ -136,8 +139,17 @@ func (f *Forwarder) dialContext(ctx context.Context, network, addr string) (net.
 	return nil, fmt.Errorf("upstream host %q resolves only to private or reserved addresses", host)
 }
 
+// Endpoint kinds select which upstream path a data-plane request targets.
+// Empty keeps the protocol default (/chat/completions or /v1/messages).
+const (
+	EndpointDefault              = ""
+	EndpointOpenAIResponses      = "responses"
+	EndpointAnthropicCountTokens = "count_tokens"
+)
+
 type Request struct {
 	Protocol  string
+	Endpoint  string
 	Meta      ingress.Meta
 	Targets   []router.Target
 	APIKeyID  int64
@@ -212,14 +224,18 @@ func sessionHeaderValue(r *http.Request, in Request, target router.Target) strin
 // conversationPrefix fingerprints the part of a request that identifies a
 // conversation: its system prompt and first user message. Later turns repeat
 // that prefix, which keeps the derived session stable, while a different
-// conversation starts from a different prefix.
+// conversation starts from a different prefix. Supports both Chat Completions /
+// Anthropic Messages (`system` + `messages`) and OpenAI Responses API
+// (`instructions` + `input`).
 func conversationPrefix(body []byte) string {
 	var payload struct {
-		System   json.RawMessage `json:"system"`
-		Messages []struct {
+		System       json.RawMessage `json:"system"`
+		Instructions json.RawMessage `json:"instructions"`
+		Messages     []struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
+		Input json.RawMessage `json:"input"`
 	}
 	if len(body) == 0 {
 		return ""
@@ -231,19 +247,46 @@ func conversationPrefix(body []byte) string {
 	if len(payload.System) > 0 {
 		h.Write(payload.System)
 	}
-	// Every system prompt the client sends, whichever shape it uses: the
-	// top-level field above for Anthropic, a message here for OpenAI.
-	for _, m := range payload.Messages {
-		if m.Role == "system" {
-			h.Write(m.Content)
-		}
+	if len(payload.Instructions) > 0 {
+		h.Write(payload.Instructions)
 	}
-	// Then the first user turn, which is where two conversations sharing a
-	// system prompt diverge.
-	for _, m := range payload.Messages {
-		if m.Role == "user" {
-			h.Write(m.Content)
-			break
+	if len(payload.Messages) > 0 {
+		// Every system prompt the client sends, whichever shape it uses: the
+		// top-level field above for Anthropic, a message here for OpenAI.
+		for _, m := range payload.Messages {
+			if m.Role == "system" || m.Role == "developer" {
+				h.Write(m.Content)
+			}
+		}
+		// Then the first user turn, which is where two conversations sharing a
+		// system prompt diverge.
+		for _, m := range payload.Messages {
+			if m.Role == "user" {
+				h.Write(m.Content)
+				break
+			}
+		}
+	} else if len(payload.Input) > 0 {
+		// OpenAI Responses API accepts input as either a plain string or an
+		// array of message/item objects.
+		var items []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(payload.Input, &items); err == nil {
+			for _, m := range items {
+				if m.Role == "system" || m.Role == "developer" {
+					h.Write(m.Content)
+				}
+			}
+			for _, m := range items {
+				if m.Role == "user" {
+					h.Write(m.Content)
+					break
+				}
+			}
+		} else {
+			h.Write(payload.Input)
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -334,17 +377,18 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		return attemptOutcome{handled: true}
 	}
 
-	// OpenAI streaming does not report usage unless asked to. Inject the flag,
-	// and remember so a rejecting upstream can be retried without it.
+	// OpenAI Chat Completions streaming does not report usage unless asked to.
+	// Responses API always reports usage in response.completed and rejects
+	// stream_options, so never inject it there.
 	injected := false
-	if in.Protocol == config.ProtocolOpenAI && in.Meta.Stream {
+	if in.Protocol == config.ProtocolOpenAI && in.Endpoint == EndpointDefault && in.Meta.Stream {
 		if b, err := sjson.SetBytes(body, "stream_options.include_usage", true); err == nil {
 			body = b
 			injected = true
 		}
 	}
 
-	upstreamURL := upstreamURL(target)
+	upstreamURL := upstreamURL(target, in.Endpoint)
 
 	send := func(payload []byte) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
@@ -441,7 +485,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			return attemptOutcome{handled: true}
 		}
 		acc.observeBody(in.Protocol, raw)
-		if !acc.seen && resp.StatusCode < 300 {
+		if !acc.seen && resp.StatusCode < 300 && in.Endpoint != EndpointAnthropicCountTokens {
 			acc.prompt = estimateTokens(len(body))
 			acc.completion = estimateTokens(len(raw))
 			acc.estimated = true
@@ -582,7 +626,13 @@ func (f *Forwarder) record(in Request, target router.Target, status int, start t
 	}
 }
 
-func upstreamURL(t router.Target) string {
+func upstreamURL(t router.Target, endpoint string) string {
+	switch endpoint {
+	case EndpointOpenAIResponses:
+		return t.BaseURL + "/responses"
+	case EndpointAnthropicCountTokens:
+		return t.BaseURL + "/v1/messages/count_tokens"
+	}
 	switch t.Protocol {
 	case config.ProtocolAnthropic:
 		return t.BaseURL + "/v1/messages"

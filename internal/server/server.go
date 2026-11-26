@@ -196,10 +196,16 @@ func (s *Server) adminSurfaceOpen() bool {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/openai/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		s.handleChat(w, r, config.ProtocolOpenAI)
+		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointDefault)
+	})
+	mux.HandleFunc("/openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		s.handleChat(w, r, config.ProtocolOpenAI, transport.EndpointOpenAIResponses)
 	})
 	mux.HandleFunc("/anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.handleChat(w, r, config.ProtocolAnthropic)
+		s.handleChat(w, r, config.ProtocolAnthropic, transport.EndpointDefault)
+	})
+	mux.HandleFunc("/anthropic/v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) {
+		s.handleChat(w, r, config.ProtocolAnthropic, transport.EndpointAnthropicCountTokens)
 	})
 	mux.HandleFunc("/openai/v1/models", s.handleModels)
 	mux.HandleFunc("/anthropic/v1/models", s.handleAnthropicModels)
@@ -398,8 +404,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 <p>Web 控制台未构建。运行 <code>make web</code> 后重新编译。</p>
 <ul>
   <li><code>POST /openai/v1/chat/completions</code></li>
+  <li><code>POST /openai/v1/responses</code></li>
   <li><code>GET  /openai/v1/models</code></li>
   <li><code>POST /anthropic/v1/messages</code></li>
+  <li><code>POST /anthropic/v1/messages/count_tokens</code></li>
+  <li><code>GET  /anthropic/v1/models</code></li>
   <li><code>GET  /admin/api/keys</code>（需 admin_token）</li>
 `+metricsLine+`</ul>
 </body></html>`)
@@ -416,7 +425,7 @@ func isDataPlanePath(path string) bool {
 	return false
 }
 
-func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol string) {
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol, endpoint string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		ingress.WriteError(w, protocol, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
@@ -452,6 +461,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 		return
 	}
 
+	if endpoint == transport.EndpointAnthropicCountTokens {
+		meta.Stream = false
+	}
+
 	targets, err := s.router.Resolve(protocol, meta.Model)
 	if err != nil {
 		var nf *router.ModelNotFoundError
@@ -477,6 +490,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol str
 
 	s.forwarder.Forward(w, r, transport.Request{
 		Protocol:  protocol,
+		Endpoint:  endpoint,
 		Meta:      meta,
 		Targets:   targets,
 		APIKeyID:  key.ID,

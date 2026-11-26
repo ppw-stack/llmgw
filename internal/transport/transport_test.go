@@ -135,7 +135,7 @@ func TestPresetUpstreamURLs(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		if got := upstreamURL(tc.target); got != tc.want {
+		if got := upstreamURL(tc.target, EndpointDefault); got != tc.want {
 			t.Fatalf("%s: upstream url = %q, want %q", tc.name, got, tc.want)
 		}
 	}

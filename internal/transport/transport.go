@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pw/llmgw/internal/alert"
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/health"
 	"github.com/pw/llmgw/internal/ingress"
@@ -42,18 +43,59 @@ var maxUpstreamResponse int64 = maxUpstreamResponseDefault
 // several candidates it tries them in priority order and moves on to the next
 // one when the current upstream fails in a retryable way.
 type Forwarder struct {
-	router  *router.Router
-	store   *store.Store
-	log     *slog.Logger
-	client  *http.Client
-	timeout time.Duration
-	breaker *health.Breaker
+	router   *router.Router
+	store    *store.Store
+	log      *slog.Logger
+	client   *http.Client
+	timeout  time.Duration
+	breaker  *health.Breaker
+	notifier *alert.Notifier
 
 	// blockPrivate refuses to dial loopback and private addresses, so a
 	// mistyped or attacker-supplied upstream URL cannot reach the internal
 	// network or a cloud metadata service. An instance marked
 	// allow_private_upstream is exempt.
 	blockPrivate atomic.Bool
+}
+
+// SetAlertNotifier attaches an optional asynchronous webhook notifier.
+func (f *Forwarder) SetAlertNotifier(n *alert.Notifier) { f.notifier = n }
+
+// BreakerStatus returns the live circuit-breaker snapshot of one instance.
+func (f *Forwarder) BreakerStatus(instance string) health.Status {
+	return f.breaker.Status(instance)
+}
+
+// ResetBreaker manually clears the circuit-breaker state of one instance.
+func (f *Forwarder) ResetBreaker(instance string) {
+	f.breaker.Reset(instance)
+}
+
+func (f *Forwarder) recordFailureAndAlert(target router.Target, reason string, status int) {
+	if f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown) && f.notifier != nil {
+		f.notifier.Emit(alert.Event{
+			Type:     alert.EventBreakerOpen,
+			Severity: "warning",
+			Instance: target.Instance,
+			Status:   status,
+			Title:    "上游接入点触发熔断",
+			Message:  fmt.Sprintf("接入点 %s 连续失败达到阈值（原因：%s），已进入 %s 冷却期", target.Instance, reason, target.Cooldown),
+		})
+	}
+}
+
+func (f *Forwarder) notifyAuthError(target router.Target, status int) {
+	if f.notifier == nil {
+		return
+	}
+	f.notifier.Emit(alert.Event{
+		Type:     alert.EventUpstreamAuthError,
+		Severity: "critical",
+		Instance: target.Instance,
+		Status:   status,
+		Title:    "上游接入点鉴权失败",
+		Message:  fmt.Sprintf("接入点 %s 返回 HTTP %d，请检查上游 API Key 是否失效或无权限", target.Instance, status),
+	})
 }
 
 // SetBlockPrivate turns the private-address guard on. Instances that opted in
@@ -377,7 +419,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 			"endpoint", target.Endpoint, "err", netproxy.SanitizeError(lastErr, target.ProxyURL), "class", code)
 		observ.UpstreamErrors.WithLabelValues(target.Instance, code).Inc()
 		f.record(in, target, status, start, 0, usageAcc{estimated: true}, code)
-		f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)
+		f.recordFailureAndAlert(target, code, status)
 		return attemptOutcome{retryable: true, status: status, code: code}
 	}
 	defer resp.Body.Close()
@@ -388,7 +430,7 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponse+1))
 		code := responseCode(resp.StatusCode)
 		f.record(in, target, resp.StatusCode, start, 0, usageAcc{estimated: true}, code)
-		f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)
+		f.recordFailureAndAlert(target, code, resp.StatusCode)
 		return attemptOutcome{
 			retryable: true,
 			status:    resp.StatusCode,
@@ -426,10 +468,15 @@ func (f *Forwarder) attempt(w http.ResponseWriter, r *http.Request, in Request, 
 		f.record(in, target, resp.StatusCode, start, 0, acc, responseCode(resp.StatusCode))
 		if resp.StatusCode < 300 {
 			f.breaker.RecordSuccess(target.Instance)
-		} else if shouldFailover(resp.StatusCode, target.FailoverStatuses) {
-			// The last candidate failed as well: count it so the instance
-			// is skipped for a while instead of failing every request.
-			f.breaker.RecordFailure(target.Instance, target.MaxFails, target.Cooldown)
+		} else {
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				f.notifyAuthError(target, resp.StatusCode)
+			}
+			if shouldFailover(resp.StatusCode, target.FailoverStatuses) {
+				// The last candidate failed as well: count it so the instance
+				// is skipped for a while instead of failing every request.
+				f.recordFailureAndAlert(target, responseCode(resp.StatusCode), resp.StatusCode)
+			}
 		}
 		return attemptOutcome{handled: true}
 	}

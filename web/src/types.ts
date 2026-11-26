@@ -17,6 +17,13 @@ export interface InstanceEndpoint {
   base_url: string;
 }
 
+/** 接入点实时熔断器状态 */
+export interface BreakerStatus {
+  open: boolean;
+  failures: number;
+  cooldown_secs?: number;
+}
+
 /** GET /admin/api/instances 中的单个上游接入点 */
 export interface Instance {
   id: number;
@@ -41,6 +48,8 @@ export interface Instance {
   proxy_url?: string;
   /** 已配置的代理是否包含认证密码 */
   proxy_has_auth?: boolean;
+  /** 实时熔断状态 */
+  breaker?: BreakerStatus;
   max_fails: number;
   cooldown_secs: number;
   timeout_secs: number;
@@ -289,6 +298,14 @@ export interface GatewayKey {
   enabled: boolean;
   /** 完整 Key，仅在管理台列表回显；旧版本创建的 Key 没有该字段 */
   key?: string;
+  /** 单 Key 每分钟限速；0 表示沿用全局 server.key_rpm */
+  rpm_limit: number;
+  /** 单 Key 最大并发；0 表示沿用全局 server.key_max_concurrent */
+  max_concurrent: number;
+  /** 可选过期时间（RFC 3339） */
+  expires_at?: string;
+  /** 可选允许访问的模型名白名单；空数组表示不限制 */
+  allowed_models: string[];
   created_at: string;
   last_used_at?: string;
 }
@@ -300,6 +317,10 @@ export interface CreatedKey {
   key: string;
   prefix: string;
   enabled: boolean;
+  rpm_limit: number;
+  max_concurrent: number;
+  expires_at?: string;
+  allowed_models: string[];
   created_at: string;
 }
 

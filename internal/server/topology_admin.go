@@ -13,6 +13,7 @@ import (
 
 	"github.com/pw/llmgw/internal/config"
 	"github.com/pw/llmgw/internal/discovery"
+	"github.com/pw/llmgw/internal/health"
 	"github.com/pw/llmgw/internal/modelmeta"
 	"github.com/pw/llmgw/internal/netproxy"
 	"github.com/pw/llmgw/internal/preset"
@@ -87,9 +88,11 @@ type instanceView struct {
 	// ProxyURL is the redacted proxy URL safe for display.
 	ProxyURL string `json:"proxy_url,omitempty"`
 	// ProxyHasAuth reports whether the stored proxy URL carries a password.
-	ProxyHasAuth bool   `json:"proxy_has_auth,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ProxyHasAuth bool `json:"proxy_has_auth,omitempty"`
+	// Breaker reports the live circuit-breaker state of this instance.
+	Breaker   *health.Status `json:"breaker,omitempty"`
+	CreatedAt string         `json:"created_at"`
+	UpdatedAt string         `json:"updated_at"`
 }
 
 type endpointView struct {
@@ -182,6 +185,15 @@ func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request, id *admi
 			return
 		}
 		s.adminTestSavedInstance(w, r, instanceID)
+		return
+	}
+	if strings.HasSuffix(rawID, "/reset-breaker") {
+		instanceID, ok := parseID(strings.TrimSuffix(rawID, "/reset-breaker"))
+		if !ok {
+			writeAdminError(w, http.StatusBadRequest, "invalid instance id")
+			return
+		}
+		s.adminResetInstanceBreaker(w, r, id, instanceID)
 		return
 	}
 	instanceID, ok := parseID(rawID)
@@ -428,7 +440,32 @@ func (s *Server) instanceView(r *http.Request, rec store.InstanceRecord) instanc
 			}
 		}
 	}
+	if s.forwarder != nil {
+		st := s.forwarder.BreakerStatus(rec.Name)
+		view.Breaker = &st
+	}
 	return view
+}
+
+func (s *Server) adminResetInstanceBreaker(w http.ResponseWriter, r *http.Request, id *adminIdentity, instanceID int64) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rec, err := s.findInstanceRecord(instanceID)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rec == nil {
+		writeAdminError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	if s.forwarder != nil {
+		s.forwarder.ResetBreaker(rec.Name)
+	}
+	s.audit(r, id.Username, "instance.reset_breaker", rec.Name, "success")
+	writeJSON(w, http.StatusOK, s.instanceView(r, *rec))
 }
 
 func (s *Server) createInstance(w http.ResponseWriter, r *http.Request, id *adminIdentity) {

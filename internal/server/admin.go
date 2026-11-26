@@ -95,11 +95,29 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 
 	case http.MethodPost:
 		var in struct {
-			Name string `json:"name"`
+			Name          string   `json:"name"`
+			RPMLimit      int      `json:"rpm_limit"`
+			MaxConcurrent int      `json:"max_concurrent"`
+			ExpiresAt     string   `json:"expires_at"`
+			AllowedModels []string `json:"allowed_models"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil && err.Error() != "EOF" {
 			writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
 			return
+		}
+		if in.RPMLimit < 0 || in.MaxConcurrent < 0 {
+			writeAdminError(w, http.StatusBadRequest, "rpm_limit and max_concurrent must be non-negative")
+			return
+		}
+		var expiresAt *time.Time
+		if raw := strings.TrimSpace(in.ExpiresAt); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				writeAdminError(w, http.StatusBadRequest, "expires_at must be an RFC3339 timestamp")
+				return
+			}
+			u := parsed.UTC()
+			expiresAt = &u
 		}
 		if strings.TrimSpace(in.Name) == "" {
 			in.Name = "default"
@@ -114,7 +132,12 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 			writeAdminError(w, http.StatusInternalServerError, "cannot encrypt key")
 			return
 		}
-		k, err := s.store.CreateKey(in.Name, hash, prefix, encrypted)
+		k, err := s.store.CreateKeyWithPolicy(strings.TrimSpace(in.Name), hash, prefix, encrypted, store.KeyPolicy{
+			RPMLimit:      in.RPMLimit,
+			MaxConcurrent: in.MaxConcurrent,
+			ExpiresAt:     expiresAt,
+			AllowedModels: in.AllowedModels,
+		})
 		if err != nil {
 			writeAdminError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -122,12 +145,16 @@ func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request, id *adminIden
 		s.keys.put(hash, *k)
 		s.audit(r, id.Username, "key.create", k.Prefix, "success")
 		writeJSON(w, http.StatusCreated, map[string]any{
-			"id":         k.ID,
-			"name":       k.Name,
-			"key":        plain,
-			"prefix":     k.Prefix,
-			"enabled":    k.Enabled,
-			"created_at": k.CreatedAt,
+			"id":             k.ID,
+			"name":           k.Name,
+			"key":            plain,
+			"prefix":         k.Prefix,
+			"enabled":        k.Enabled,
+			"rpm_limit":      k.RPMLimit,
+			"max_concurrent": k.MaxConcurrent,
+			"expires_at":     k.ExpiresAt,
+			"allowed_models": k.AllowedModels,
+			"created_at":     k.CreatedAt,
 		})
 
 	default:
@@ -144,17 +171,57 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, id *adminI
 	switch r.Method {
 	case http.MethodPatch:
 		var in struct {
-			Enabled *bool `json:"enabled"`
+			Name          *string   `json:"name"`
+			Enabled       *bool     `json:"enabled"`
+			RPMLimit      *int      `json:"rpm_limit"`
+			MaxConcurrent *int      `json:"max_concurrent"`
+			ExpiresAt     *string   `json:"expires_at"`
+			AllowedModels *[]string `json:"allowed_models"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
 			writeAdminError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
-		if in.Enabled == nil {
-			writeAdminError(w, http.StatusBadRequest, "enabled is required")
+		if in.Name == nil && in.Enabled == nil && in.RPMLimit == nil &&
+			in.MaxConcurrent == nil && in.ExpiresAt == nil && in.AllowedModels == nil {
+			writeAdminError(w, http.StatusBadRequest, "at least one field to update is required")
 			return
 		}
-		if err := s.store.SetKeyEnabled(keyID, *in.Enabled); err != nil {
+		patch := store.KeyPatch{
+			Enabled:       in.Enabled,
+			RPMLimit:      in.RPMLimit,
+			MaxConcurrent: in.MaxConcurrent,
+			AllowedModels: in.AllowedModels,
+		}
+		if in.Name != nil {
+			trimmed := strings.TrimSpace(*in.Name)
+			if trimmed == "" {
+				trimmed = "default"
+			}
+			patch.Name = &trimmed
+		}
+		if in.RPMLimit != nil && *in.RPMLimit < 0 {
+			writeAdminError(w, http.StatusBadRequest, "rpm_limit must be non-negative")
+			return
+		}
+		if in.MaxConcurrent != nil && *in.MaxConcurrent < 0 {
+			writeAdminError(w, http.StatusBadRequest, "max_concurrent must be non-negative")
+			return
+		}
+		if in.ExpiresAt != nil {
+			patch.SetExpiresAt = true
+			if raw := strings.TrimSpace(*in.ExpiresAt); raw != "" {
+				parsed, err := time.Parse(time.RFC3339, raw)
+				if err != nil {
+					writeAdminError(w, http.StatusBadRequest, "expires_at must be an RFC3339 timestamp")
+					return
+				}
+				u := parsed.UTC()
+				patch.ExpiresAt = &u
+			}
+		}
+		updated, err := s.store.UpdateKey(keyID, patch)
+		if err != nil {
 			status := http.StatusInternalServerError
 			if err == store.ErrNotFound {
 				status = http.StatusNotFound
@@ -162,9 +229,9 @@ func (s *Server) adminKeyItem(w http.ResponseWriter, r *http.Request, id *adminI
 			writeAdminError(w, status, err.Error())
 			return
 		}
-		s.keys.setEnabled(keyID, *in.Enabled)
+		s.keys.update(*updated)
 		s.audit(r, id.Username, "key.update", strconv.FormatInt(keyID, 10), "success")
-		writeJSON(w, http.StatusOK, map[string]any{"id": keyID, "enabled": *in.Enabled})
+		writeJSON(w, http.StatusOK, updated)
 
 	case http.MethodDelete:
 		if err := s.store.DeleteKey(keyID); err != nil {

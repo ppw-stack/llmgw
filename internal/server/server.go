@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pw/llmgw/internal/alert"
 	"github.com/pw/llmgw/internal/auth"
 	"github.com/pw/llmgw/internal/clientip"
 	"github.com/pw/llmgw/internal/config"
@@ -51,6 +52,8 @@ type Options struct {
 	// Quota asks the built-in providers about their subscription quota.
 	// Tests replace it to point at a local server.
 	Quota *quota.Service
+	// Alert dispatches optional asynchronous webhook notifications.
+	Alert *alert.Notifier
 }
 
 type Server struct {
@@ -80,6 +83,7 @@ type Server struct {
 	keyLimiter   *keyLimiter
 	loginSem     chan struct{}
 	quota        *quota.Service
+	alert        *alert.Notifier
 }
 
 func New(o Options) (*Server, error) {
@@ -128,6 +132,7 @@ func New(o Options) (*Server, error) {
 		keyLimiter:     newKeyLimiter(o.KeyRPM, o.KeyMaxConcurrent),
 		loginSem:       make(chan struct{}, 4),
 		quota:          quotaService,
+		alert:          o.Alert,
 	}
 	s.SetMetricsToken(o.MetricsToken)
 	// A nil AdminEnabled means the management surface stays open.
@@ -171,6 +176,13 @@ func (s *Server) SetAdminPrefixes(prefixes []netip.Prefix) {
 // dimension.
 func (s *Server) SetKeyLimits(rpm, maxConcurrent int) {
 	s.keyLimiter.setLimits(rpm, maxConcurrent)
+}
+
+// SetAlertWebhook updates the alert webhook URL and cooldown at runtime.
+func (s *Server) SetAlertWebhook(webhookURL string, cooldown time.Duration) {
+	if s.alert != nil {
+		s.alert.SetWebhook(webhookURL, cooldown)
+	}
 }
 
 // SetMetricsToken swaps the token that guards the /metrics endpoint. An
@@ -467,6 +479,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, protocol, en
 	if endpoint == transport.EndpointAnthropicCountTokens {
 		meta.Stream = false
 	}
+	if !key.AllowsModel(meta.Model) {
+		ingress.WriteError(w, protocol, http.StatusForbidden, "permission_error",
+			"gateway key is not allowed to access model "+meta.Model)
+		return
+	}
 
 	targets, err := s.router.ResolveWithOptions(protocol, meta.Model, router.ResolveOptions{
 		SessionKey: ingress.SessionKey(r.Header, key.ID, body),
@@ -536,6 +553,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		Data   []model `json:"data"`
 	}{Object: "list", Data: []model{}}
 	for _, info := range s.router.ModelInfos(config.ProtocolOpenAI) {
+		if !key.AllowsModel(info.Name) {
+			continue
+		}
 		out.Data = append(out.Data, model{
 			ID:              info.Name,
 			Object:          "model",
@@ -587,6 +607,9 @@ func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
 		LastID  string  `json:"last_id,omitempty"`
 	}{Data: []model{}}
 	for _, info := range s.router.ModelInfos(config.ProtocolAnthropic) {
+		if !key.AllowsModel(info.Name) {
+			continue
+		}
 		display := info.Metadata.DisplayName
 		if display == "" {
 			display = info.Name
@@ -629,12 +652,16 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, protocol s
 		ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "gateway key is disabled")
 		return nil, false
 	}
+	if k.IsExpired(time.Now()) {
+		ingress.WriteError(w, protocol, http.StatusUnauthorized, "authentication_error", "gateway key has expired")
+		return nil, false
+	}
 	return &k, true
 }
 
 // reserveKey applies the per-key budget before any expensive work happens.
 func (s *Server) reserveKey(w http.ResponseWriter, r *http.Request, key *store.APIKey, protocol string) (func(), bool) {
-	release, ok, retry := s.keyLimiter.acquire(key.ID)
+	release, ok, retry := s.keyLimiter.acquireWithLimits(key.ID, key.RPMLimit, key.MaxConcurrent)
 	if !ok {
 		if retry > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))

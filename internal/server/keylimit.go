@@ -44,10 +44,14 @@ func (l *keyLimiter) setLimits(rpm, maxConcurrent int) {
 	l.max = maxConcurrent
 }
 
-// acquire reserves one request slot. It returns a release function that must be
-// called when the request finishes, or ok=false with the delay to advertise in
-// Retry-After.
+// acquire reserves one request slot using the global budget.
 func (l *keyLimiter) acquire(id int64) (release func(), ok bool, retry time.Duration) {
+	return l.acquireWithLimits(id, 0, 0)
+}
+
+// acquireWithLimits reserves one request slot. Positive per-key overrides take
+// precedence over the global server.key_rpm and server.key_max_concurrent.
+func (l *keyLimiter) acquireWithLimits(id int64, rpmOverride, maxOverride int) (release func(), ok bool, retry time.Duration) {
 	if l == nil {
 		return func() {}, true, 0
 	}
@@ -55,9 +59,18 @@ func (l *keyLimiter) acquire(id int64) (release func(), ok bool, retry time.Dura
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	rpm := l.rpm
+	if rpmOverride > 0 {
+		rpm = rpmOverride
+	}
+	maxConcurrent := l.max
+	if maxOverride > 0 {
+		maxConcurrent = maxOverride
+	}
+
 	// Both dimensions off: nothing to reserve. The check lives under the
 	// lock so a concurrent setLimits is never read half-applied.
-	if l.rpm <= 0 && l.max <= 0 {
+	if rpm <= 0 && maxConcurrent <= 0 {
 		return func() {}, true, 0
 	}
 
@@ -69,14 +82,14 @@ func (l *keyLimiter) acquire(id int64) (release func(), ok bool, retry time.Dura
 		st = &keyState{windowStart: now}
 		l.states[id] = st
 	}
-	if l.rpm > 0 && now.Sub(st.windowStart) >= time.Minute {
+	if rpm > 0 && now.Sub(st.windowStart) >= time.Minute {
 		st.windowStart = now
 		st.count = 0
 	}
-	if l.rpm > 0 && st.count >= l.rpm {
+	if rpm > 0 && st.count >= rpm {
 		return nil, false, time.Until(st.windowStart.Add(time.Minute))
 	}
-	if l.max > 0 && st.inflight >= l.max {
+	if maxConcurrent > 0 && st.inflight >= maxConcurrent {
 		return nil, false, time.Second
 	}
 	st.count++

@@ -838,6 +838,18 @@ async function remove(inst: Instance) {
   }
 }
 
+/** 手动重置接入点的熔断冷却状态。 */
+async function resetBreaker(inst: Instance) {
+  error.value = '';
+  try {
+    await api<Instance>(`/instances/${inst.id}/reset-breaker`, { method: 'POST' });
+    await load();
+    showToast(`已重置「${inst.name}」的熔断状态`);
+  } catch (e) {
+    error.value = errorMessage(e);
+  }
+}
+
 /** 刷新列表与额度。 */
 async function refresh() {
   await load();
@@ -926,9 +938,24 @@ onUnmounted(() => {
           </span>
           <span v-if="inst.preset_name" class="badge">{{ inst.preset_name }}</span>
           <span v-if="inst.allow_private_upstream" class="badge danger">允许内网</span>
+          <span v-if="inst.breaker?.open" class="badge danger">
+            熔断冷却中（剩余 {{ inst.breaker.cooldown_secs ?? 0 }}s）
+          </span>
+          <span v-else-if="(inst.breaker?.failures ?? 0) > 0" class="badge accent">
+            连续失败 {{ inst.breaker?.failures }} 次
+          </span>
           <code v-if="inst.key_hint" class="small">{{ inst.key_hint }}</code>
         </div>
         <div class="row">
+          <button
+            v-if="inst.breaker?.open || (inst.breaker?.failures ?? 0) > 0"
+            type="button"
+            class="ghost sm"
+            @click="resetBreaker(inst)"
+          >
+            <AppIcon name="refresh" :size="13" />
+            <span>重置熔断</span>
+          </button>
           <a
             v-if="inst.docs_url"
             class="btn ghost sm"
